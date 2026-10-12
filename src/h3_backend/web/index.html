@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>H3 · Bancada de filme</title>
+  <link rel="stylesheet" href="/ui/app.css">
+  <script type="module" src="/ui/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#viewer">Ir para o vídeo</a>
+  <header class="masthead">
+    <a class="wordmark" href="/" aria-label="H3 início">H<span>3</span><small>BANCADA DE FILME</small></a>
+    <p>Uma cena.<br>Um bloco de cada vez.</p>
+    <button id="refresh" type="button">Atualizar biblioteca</button>
+  </header>
+  <main>
+    <p id="notice" class="notice" role="status" aria-live="polite">Carregando biblioteca e configuração…</p>
+    <div class="workbench">
+      <aside class="library" aria-labelledby="library-title">
+        <div class="section-head"><h2 id="library-title">Biblioteca</h2><span id="library-count" class="mono">—</span></div>
+        <p class="caption">Blocos recentes · selecione para assistir</p>
+        <div id="library" class="clip-list" aria-busy="true"></div>
+        <nav class="pagination" aria-label="Páginas da biblioteca">
+          <button id="previous" type="button" disabled>Anterior</button>
+          <span id="page-label" class="mono"></span>
+          <button id="next" type="button" disabled>Próxima</button>
+        </nav>
+      </aside>
+      <section id="viewer" class="viewer" aria-labelledby="viewer-title" tabindex="-1">
+        <div class="section-head"><h1 id="viewer-title">Sala de revisão</h1><span id="run-state" class="badge">Nenhum bloco</span></div>
+        <div class="screen">
+          <video id="player" controls playsinline preload="metadata" hidden aria-label="Vídeo do bloco selecionado"></video>
+          <div id="screen-message" class="screen-message"><span class="frame-mark">[ &nbsp; H3 &nbsp; ]</span><p>Selecione um bloco para assistir<br>ou prepare uma nova cena.</p></div>
+        </div>
+        <div class="review-bar">
+          <p id="review-hint">A revisão é uma decisão sua.</p>
+          <div class="actions"><button id="accept" type="button" disabled>Aceitar bloco</button><button id="reject" type="button" disabled>Rejeitar bloco</button></div>
+        </div>
+        <section class="sequence" aria-labelledby="sequence-title">
+          <div class="section-head"><h2 id="sequence-title">Linha de continuidade</h2><span class="caption">origem → seleção</span></div>
+          <ol id="sequence" class="film-strip"></ol>
+          <p id="sequence-message" class="caption">A cadeia segue os pais do bloco, sem misturar ramificações.</p>
+        </section>
+        <details class="metadata"><summary>Ficha do bloco</summary><dl id="metadata"></dl><p id="run-prompt" class="prompt-copy"></p></details>
+      </section>
+      <aside class="composer" aria-labelledby="composer-title">
+        <div class="section-head"><h2 id="composer-title">Preparar bloco</h2><span class="mono">2,3 s</span></div>
+        <p class="caption">480 × 864 · 24 fps · parâmetros preservados</p>
+        <div class="mode-switch" role="group" aria-label="Tipo de bloco"><button id="new-mode" type="button" aria-pressed="true">Nova cena</button><button id="continue-mode" type="button" aria-pressed="false" disabled>Continuar</button></div>
+        <p id="parent-label" class="parent-label">Começar pela referência original.</p>
+        <form id="create-form">
+          <fieldset id="create-fields" disabled>
+            <label for="reference">Imagem de referência</label>
+            <select id="reference" name="image"><option value="dance_reference.png">dance_reference.png</option></select>
+            <label for="prompt">Instrução da cena</label>
+            <textarea id="prompt" name="prompt" rows="9" maxlength="12000" required aria-describedby="prompt-hint"></textarea>
+            <p id="prompt-hint" class="caption">Descreva a ação e o que deve permanecer entre blocos.</p>
+            <div class="field-pair"><div><label for="seed">Seed</label><input id="seed" name="seed" type="text" inputmode="numeric" pattern="[0-9]+" value="2026101205" required aria-describedby="seed-hint"></div><div><label for="duration">Duração (s)</label><input id="duration" value="2.3" readonly aria-readonly="true"></div></div>
+            <p id="seed-hint" class="caption">Inteiro de 0 a 9007199254740991. Não muda automaticamente.</p>
+            <p id="continuation-note" class="caption" hidden>Continuidade: últimos 3 s e áudio do pai aceito.</p>
+            <button id="generate" class="primary" type="submit">Gerar novo bloco</button>
+          </fieldset>
+        </form>
+        <p class="operation-note">Gerar envia uma única solicitação. Fechar esta página não cancela o trabalho. Não há repetição automática.</p>
+        <p id="operation" class="operation" role="status" aria-live="polite"></p>
+      </aside>
+    </div>
+  </main>
+  <footer><span>H3 / estúdio local</span><span id="profile">Perfil: aguardando configuração</span><span>Imagem → movimento → revisão → continuidade</span></footer>
+  <noscript>Ative JavaScript para consultar os blocos e usar os controles. Nenhuma geração é iniciada sem sua ação.</noscript>
+</body>
+</html>
