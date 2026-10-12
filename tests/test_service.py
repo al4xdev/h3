@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from dataclasses import replace
 
 import pytest
 
@@ -81,6 +82,7 @@ class Comfy:
         self.submitted = []
         self.uploads = []
         self.gate = None
+        self.submitted_event = None
 
     async def ensure_idle(self):
         pass
@@ -100,6 +102,8 @@ class Comfy:
     async def execute(self, workflow, *, prompt_id, on_submitted, on_progress, **kwargs):
         self.submitted.append(prompt_id)
         await on_submitted(prompt_id)
+        if self.submitted_event is not None:
+            self.submitted_event.set()
         await on_progress({"value": 1, "max": 2, "prompt_id": prompt_id})
         if self.gate:
             await self.gate.wait()
@@ -315,8 +319,12 @@ async def test_low_memory_preflight_and_running_guard(tmp_path, operation):
         await create()
     assert len(service.comfy.submitted) == submitted
     available[0] = 8 * 1024**3
+    service.settings = replace(service.settings, memory_check_interval=0.01)
     service.comfy.gate = asyncio.Event()
+    service.comfy.submitted_event = asyncio.Event()
     run = await create()
+    # Test the running-inference guard separately from the earlier preparation guard.
+    await asyncio.wait_for(service.comfy.submitted_event.wait(), timeout=2)
     available[0] = 0
     with pytest.raises(asyncio.CancelledError):
         await service._task

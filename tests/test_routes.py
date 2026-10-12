@@ -48,3 +48,9 @@ async def test_explicit_routes_and_aliases_are_isolated(tmp_path):
             assert operations[-1] == "v2v"
             assert (await client.post(url, json={"seed": 8, "image": "oops.png"})).status_code == 422
     assert operations == ["i2v", "i2v", "v2v", "v2v"]
+    assert [type(pipe).__name__ for pipe in service.pipes] == [
+        "I2VPipe", "I2VPipe", "V2VPipe", "V2VPipe"
+    ]
+    assert len({id(pipe) for pipe in service.pipes}) == 4
+    assert all(pipe.state.save_output for pipe in service.pipes)
+    assert [pipe.state.workflow_config.operation for pipe in service.pipes] == operations

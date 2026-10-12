@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import math
 import os
@@ -12,10 +11,9 @@ import tempfile
 from fractions import Fraction
 from pathlib import Path
 from time import monotonic
-from uuid import uuid4
 
 from .comfy import ComfyClient, ExecutionInterrupted
-from .models import CONTINUATION_PROMPT, ContinueRequest, Run, RunRequest, Settings
+from .models import ContinueRequest, Run, RunRequest, Settings
 from .store import Store, contained, timestamp
 
 
@@ -76,11 +74,7 @@ def publish(source: Path, destination: Path) -> None:
 
 
 class RunService:
-    """Explicit operation pipelines sharing one admission lock and execution slot.
-
-    Keep the worker boundaries separate so i2v cannot accidentally prepare parent
-    media or select continuation routing; only the dispatcher knows graph modes.
-    """
+    """One admission lock and worker lifecycle, independent of pipeline business steps."""
 
     def __init__(
         self,
@@ -177,228 +171,54 @@ class RunService:
             )
 
     async def create(self, request: RunRequest) -> Run:
-        return await self._admit_i2v(request)
+        from .routes.i2v import I2VPipe
+        from .workflow import I2V_CONFIG
+
+        return await self.submit(
+            I2VPipe(self).have(request).with_workflow(I2V_CONFIG).save_chunk()
+        )
 
     async def continue_run(self, parent_id: str, request: ContinueRequest) -> Run:
-        return await self._admit_v2v(parent_id, request)
+        from .routes.v2v import V2VPipe
+        from .workflow import V2V_CONFIG
 
-    async def _admit_i2v(self, request: RunRequest) -> Run:
+        return await self.submit(
+            V2VPipe(self).have(request).from_parent(parent_id)
+            .with_last_frame().with_original_identity().with_motion_tail()
+            .with_workflow(V2V_CONFIG).save_chunk()
+        )
+
+    async def submit(self, pipe) -> Run:
         async with self._lock:
+            if pipe.dispatcher is not self:
+                raise ValueError("Pipeline belongs to another dispatcher")
+            if pipe._sealed or pipe._submitting:
+                raise Conflict("Pipeline may only be submitted once")
             if self._closing or self._active is not None:
                 raise Conflict("Only one backend job may be active")
             if self.memory_available() < self.settings.minimum_available_bytes:
                 raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
-            self.frames_for_duration(request.duration_seconds)
-            if request.prompt is not None and not request.prompt.strip():
-                raise ValueError("Prompt cannot be whitespace")
-            references = []
-            sources = [request.image, *request.images]
-            assets = contained(self.settings.project_root, "assets", must_exist=True)
-            paths = [contained(assets, source, must_exist=True) for source in sources]
-            # Compare resolved paths so lexical and symlink aliases cannot consume extra slots.
-            if len(set(paths)) != len(paths):
-                raise ValueError("Duplicate identity sources are ambiguous")
-            for source, path in zip(sources, paths, strict=True):
-                if not path.is_file():
-                    raise ValueError("Reference must be a regular image file")
-                info = await asyncio.to_thread(self.media.verify_image, path)
-                digest = await asyncio.to_thread(
-                    lambda p=path: hashlib.sha256(p.read_bytes()).hexdigest()
+            pipe._submitting = True
+            try:
+                run = await pipe._admit()
+            finally:
+                pipe._submitting = False
+            # Shutdown must not wait on external admission I/O, so recheck after that await.
+            if self._closing:
+                self.store.update(
+                    run.id,
+                    state="interrupted",
+                    error="Backend stopped before execution completed",
                 )
-                references.append(
-                    {
-                        "type": "image", "role": "identity", "source": source,
-                        "source_root": "assets", "sha256": digest, "input_info": info,
-                    }
-                )
-            await self.comfy.ensure_idle()
-            self.builder.validate_object_info(await self.comfy.object_info(), operation="i2v")
-            now = timestamp()
-            run = self.store.create(
-                Run(
-                    id=str(uuid4()), created_at=now, updated_at=now,
-                    seed=request.seed, prompt=request.prompt,
-                    duration_seconds=request.duration_seconds,
-                    workflow_hash=self.builder.hash_for("i2v"),
-                    references=references,
-                    input_info={
-                        "mode": "normal", "operation": "i2v", "continuation": None,
-                        "workflow_provenance": self.builder.provenance("i2v"),
-                        "comfy_extra_pnginfo": getattr(self.builder, "extra_pnginfo", {}),
-                    },
-                )
-            )
+                raise Conflict("Backend stopped during admission; no job was submitted")
             self._active = run.id
-            self._task = asyncio.create_task(self._execute_i2v(run), name=f"h3-{run.id}")
+            # The returned model belongs to the caller, not to worker lifecycle bookkeeping.
+            self._task = asyncio.create_task(
+                self._worker(pipe, run.model_copy(deep=True)), name=f"h3-{run.id}"
+            )
             return run
 
-    async def _admit_v2v(self, parent_id: str, request: ContinueRequest) -> Run:
-        async with self._lock:
-            if self._closing or self._active is not None:
-                raise Conflict("Only one backend job may be active")
-            if self.memory_available() < self.settings.minimum_available_bytes:
-                raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
-            self.frames_for_duration(request.duration_seconds)
-            if request.prompt is not None and not request.prompt.strip():
-                raise ValueError("Prompt cannot be whitespace")
-            parent = self.store.get(parent_id)
-            if parent.state != "accepted":
-                raise Conflict("Continuation requires an explicitly accepted parent")
-            references = []
-            identities = []
-            for reference in parent.references:
-                if reference.get("type") != "image":
-                    continue
-                role = reference.get("role")
-                if role == "initial_frame":
-                    continue
-                if role not in (None, "identity"):
-                    raise ValueError("Ambiguous parent image role")
-                if reference.get("source_root", "assets") != "assets":
-                    raise ValueError("Identity must originate inside assets")
-                # Legacy role-less sources must still resolve strictly inside assets below.
-                identities.append(reference)
-            sources = [reference["source"] for reference in identities]
-            if not sources:
-                raise ValueError("At least one identity image is required")
-            if len(sources) > 8:
-                raise ValueError("Continuation permits at most eight identity images")
-            assets = contained(self.settings.project_root, "assets", must_exist=True)
-            paths = [contained(assets, source, must_exist=True) for source in sources]
-            # Compare resolved paths so lexical and symlink aliases cannot consume extra slots.
-            if len(set(paths)) != len(paths):
-                raise ValueError("Duplicate identity sources are ambiguous")
-            for source, path in zip(sources, paths, strict=True):
-                if not path.is_file():
-                    raise ValueError("Reference must be a regular image file")
-                info = await asyncio.to_thread(self.media.verify_image, path)
-                digest = await asyncio.to_thread(
-                    lambda p=path: hashlib.sha256(p.read_bytes()).hexdigest()
-                )
-                original = next(r for r in identities if r.get("source") == source)
-                if original["sha256"] != digest:
-                    raise ValueError("Original identity image changed since parent generation")
-                references.append(
-                    {
-                        "type": "image", "role": "identity", "source": source,
-                        "source_root": "assets", "sha256": digest, "input_info": info,
-                    }
-                )
-            await self.comfy.ensure_idle()
-            self.builder.validate_object_info(await self.comfy.object_info(), operation="v2v")
-            now = timestamp()
-            run = self.store.create(
-                Run(
-                    id=str(uuid4()), created_at=now, updated_at=now,
-                    seed=request.seed,
-                    prompt=request.prompt if request.prompt is not None else CONTINUATION_PROMPT,
-                    duration_seconds=request.duration_seconds,
-                    workflow_hash=self.builder.hash_for("v2v"),
-                    parent_id=parent_id,
-                    references=references,
-                    input_info={
-                        "mode": "continuation", "operation": "v2v",
-                        "continuation": request.model_dump(),
-                        "workflow_provenance": self.builder.provenance("v2v"),
-                        "comfy_extra_pnginfo": getattr(self.builder, "extra_pnginfo", {}),
-                    },
-                )
-            )
-            self._active = run.id
-            self._task = asyncio.create_task(self._execute_v2v(run, request), name=f"h3-{run.id}")
-            return run
-
-    async def _prepare_i2v(self, run: Run) -> list[dict]:
-        references = []
-        for index, reference in enumerate(run.references):
-            assets = contained(self.settings.project_root, "assets", must_exist=True)
-            source = contained(assets, reference["source"], must_exist=True)
-            digest = await asyncio.to_thread(
-                lambda p=source: hashlib.sha256(p.read_bytes()).hexdigest()
-            )
-            if digest != reference["sha256"]:
-                raise ValueError("Identity image changed after admission")
-            suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(
-                reference["input_info"]["format"].upper(), source.suffix
-            )
-            upload = await self.comfy.upload(source, f"h3_{run.id}_identity_{index}{suffix}")
-            references.append(
-                {
-                    **reference,
-                    "filename": upload["filename"],
-                    "upload": upload,
-                    "has_audio": False,
-                }
-            )
-        return references
-
-    async def _prepare_v2v(self, run: Run, request: ContinueRequest) -> list[dict]:
-        references = []
-        frame = contained(self.store.directory(run.id), "initial_frame.png")
-        frame_info = await self.media.prepare_last_frame(
-            self.video_path(run.parent_id), frame
-        )
-        if Path(frame_info["path"]).resolve() != frame.resolve() or not frame.is_file():
-            raise ValueError("Last frame preparation returned an unexpected path")
-        upload = await self.comfy.upload(frame, f"h3_{run.id}_initial_frame.png")
-        references.append({
-            "type": "image", "role": "initial_frame",
-            "source": f"runs/{run.id}/initial_frame.png", "source_root": "runs",
-            "parent_id": run.parent_id,
-            "sha256": await asyncio.to_thread(
-                lambda: hashlib.sha256(frame.read_bytes()).hexdigest()
-            ),
-            "filename": upload["filename"], "upload": upload,
-            "has_audio": False, "input_info": frame_info,
-        })
-        for index, reference in enumerate(run.references):
-            assets = contained(self.settings.project_root, "assets", must_exist=True)
-            source = contained(assets, reference["source"], must_exist=True)
-            digest = await asyncio.to_thread(
-                lambda p=source: hashlib.sha256(p.read_bytes()).hexdigest()
-            )
-            if digest != reference["sha256"]:
-                raise ValueError("Identity image changed after admission")
-            suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(
-                reference["input_info"]["format"].upper(), source.suffix
-            )
-            upload = await self.comfy.upload(source, f"h3_{run.id}_identity_{index}{suffix}")
-            references.append(
-                {
-                    **reference,
-                    "filename": upload["filename"],
-                    "upload": upload,
-                    "has_audio": False,
-                }
-            )
-        tail = contained(self.store.directory(run.id), "reference_tail.mp4")
-        tail_info = await self.media.prepare_tail(
-            self.video_path(run.parent_id),
-            tail,
-            request.reference_tail_seconds,
-            include_audio=request.include_audio,
-            reference_frame_limit=self.frames_for_duration(run.duration_seconds),
-        )
-        if Path(tail_info["path"]).resolve() != tail.resolve() or not tail.is_file():
-            raise ValueError("Tail preparation returned an unexpected path")
-        upload = await self.comfy.upload(tail, f"h3_{run.id}_tail.mp4")
-        references.append(
-            {
-                "type": "video", "role": "motion_video",
-                "source": f"runs/{run.id}/reference_tail.mp4",
-                "source_root": "runs", "parent_id": run.parent_id,
-                "sha256": await asyncio.to_thread(
-                    lambda: hashlib.sha256(tail.read_bytes()).hexdigest()
-                ),
-                "filename": upload["filename"],
-                "upload": upload,
-                "has_audio": bool(request.include_audio and tail_info["has_audio"]),
-                "input_info": tail_info,
-            }
-        )
-        return references
-
-    async def _execute_i2v(self, run: Run):
+    async def _worker(self, pipe, run: Run):
         start = monotonic()
         stop = asyncio.Event()
         telemetry_task = None
@@ -407,83 +227,9 @@ class RunService:
         owner = asyncio.current_task()
         try:
             self.store.update(run.id, state="running")
-            references = await self._prepare_i2v(run)
-            self.store.update(run.id, references=references)
-            workflow = self.builder.build(
-                operation="i2v",
-                prompt=run.prompt,
-                seed=run.seed,
-                duration_seconds=run.duration_seconds,
-                references=references,
-                filename_prefix=f"h3_backend/{run.id}/chunk",
-            )
-            workflow_path = self.store.artifact_json(run.id, "workflow_api.json", workflow)
-            # Hash persisted bytes: Store serialization is the execution artifact contract.
-            workflow_sha256 = await asyncio.to_thread(
-                lambda: hashlib.sha256(workflow_path.read_bytes()).hexdigest()
-            )
-            self.store.artifact_markdown(run.id, run.prompt)
-            current = self.store.get(run.id)
-            self.store.update(
-                run.id,
-                input_info={
-                    **current.input_info,
-                    "workflow_api_sha256": workflow_sha256,
-                    "workflow_api": f"runs/{run.id}/workflow_api.json",
-                    "prompt_markdown": f"runs/{run.id}/prompt.md",
-                    "telemetry": f"runs/{run.id}/telemetry.jsonl",
-                    "effective_markdown": run.prompt,
-                    "slot_map": [
-                        {
-                            "tag": f"<Picture {index + 1}>",
-                            "role": ref["role"], "source": ref["source"],
-                            "sha256": ref["sha256"],
-                        }
-                        for index, ref in enumerate(r for r in references if r["type"] == "image")
-                    ] + [
-                        {
-                            "tag": f"<Video {index + 1}>",
-                            "role": ref["role"], "source": ref["source"],
-                            "sha256": ref["sha256"],
-                        }
-                        for index, ref in enumerate(r for r in references if r["type"] == "video")
-                    ],
-                },
-            )
             telemetry_task = asyncio.create_task(self._record_telemetry(run.id, stop))
             guard_task = asyncio.create_task(self._memory_guard(stop, owner, interruption))
-
-            async def submitted(prompt_id):
-                self.store.update(run.id, prompt_id=prompt_id)
-
-            async def progress(data):
-                self.store.update(run.id, progress=data)
-
-            result = await self.comfy.execute(
-                workflow,
-                prompt_id=str(uuid4()),
-                deadline=self.settings.inference_deadline,
-                on_submitted=submitted,
-                on_progress=progress,
-                extra_pnginfo=getattr(self.builder, "extra_pnginfo", {}),
-            )
-            source = output_source(result, self.settings.comfy_root)
-            info = await self.media.probe(source)
-            verify_video(info, self.frames_for_duration(run.duration_seconds))
-            destination = contained(self.store.directory(run.id), "chunk.mp4")
-            await asyncio.to_thread(publish, source, destination)
-            self.store.update(
-                run.id,
-                state="ready_for_review",
-                publication_mode="atomic_copy_from_comfy_output",
-                output={
-                    "path": f"runs/{run.id}/chunk.mp4",
-                    "probe": info,
-                    "source": str(source),
-                    "node": "34",
-                },
-                timings={"total_seconds": monotonic() - start},
-            )
+            await pipe.arun()
         except asyncio.CancelledError:
             self.store.update(run.id, state="interrupted", error=interruption["reason"])
             raise
@@ -509,120 +255,8 @@ class RunService:
                     )
                     telemetry_task.cancel()
                     await asyncio.gather(telemetry_task, return_exceptions=True)
-            self._active = None
-
-    async def _execute_v2v(self, run: Run, request: ContinueRequest):
-        start = monotonic()
-        stop = asyncio.Event()
-        telemetry_task = None
-        guard_task = None
-        interruption = {"reason": "Backend shutdown; own prompt cancellation requested"}
-        owner = asyncio.current_task()
-        try:
-            self.store.update(run.id, state="running")
-            references = await self._prepare_v2v(run, request)
-            self.store.update(run.id, references=references)
-            workflow = self.builder.build(
-                operation="v2v",
-                prompt=run.prompt,
-                seed=run.seed,
-                duration_seconds=run.duration_seconds,
-                references=references,
-                filename_prefix=f"h3_backend/{run.id}/chunk",
-            )
-            workflow_path = self.store.artifact_json(run.id, "workflow_api.json", workflow)
-            # Hash persisted bytes: Store serialization is the execution artifact contract.
-            workflow_sha256 = await asyncio.to_thread(
-                lambda: hashlib.sha256(workflow_path.read_bytes()).hexdigest()
-            )
-            self.store.artifact_markdown(run.id, run.prompt)
-            current = self.store.get(run.id)
-            self.store.update(
-                run.id,
-                input_info={
-                    **current.input_info,
-                    "workflow_api_sha256": workflow_sha256,
-                    "workflow_api": f"runs/{run.id}/workflow_api.json",
-                    "prompt_markdown": f"runs/{run.id}/prompt.md",
-                    "telemetry": f"runs/{run.id}/telemetry.jsonl",
-                    "effective_markdown": run.prompt,
-                    "slot_map": [
-                        {
-                            "tag": f"<Picture {index + 1}>",
-                            "role": ref["role"], "source": ref["source"],
-                            "sha256": ref["sha256"],
-                        }
-                        for index, ref in enumerate(r for r in references if r["type"] == "image")
-                    ] + [
-                        {
-                            "tag": f"<Video {index + 1}>",
-                            "role": ref["role"], "source": ref["source"],
-                            "sha256": ref["sha256"],
-                        }
-                        for index, ref in enumerate(r for r in references if r["type"] == "video")
-                    ],
-                },
-            )
-            telemetry_task = asyncio.create_task(self._record_telemetry(run.id, stop))
-            guard_task = asyncio.create_task(self._memory_guard(stop, owner, interruption))
-
-            async def submitted(prompt_id):
-                self.store.update(run.id, prompt_id=prompt_id)
-
-            async def progress(data):
-                self.store.update(run.id, progress=data)
-
-            result = await self.comfy.execute(
-                workflow,
-                prompt_id=str(uuid4()),
-                deadline=self.settings.inference_deadline,
-                on_submitted=submitted,
-                on_progress=progress,
-                extra_pnginfo=getattr(self.builder, "extra_pnginfo", {}),
-            )
-            source = output_source(result, self.settings.comfy_root)
-            info = await self.media.probe(source)
-            verify_video(info, self.frames_for_duration(run.duration_seconds))
-            destination = contained(self.store.directory(run.id), "chunk.mp4")
-            await asyncio.to_thread(publish, source, destination)
-            self.store.update(
-                run.id,
-                state="ready_for_review",
-                publication_mode="atomic_copy_from_comfy_output",
-                output={
-                    "path": f"runs/{run.id}/chunk.mp4",
-                    "probe": info,
-                    "source": str(source),
-                    "node": "34",
-                },
-                timings={"total_seconds": monotonic() - start},
-            )
-        except asyncio.CancelledError:
-            self.store.update(run.id, state="interrupted", error=interruption["reason"])
-            raise
-        except Exception as exc:  # noqa: BLE001 - persist all worker/plugin failures at this boundary.
-            self.store.update(
-                run.id,
-                state="interrupted" if isinstance(exc, ExecutionInterrupted) else "failed",
-                error=f"{type(exc).__name__}: {exc}",
-                timings={"total_seconds": monotonic() - start},
-            )
-        finally:
-            stop.set()
-            if guard_task:
-                guard_task.cancel()
-                await asyncio.gather(guard_task, return_exceptions=True)
-            if telemetry_task:
-                # The recorder receives stop; bounded cleanup also tolerates a broken stats endpoint.
-                try:
-                    await asyncio.wait_for(telemetry_task, timeout=10)
-                except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - bounded plugin cleanup.
-                    logging.getLogger(__name__).warning(
-                        "Telemetry cleanup failed for run %s: %s", run.id, exc
-                    )
-                    telemetry_task.cancel()
-                    await asyncio.gather(telemetry_task, return_exceptions=True)
-            self._active = None
+            if self._active == run.id:
+                self._active = None
 
     async def _memory_guard(self, stop, owner, interruption):
         while not stop.is_set():

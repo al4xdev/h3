@@ -13,6 +13,17 @@ class Service:
     def __init__(self, root):
         self.store = Store(root)
         self.calls = []
+        self.pipes = []
+
+    async def submit(self, pipe):
+        from h3_backend.routes.i2v import I2VPipe
+        from h3_backend.routes.v2v import V2VPipe
+
+        self.pipes.append(pipe)
+        if isinstance(pipe, I2VPipe):
+            return await self.create(pipe.state.request)
+        assert isinstance(pipe, V2VPipe)
+        return await self.continue_run(pipe.state.parent_id, pipe.state.request)
 
     async def create(self, request):
         self.calls.append(request)
