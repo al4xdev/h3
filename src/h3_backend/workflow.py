@@ -50,10 +50,14 @@ def _media_entry(reference: dict[str, Any]) -> dict[str, Any]:
 
 
 class WorkflowBuilder:
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, mode: str = "normal"):
+        if mode not in ("normal", "continuation"):
+            raise ValueError("Workflow mode must be normal or continuation")
+        self.mode = mode
         directory = project_root / "workflows"
-        raw = (directory / "normal_api.json").read_bytes()
-        manifest = json.loads((directory / "baseline_manifest.json").read_text())
+        raw = (directory / f"{mode}_api.json").read_bytes()
+        manifest_name = "baseline_manifest.json" if mode == "normal" else "continuation_manifest.json"
+        manifest = json.loads((directory / manifest_name).read_text())
         self.hash = hashlib.sha256(raw).hexdigest()
         if self.hash != manifest["api_sha256"]:
             raise ValueError("Frozen workflow checksum mismatch; review the new baseline first")
@@ -62,8 +66,7 @@ class WorkflowBuilder:
         self.extra_pnginfo = copy.deepcopy(manifest["extra_pnginfo"])
         self._verify_links(self.baseline)
 
-    @staticmethod
-    def _verify_links(graph: dict[str, Any]) -> None:
+    def _verify_links(self, graph: dict[str, Any]) -> None:
         for node_id, field, expected in (
             ("5", "vae", ["171:2", 0]),
             ("176", "vae", ["171:2", 0]),
@@ -73,8 +76,66 @@ class WorkflowBuilder:
         ):
             if graph[node_id]["inputs"].get(field) != expected:
                 raise ValueError(f"Missing or changed virtual link {node_id}.{field}")
-        if "296" in graph or "368" in graph:
-            raise ValueError("This baseline must use normal references, not seamless assembly")
+        if any(node in graph for node in ("279", "296", "368")):
+            raise ValueError("This baseline must use normal references, not final/seamless assembly")
+        links = [
+            ("417", "references", ["416", 0]),
+            ("471", "any_02", ["5", 0]),
+            ("520", "any_01", ["5", 1]),
+            ("125:12", "latent_image", ["520", 0]),
+            ("125:12", "guider", ["125:14", 0]),
+            ("125:14", "conditioning", ["272" if self.mode == "continuation" else "471", 0]),
+            ("511", "any_01", ["417", 9]),
+            ("510", "any_01", ["417", 12]),
+            ("5", "ref_videos.ref_video_0", ["511", 0]),
+            ("5", "ref_video_audios.ref_video_audio_0", ["510", 0]),
+            ("418", "videos.<Video 1>", ["417", 9]),
+        ]
+        for index in range(9):
+            links.extend([
+                ("5", f"ref_images.ref_image_{index}", ["417", index]),
+                ("418", f"pictures.<Picture {index + 1}>", ["417", index]),
+            ])
+        if self.mode == "continuation":
+            for node_id, class_type in (
+                ("272", "MiniMaxH3AddGuide"), ("274", "ImageResizeKJv2"), ("276", "GetImageSize")
+            ):
+                if graph.get(node_id, {}).get("class_type") != class_type:
+                    raise ValueError(f"Missing native guide helper {node_id}")
+            links.extend([
+                ("272", "frame_idx", 0),
+                ("272", "positive", ["471", 0]),
+                ("272", "latent", ["520", 0]),
+                ("272", "vae", ["171:2", 0]),
+                ("272", "audio_vae", ["171:1", 0]),
+                ("272", "image", ["274", 0]),
+                ("274", "image", ["417", 0]),
+                ("276", "image", ["417", 0]),
+                ("274", "width", ["276", 0]),
+                ("274", "height", ["276", 1]),
+            ])
+        elif any(node in graph for node in ("272", "274", "276")):
+            raise ValueError("Initial workflow must not activate first-frame guide")
+        for node_id, field, expected in links:
+            if graph.get(node_id, {}).get("inputs", {}).get(field) != expected:
+                raise ValueError(f"Missing or changed native link {node_id}.{field}")
+
+    @staticmethod
+    def _verify_continuation_roles(references: list[dict[str, Any]]) -> None:
+        # The native splitter preserves image order within categories: never silently reorder.
+        if not 3 <= len(references) <= 10:
+            raise ValueError("Continuation requires initial_frame, one to eight identities, motion_video")
+        expected = [("image", "initial_frame")]
+        expected += [("image", "identity")] * (len(references) - 2)
+        expected += [("video", "motion_video")]
+        if [(ref.get("type"), ref.get("role")) for ref in references] != expected:
+            raise ValueError("Continuation references must be ordered initial_frame, identity, motion_video")
+        initial = references[0]
+        for identity in references[1:-1]:
+            if identity.get("filename") == initial.get("filename") or (
+                initial.get("sha256") and identity.get("sha256") == initial["sha256"]
+            ):
+                raise ValueError("Initial frame must be distinct from identity")
 
     def build(
         self,
@@ -99,6 +160,8 @@ class WorkflowBuilder:
             or "%" in filename_prefix
         ):
             raise ValueError("Saver prefix must be a safe relative path under h3_backend/")
+        if self.mode == "continuation":
+            self._verify_continuation_roles(references)
         entries = [_media_entry(reference) for reference in references]
         pictures = sum(entry["kind"] == "picture" for entry in entries)
         videos = sum(entry["kind"] == "video" for entry in entries)

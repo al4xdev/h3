@@ -7,6 +7,7 @@ import json
 import math
 import os
 import uuid
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -69,28 +70,144 @@ async def probe(path: Path) -> dict[str, Any]:
     return json.loads(data)
 
 
+def _guard_path(path: Path) -> Path:
+    absolute = path.absolute()
+    if ".." in absolute.parts or any(p.is_symlink() for p in (absolute, *absolute.parents)):
+        raise ValueError("Media paths must not contain traversal or symlinks")
+    return absolute
+
+
+def _destination(path: Path) -> Path:
+    destination = _guard_path(path)
+    if destination.exists():
+        raise ValueError("Refusing to overwrite prepared media")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return _guard_path(destination)
+
+
+def _video_stream(details: dict[str, Any]) -> dict[str, Any]:
+    video = next((s for s in details["streams"] if s["codec_type"] == "video"), None)
+    if video is None:
+        raise ValueError("Parent contains no video stream")
+    return video
+
+
+def _frame_count(video: dict[str, Any]) -> int:
+    try:
+        count = int(video["nb_read_frames"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Could not count decoded video frames") from exc
+    if count <= 0:
+        raise ValueError("Parent contains no decoded video frames")
+    return count
+
+
+def _strip_png_metadata(path: Path) -> None:
+    # FFmpeg writes pHYs even with metadata disabled; retain only critical PNG chunks.
+    # This edits the encoded container, never decoding or loading pixels in Python.
+    data = path.read_bytes()
+    clean = bytearray(data[:8])
+    offset = 8
+    while offset < len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        end = offset + length + 12
+        if end > len(data):
+            raise ValueError("Invalid extracted PNG container")
+        if data[offset + 4:offset + 8] in (b"IHDR", b"PLTE", b"IDAT", b"IEND"):
+            clean.extend(data[offset:end])
+        offset = end
+    path.write_bytes(clean)
+
+
+async def _reference_loader_count(path: Path) -> int:
+    # Mirror Fantastic H3's timestamp sampler at 24 fps, including half-grid tolerance.
+    # ffprobe returns timestamps only: no decoded frame batch enters this process.
+    data = json.loads(await _command(
+        "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+        "frame=best_effort_timestamp:stream=time_base", "-of", "json", str(path),
+    ))
+    time_base = Fraction(data["streams"][0]["time_base"])
+    count, want = 0, 0.0
+    grid = 1 / 24
+    for frame in data["frames"]:
+        timestamp = frame.get("best_effort_timestamp")
+        if timestamp is None:
+            continue
+        # Integer PTS avoids ffprobe's decimal rounding at the half-grid boundary.
+        time = float(int(timestamp) * time_base)
+        while time >= want - grid / 2:
+            count += 1
+            want += grid
+    return count
+
+
+async def prepare_last_frame(parent_video: Path, destination: Path) -> dict[str, Any]:
+    """Decode the counted final frame, rather than guessing a timestamp near EOF."""
+    parent_video = _guard_path(parent_video)
+    destination = _destination(destination)
+    video = _video_stream(await probe(parent_video))
+    count = _frame_count(video)
+    temporary = destination.parent / f".{destination.stem}-{uuid.uuid4().hex}.part.png"
+    try:
+        await _command(
+            "ffmpeg", "-v", "error", "-n", "-i", str(parent_video),
+            "-map", "0:v:0", "-vf", f"select=eq(n\\,{count - 1}),format=rgb24,setsar=0",
+            "-fps_mode", "passthrough", "-frames:v", "1", "-an", "-map_metadata", "-1",
+            "-c:v", "png", "-pix_fmt", "rgb24", str(temporary),
+        )
+        _strip_png_metadata(temporary)
+        with Image.open(temporary) as image:
+            image.verify()
+            if image.format != "PNG" or image.mode != "RGB":
+                raise ValueError("Final frame must be an RGB PNG")
+            width, height = image.size
+        _guard_path(destination)
+        # Hard-link publication is atomic and refuses even a destination created mid-decode.
+        os.link(temporary, destination)
+    finally:
+        if temporary.is_file():
+            temporary.unlink()
+    return {
+        "path": str(destination),
+        "source_frame_count": count,
+        "source_frame_index": count - 1,
+        "width": width,
+        "height": height,
+        "format": "PNG",
+        "mode": "RGB",
+    }
+
+
 async def prepare_tail(
     parent_video: Path,
     destination: Path,
     seconds: int,
     include_audio: bool = True,
+    *,
+    reference_frame_limit: int | None = None,
 ) -> dict[str, Any]:
+    if reference_frame_limit is not None and reference_frame_limit < 5:
+        raise ValueError("Reference generation limit must be at least five frames")
     if seconds not in (2, 3):
         raise ValueError("Reference tail must be two or three seconds")
+    parent_video = _guard_path(parent_video)
+    destination = _destination(destination)
     details = await probe(parent_video)
-    video = next((s for s in details["streams"] if s["codec_type"] == "video"), None)
-    if not video:
-        raise ValueError("Parent contains no video stream")
-    duration = float(video.get("duration", details["format"]["duration"]))
+    video = _video_stream(details)
+    try:
+        fps = Fraction(video.get("avg_frame_rate") or video["r_frame_rate"])
+        if fps <= 0:
+            raise ValueError
+        duration = float(video.get("duration") or details["format"]["duration"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise ValueError("Invalid parent timing") from exc
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("Invalid parent duration")
     actual = min(float(seconds), duration)
     start = max(0.0, duration - actual)
     audio = include_audio and any(s["codec_type"] == "audio" for s in details["streams"])
-    destination = destination.absolute()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() or destination.is_symlink():
-        raise ValueError("Refusing to overwrite the reference tail")
+    # References are sampled at 24 fps by the native loader, not at the retained source rate.
+    requested_frames = math.ceil(actual * 24 - 1e-5)
     temporary = destination.parent / f".{destination.stem}-{uuid.uuid4().hex}.part.mp4"
     arguments = [
         "ffmpeg",
@@ -106,7 +223,11 @@ async def prepare_tail(
         "-map",
         "0:v:0",
         "-vf",
-        "fps=24,format=yuv420p",
+        "format=yuv420p",
+        "-fps_mode",
+        "passthrough",
+        "-map_metadata",
+        "-1",
         "-c:v",
         "libx264",
         "-preset",
@@ -123,6 +244,14 @@ async def prepare_tail(
         await _command(*arguments)
         output = await probe(temporary)
         output_video = next(s for s in output["streams"] if s["codec_type"] == "video")
+        source_frames = _frame_count(output_video)
+        loaded_frames = await _reference_loader_count(temporary)
+        limited_frames = min(loaded_frames, reference_frame_limit or loaded_frames)
+        if limited_frames < 5:
+            raise ValueError("MiniMax H3 reference videos need at least five frames")
+        # Native H3 caps to generation length first, then consumes a valid prefix.
+        effective_frames = 5 + 17 * ((limited_frames - 5) // 17)
+        _guard_path(destination)
         # Linking publishes atomically without overwriting another file created during encoding.
         os.link(temporary, destination)
     finally:
@@ -136,7 +265,15 @@ async def prepare_tail(
         "width": int(output_video["width"]),
         "height": int(output_video["height"]),
         "source_start_seconds": start,
-        "fps": 24,
+        "fps": float(fps),
+        "source_frame_count": source_frames,
+        "reference_fps": 24,
+        "reference_frame_limit": reference_frame_limit,
+        "requested_reference_frames": requested_frames,
+        "loaded_reference_frames": loaded_frames,
+        "effective_reference_frames": effective_frames,
+        "final_edge_loss_frames": loaded_frames - effective_frames,
+        "final_edge_loss_seconds": (loaded_frames - effective_frames) / 24,
     }
 
 

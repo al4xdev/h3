@@ -9,12 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-DEFAULT_PROMPT = (
-    "<Picture 1> A woman performs a gentle, coordinated, non-sexual dance with small "
-    "side steps and natural arm and hand movements. Preserve her face, hair and "
-    "clothing. Stable camera, consistent background, anatomically natural movement, "
-    "fully clothed, SFW."
-)
+PROMPT_ROOT = Path(__file__).resolve().parents[2] / "prompts"
+DEFAULT_PROMPT = (PROMPT_ROOT / "initial.md").read_text(encoding="utf-8")
+CONTINUATION_PROMPT = (PROMPT_ROOT / "continuation.md").read_text(encoding="utf-8")
 RunState = Literal[
     "queued", "running", "ready_for_review", "accepted", "rejected", "failed", "interrupted"
 ]
@@ -55,7 +52,7 @@ class ContinueRequest(BaseModel):
     seed: StrictInt = Field(ge=0, le=2**53 - 1)
     prompt: str | None = Field(default=None, min_length=1, max_length=12000)
     duration_seconds: float = Field(default=2.3, gt=0, le=3, allow_inf_nan=False)
-    reference_tail_seconds: Literal[2, 3] = 2
+    reference_tail_seconds: Literal[2, 3] = 3
     include_audio: bool = True
 
 

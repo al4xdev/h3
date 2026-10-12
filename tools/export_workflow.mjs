@@ -6,7 +6,9 @@ import { createRequire } from 'node:module';
 const require = createRequire('/home/alex/package.json');
 const { chromium } = require('playwright');
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const source = path.join(root, 'workflows/workflow_h3_normal_sfw_validated.json');
+const mode = process.argv[2] ?? 'normal';
+if (!['normal', 'continuation'].includes(mode)) throw new Error('Mode must be normal or continuation');
+const source = path.join(root, `workflows/workflow_h3_${mode}_sfw_validated.json`);
 const workflow = JSON.parse(await fs.readFile(source, 'utf8'));
 const browser = await chromium.launch({ headless: true });
 try {
@@ -26,7 +28,17 @@ try {
     for (const field of fields) if (!api[id]?.inputs?.[field]) throw new Error(`Missing virtual link ${id}.${field}`);
   }
   if (errors.length) throw new Error(`Browser errors: ${JSON.stringify(errors)}`);
-  const destination = path.join(root, '.dumps/normal_api_export.json');
+  if (mode === 'continuation') {
+    if (api['272']?.class_type !== 'MiniMaxH3AddGuide' || api['272']?.inputs?.frame_idx !== 0) {
+      throw new Error('Native frame-zero guide missing');
+    }
+    for (const id of ['274', '276']) if (!api[id]) throw new Error(`Guide helper ${id} missing`);
+    if (api['279'] || api['296'] || api['368']) throw new Error('Unexpected final/seamless branch');
+    // VHS expands date placeholders during export; freeze only mutable saver prefixes.
+    const baseline = JSON.parse(await fs.readFile(path.join(root, 'workflows/normal_api.json'), 'utf8'));
+    for (const id of ['18', '34']) api[id].inputs.filename_prefix = baseline[id].inputs.filename_prefix;
+  }
+  const destination = path.join(root, mode === 'normal' ? '.dumps/normal_api_export.json' : 'workflows/continuation_api.json');
   await fs.writeFile(destination, JSON.stringify(api, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify({ source, destination, apiNodes: Object.keys(api).length, errors }));
 } finally {

@@ -113,6 +113,22 @@ class Store:
                 os.unlink(name)
         return destination
 
+    def artifact_markdown(self, run_id: str, text: str) -> Path:
+        """Publish the exact encoder input without rendering or stripping whitespace."""
+        directory = self.directory(run_id)
+        destination = contained(directory, "prompt.md")
+        fd, name = tempfile.mkstemp(prefix=".prompt-", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(name, destination)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+        return destination
+
     def restore(self) -> list[Run]:
         """Never replay submissions after a restart, including unknown submission outcomes."""
         restored = []

@@ -64,3 +64,15 @@ def test_containment_rejects_traversal_and_symlinks(tmp_path):
     assert contained(root, "valid") == root / "valid"
     with pytest.raises(ValueError):
         Store(root).directory("../x")
+
+
+def test_markdown_artifact_is_literal_and_never_overwritten(tmp_path):
+    store = Store(tmp_path)
+    run = store.create(make_run())
+    text = "# Literal\r\n\r\n<Picture 1>  \n<Picture 2>\n"
+    path = store.artifact_markdown(run.id, text)
+    assert path.read_bytes() == text.encode("utf-8")
+    with pytest.raises(FileExistsError):
+        store.artifact_markdown(run.id, "replacement")
+    assert path.read_bytes() == text.encode("utf-8")
+    assert not list(store.directory(run.id).glob(".prompt-*"))

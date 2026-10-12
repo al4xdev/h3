@@ -15,7 +15,7 @@ from time import monotonic
 from uuid import uuid4
 
 from .comfy import ComfyClient, ExecutionInterrupted
-from .models import ContinueRequest, Run, RunRequest, Settings
+from .models import CONTINUATION_PROMPT, ContinueRequest, Run, RunRequest, Settings
 from .store import Store, contained, timestamp
 
 
@@ -83,17 +83,23 @@ class RunService:
         store=None,
         comfy=None,
         builder=None,
+        continuation_builder=None,
         media=None,
         frames_for_duration=None,
         telemetry=None,
         memory_available=None,
     ):
-        if builder is None or frames_for_duration is None:
+        if builder is None:
             from .workflow import WorkflowBuilder
+
+            builder = WorkflowBuilder(settings.project_root)
+            continuation_builder = continuation_builder or WorkflowBuilder(
+                settings.project_root, mode="continuation"
+            )
+        if frames_for_duration is None:
             from .workflow import frames_for_duration as frames
 
-            builder = builder or WorkflowBuilder(settings.project_root)
-            frames_for_duration = frames_for_duration or frames
+            frames_for_duration = frames
         if media is None:
             from . import media as media_module
 
@@ -106,6 +112,8 @@ class RunService:
         self.store = store or Store(settings.project_root)
         self.comfy = comfy or ComfyClient(settings.comfy_url)
         self.builder = builder
+        # Injected test builders can implement both modes; production always uses two frozen APIs.
+        self.continuation_builder = continuation_builder or builder
         self.media = media
         self.frames_for_duration = frames_for_duration
         self.telemetry = telemetry
@@ -189,16 +197,34 @@ class RunService:
             if parent and parent.state != "accepted":
                 raise Conflict("Continuation requires an explicitly accepted parent")
             references = []
+            identities = []
+            if parent:
+                for reference in parent.references:
+                    if reference.get("type") != "image":
+                        continue
+                    role = reference.get("role")
+                    if role == "initial_frame":
+                        continue
+                    if role not in (None, "identity"):
+                        raise ValueError("Ambiguous parent image role")
+                    if reference.get("source_root", "assets") != "assets":
+                        raise ValueError("Identity must originate inside assets")
+                    # Legacy role-less sources must still resolve strictly inside assets below.
+                    identities.append(reference)
             sources = (
-                [r["source"] for r in parent.references if r.get("type") == "image"]
-                if parent
-                else [request.image, *request.images]
+                [r["source"] for r in identities]
+                if parent else [request.image, *request.images]
             )
             if not sources:
                 raise ValueError("At least one identity image is required")
-            for source in sources:
-                assets = contained(self.settings.project_root, "assets", must_exist=True)
-                path = contained(assets, source, must_exist=True)
+            if len(sources) > (8 if parent else 9):
+                raise ValueError("Continuation permits at most eight identity images")
+            assets = contained(self.settings.project_root, "assets", must_exist=True)
+            paths = [contained(assets, source, must_exist=True) for source in sources]
+            # Compare resolved paths so lexical and symlink aliases cannot consume extra slots.
+            if len(set(paths)) != len(paths):
+                raise ValueError("Duplicate identity sources are ambiguous")
+            for source, path in zip(sources, paths, strict=True):
                 if not path.is_file():
                     raise ValueError("Reference must be a regular image file")
                 info = await asyncio.to_thread(self.media.verify_image, path)
@@ -206,14 +232,18 @@ class RunService:
                     lambda p=path: hashlib.sha256(p.read_bytes()).hexdigest()
                 )
                 if parent:
-                    original = next(r for r in parent.references if r.get("source") == source)
+                    original = next(r for r in identities if r.get("source") == source)
                     if original["sha256"] != digest:
                         raise ValueError("Original identity image changed since parent generation")
                 references.append(
-                    {"type": "image", "source": source, "sha256": digest, "input_info": info}
+                    {
+                        "type": "image", "role": "identity", "source": source,
+                        "source_root": "assets", "sha256": digest, "input_info": info,
+                    }
                 )
             await self.comfy.ensure_idle()
-            self.builder.validate_object_info(await self.comfy.object_info())
+            builder = self.continuation_builder if parent else self.builder
+            builder.validate_object_info(await self.comfy.object_info())
             now = timestamp()
             run = self.store.create(
                 Run(
@@ -221,15 +251,18 @@ class RunService:
                     created_at=now,
                     updated_at=now,
                     seed=request.seed,
-                    prompt=(request.prompt or parent.prompt) if parent else request.prompt,
+                    prompt=(
+                        request.prompt if request.prompt is not None
+                        else CONTINUATION_PROMPT
+                    ) if parent else request.prompt,
                     duration_seconds=request.duration_seconds,
-                    workflow_hash=self.builder.hash,
+                    workflow_hash=builder.hash,
                     parent_id=parent_id,
                     references=references,
                     input_info={
-                        "mode": "normal",
+                        "mode": "continuation" if parent else "normal",
                         "continuation": continuation.model_dump() if continuation else None,
-                        "comfy_extra_pnginfo": getattr(self.builder, "extra_pnginfo", {}),
+                        "comfy_extra_pnginfo": getattr(builder, "extra_pnginfo", {}),
                     },
                 )
             )
@@ -246,7 +279,26 @@ class RunService:
         owner = asyncio.current_task()
         try:
             self.store.update(run.id, state="running")
+            builder = self.continuation_builder if continuation else self.builder
             references = []
+            if continuation:
+                frame = contained(self.store.directory(run.id), "initial_frame.png")
+                frame_info = await self.media.prepare_last_frame(
+                    self.video_path(run.parent_id), frame
+                )
+                if Path(frame_info["path"]).resolve() != frame.resolve() or not frame.is_file():
+                    raise ValueError("Last frame preparation returned an unexpected path")
+                upload = await self.comfy.upload(frame, f"h3_{run.id}_initial_frame.png")
+                references.append({
+                    "type": "image", "role": "initial_frame",
+                    "source": f"runs/{run.id}/initial_frame.png", "source_root": "runs",
+                    "parent_id": run.parent_id,
+                    "sha256": await asyncio.to_thread(
+                        lambda: hashlib.sha256(frame.read_bytes()).hexdigest()
+                    ),
+                    "filename": upload["filename"], "upload": upload,
+                    "has_audio": False, "input_info": frame_info,
+                })
             for index, reference in enumerate(run.references):
                 assets = contained(self.settings.project_root, "assets", must_exist=True)
                 source = contained(assets, reference["source"], must_exist=True)
@@ -274,14 +326,16 @@ class RunService:
                     tail,
                     continuation.reference_tail_seconds,
                     include_audio=continuation.include_audio,
+                    reference_frame_limit=self.frames_for_duration(run.duration_seconds),
                 )
                 if Path(tail_info["path"]).resolve() != tail.resolve() or not tail.is_file():
                     raise ValueError("Tail preparation returned an unexpected path")
                 upload = await self.comfy.upload(tail, f"h3_{run.id}_tail.mp4")
                 references.append(
                     {
-                        "type": "video",
+                        "type": "video", "role": "motion_video",
                         "source": f"runs/{run.id}/reference_tail.mp4",
+                        "source_root": "runs", "parent_id": run.parent_id,
                         "sha256": await asyncio.to_thread(
                             lambda: hashlib.sha256(tail.read_bytes()).hexdigest()
                         ),
@@ -292,7 +346,7 @@ class RunService:
                     }
                 )
             self.store.update(run.id, references=references)
-            workflow = self.builder.build(
+            workflow = builder.build(
                 prompt=run.prompt,
                 seed=run.seed,
                 duration_seconds=run.duration_seconds,
@@ -300,13 +354,31 @@ class RunService:
                 filename_prefix=f"h3_backend/{run.id}/chunk",
             )
             self.store.artifact_json(run.id, "workflow_api.json", workflow)
+            self.store.artifact_markdown(run.id, run.prompt)
             current = self.store.get(run.id)
             self.store.update(
                 run.id,
                 input_info={
                     **current.input_info,
                     "workflow_api": f"runs/{run.id}/workflow_api.json",
+                    "prompt_markdown": f"runs/{run.id}/prompt.md",
                     "telemetry": f"runs/{run.id}/telemetry.jsonl",
+                    "effective_markdown": run.prompt,
+                    "slot_map": [
+                        {
+                            "tag": f"<Picture {index + 1}>",
+                            "role": ref["role"], "source": ref["source"],
+                            "sha256": ref["sha256"],
+                        }
+                        for index, ref in enumerate(r for r in references if r["type"] == "image")
+                    ] + [
+                        {
+                            "tag": f"<Video {index + 1}>",
+                            "role": ref["role"], "source": ref["source"],
+                            "sha256": ref["sha256"],
+                        }
+                        for index, ref in enumerate(r for r in references if r["type"] == "video")
+                    ],
                 },
             )
             telemetry_task = asyncio.create_task(self._record_telemetry(run.id, stop))
@@ -324,7 +396,7 @@ class RunService:
                 deadline=self.settings.inference_deadline,
                 on_submitted=submitted,
                 on_progress=progress,
-                extra_pnginfo=getattr(self.builder, "extra_pnginfo", {}),
+                extra_pnginfo=getattr(builder, "extra_pnginfo", {}),
             )
             source = output_source(result, self.settings.comfy_root)
             info = await self.media.probe(source)

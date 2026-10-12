@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from h3_backend.models import ContinueRequest, RunRequest, Settings
+from h3_backend.models import CONTINUATION_PROMPT, ContinueRequest, RunRequest, Settings
 from h3_backend.service import Conflict, RunService, output_source, verify_video
 
 PROBE = {
@@ -30,7 +30,13 @@ class Media:
     async def probe(self, path):
         return PROBE
 
-    async def prepare_tail(self, parent, destination, seconds, include_audio=True):
+    async def prepare_last_frame(self, parent, destination):
+        destination.write_bytes(b"exact-last-frame")
+        return {"path": str(destination), "format": "PNG", "frame_index": 55}
+
+    async def prepare_tail(
+        self, parent, destination, seconds, include_audio=True, *, reference_frame_limit=None
+    ):
         self.tails.append((parent, seconds, include_audio))
         destination.write_bytes(b"fake-tail")
         return {
@@ -155,14 +161,31 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     await service._task
     final = service.store.get(child.id)
     assert final.state == "ready_for_review" and final.parent_id == run.id
-    assert final.prompt == run.prompt and final.seed == 8
-    assert final.references[0]["sha256"] == ready.references[0]["sha256"]
+    assert final.prompt == CONTINUATION_PROMPT and final.seed == 8
+    assert final.references[0]["role"] == "initial_frame"
+    assert final.references[0]["sha256"] != ready.references[0]["sha256"]
+    assert final.references[1]["sha256"] == ready.references[0]["sha256"]
+    assert final.input_info["mode"] == "continuation"
+    assert [slot["tag"] for slot in final.input_info["slot_map"]] == [
+        "<Picture 1>", "<Picture 2>", "<Video 1>"
+    ]
+    assert (service.store.directory(child.id) / "prompt.md").read_text() == CONTINUATION_PROMPT
     tail = final.references[-1]
     assert tail["type"] == "video" and tail["has_audio"]
     assert tail["input_info"]["actual_seconds"] == 56 / 24
     assert tail["input_info"]["requested_seconds"] == 3
     assert tail["filename"].startswith("unique/") and tail["filename"].endswith(" [input]")
-    assert len(service.builder.calls[1]["references"]) == 2
+    assert len(service.builder.calls[1]["references"]) == 3
+    await service.decide(child.id, True)
+    grandchild = await service.continue_run(child.id, ContinueRequest(seed=9))
+    await service._task
+    descendant = service.store.get(grandchild.id)
+    assert descendant.state == "ready_for_review"
+    assert [r["role"] for r in descendant.references] == [
+        "initial_frame", "identity", "motion_video"
+    ]
+    assert descendant.references[1]["source"] == "dance_reference.png"
+    assert descendant.references[0]["parent_id"] == child.id
     await service.shutdown()
 
 

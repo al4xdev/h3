@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -120,3 +121,97 @@ def test_validates_models_without_fallback():
     info["UNETLoader"]["input"]["required"]["unet_name"][0] = []
     with pytest.raises(ValueError, match="Selected model"):
         builder.validate_object_info(info)
+
+
+def continuation_references(identities=1):
+    return [reference(role="initial_frame", filename="h3/end.png [input]")] + [
+        reference(role="identity", filename=f"h3/identity-{index}.png [input]")
+        for index in range(identities)
+    ] + [reference("video", role="motion_video", filename="h3/tail.mp4 [input]", has_audio=True)]
+
+
+def test_continuation_native_guide_and_literal_prompt():
+    builder = WorkflowBuilder(ROOT, mode="continuation")
+    prompt = "# Continue\n\n<Picture 1> starts; <Picture 2> identity.  \n<Video 1> movement.\n"
+    graph = build(builder, references=continuation_references(), prompt=prompt)
+    assert builder.mode == "continuation"
+    assert len(graph) == 78
+    assert graph["365"]["inputs"]["prompt"] == prompt
+    assert graph["272"]["inputs"] == {
+        "frame_idx": 0, "positive": ["471", 0], "latent": ["520", 0],
+        "vae": ["171:2", 0], "audio_vae": ["171:1", 0], "image": ["274", 0],
+    }
+    assert graph["125:14"]["inputs"]["conditioning"] == ["272", 0]
+    state = json.loads(graph["416"]["inputs"]["media_state"])
+    assert [entry["file"] for entry in state] == [r["filename"] for r in continuation_references()]
+    assert state[-1]["audio_mode"] == "paired"
+    assert builder.extra_pnginfo == WorkflowBuilder(ROOT).extra_pnginfo
+    build(builder, references=continuation_references(8))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "reorder", "duplicate", "hash_duplicate", "excess", "no_identity", "no_video"])
+def test_continuation_rejects_ambiguous_roles(mutation):
+    refs = continuation_references()
+    if mutation == "missing":
+        refs[0].pop("role")
+    elif mutation == "reorder":
+        refs[0], refs[1] = refs[1], refs[0]
+    elif mutation == "duplicate":
+        refs[1]["filename"] = refs[0]["filename"]
+    elif mutation == "hash_duplicate":
+        refs[0]["sha256"] = refs[1]["sha256"] = "a" * 64
+    elif mutation == "excess":
+        refs = continuation_references(9)
+    elif mutation == "no_identity":
+        refs.pop(1)
+    else:
+        refs.pop()
+    with pytest.raises(ValueError):
+        build(WorkflowBuilder(ROOT, "continuation"), references=refs)
+
+
+@pytest.mark.parametrize("node,field,value", [
+    ("272", "frame_idx", 1), ("272", "vae", ["171:1", 0]),
+    ("272", "latent", ["5", 0]), ("274", "image", ["417", 1]),
+    ("125:14", "conditioning", ["471", 0]),
+    ("418", "pictures.<Picture 2>", ["417", 0]),
+])
+def test_native_guide_verifier_rejects_broken_ancestry(node, field, value):
+    builder = WorkflowBuilder(ROOT, "continuation")
+    graph = copy.deepcopy(builder.baseline)
+    graph[node]["inputs"][field] = value
+    with pytest.raises(ValueError, match="native link"):
+        builder._verify_links(graph)
+
+
+def test_initial_bytes_and_exact_continuation_delta():
+    manifest = json.loads((ROOT / "workflows/baseline_manifest.json").read_text())
+    assert hashlib.sha256((ROOT / "workflows/normal_api.json").read_bytes()).hexdigest() == manifest["api_sha256"]
+    assert hashlib.sha256((ROOT / "workflows" / manifest["source_ui"]).read_bytes()).hexdigest() == manifest["source_ui_sha256"]
+    initial = WorkflowBuilder(ROOT).baseline
+    continuation = WorkflowBuilder(ROOT, "continuation").baseline
+    assert continuation.keys() - initial.keys() == {"272", "274", "276"}
+    assert initial.keys() - continuation.keys() == set()
+    for node in initial:
+        if node != "125:14":
+            assert initial[node] == continuation[node]
+    ui = json.loads((ROOT / "workflows" / manifest["source_ui"]).read_text())
+    new_ui = json.loads((ROOT / "workflows/workflow_h3_continuation_sfw_validated.json").read_text())
+    for node in ui["nodes"]:
+        if node["id"] in (272, 274, 276):
+            assert node["mode"] == 4
+            node["mode"] = 0
+    assert ui == new_ui
+
+
+def test_continuation_checksum_and_unknown_mode(tmp_path):
+    directory = tmp_path / "workflows"
+    directory.mkdir()
+    for name in ("continuation_api.json", "continuation_manifest.json"):
+        (directory / name).write_bytes((ROOT / "workflows" / name).read_bytes())
+    with (directory / "continuation_api.json").open("a") as output:
+        output.write(" ")
+    with pytest.raises(ValueError, match="checksum"):
+        WorkflowBuilder(tmp_path, "continuation")
+    with pytest.raises(ValueError, match="mode"):
+        WorkflowBuilder(ROOT, "unknown")

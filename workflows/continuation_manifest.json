@@ -1,0 +1,58 @@
+{
+  "api_sha256": "88d43c730587c73f6b3fba58412631f962e829981cc5531022a34785ce2d73b1",
+  "api_nodes": 78,
+  "source_ui": "workflow_h3_continuation_sfw_validated.json",
+  "source_ui_sha256": "1266d63949289f99a5c9168c54e3c8c2d340adb77fd8ce2cb78f7ff5a4fc6186",
+  "original_source_sha256": "14e09cd1a3873966ecfa52ff73878f8642a5236155d1b509adab60e4148072fd",
+  "export": "ComfyUI frontend app.ue_modified_prompt(); only VHS date-expanded filename_prefix normalized to baseline",
+  "mode": "continuation",
+  "extra_pnginfo": {
+    "workflow": {
+      "extra": {
+        "VHS_MetadataImage": false,
+        "VHS_KeepIntermediate": false,
+        "VHS_latentpreview": true,
+        "VHS_latentpreviewrate": 0
+      }
+    }
+  },
+  "allowed_inputs": {
+    "365": [
+      "prompt"
+    ],
+    "16": [
+      "seed"
+    ],
+    "22:23": [
+      "value"
+    ],
+    "416": [
+      "media_state"
+    ],
+    "18": [
+      "filename_prefix"
+    ],
+    "34": [
+      "filename_prefix"
+    ]
+  },
+  "effective_settings": {
+    "sampler": "euler",
+    "scheduler": "simple",
+    "steps": 6,
+    "megapixels": 0.4,
+    "aspect_ratio": "9:16 (Portrait Widescreen)",
+    "width": 480,
+    "height": 864,
+    "fps": 24,
+    "reference_image_size": "max",
+    "preserve_preview_and_final_decodes": true
+  },
+  "publication": "VHS saver rejects outside output root; atomic copy on correlated WS success",
+  "raw_reference_correction": "The download is PNG with prompt/aspect metadata. read_image WebP and SHA256 described only the preview. See assets/reference_manifest.json for raw file hashes.",
+  "reference_roles": [
+    "initial_frame",
+    "identity",
+    "motion_video"
+  ]
+}
