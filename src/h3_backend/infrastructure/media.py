@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -11,42 +12,112 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+COMMAND_TIMEOUT = 120
+STDOUT_LIMIT = 8 * 1024**2
+STDERR_LIMIT = 2000
+
+
+def sha256_file(path: Path) -> str:
+    """Hash original encoded bytes with a bounded buffer, without decoding media."""
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+async def _image_header(path: Path) -> dict[str, Any]:
+    data = await _command(
+        "ffprobe", "-v", "error", "-probesize", "1048576", "-analyzeduration", "0",
+        "-show_entries", "stream=codec_name,codec_type,width,height,pix_fmt:format=format_name",
+        "-of", "json", str(path),
+    )
+    details = json.loads(data)
+    streams = details.get("streams", [])
+    formats = {"png": "PNG", "mjpeg": "JPEG", "webp": "WEBP"}
+    if len(streams) != 1 or streams[0].get("codec_name") not in formats:
+        raise ValueError("Unsupported identity image format")
+    stream = streams[0]
+    # Reject video containers carrying a permitted codec; do not trust the filename suffix.
+    if details.get("format", {}).get("format_name") not in (
+        "png_pipe", "jpeg_pipe", "webp_pipe", "image2",
+    ):
+        raise ValueError("Identity image must be a single still")
+    width, height = int(stream.get("width", 0)), int(stream.get("height", 0))
+    if width <= 0 or height <= 0 or width * height > 16_000_000:
+        raise ValueError("Identity image must be a single still of at most 16 megapixels")
+    return {**stream, "format": formats[stream["codec_name"]]}
+
+
+async def _verify_image(path: Path) -> dict[str, Any]:
+    header = await _image_header(path)
+    # Geometry is checked before full decode. Only progress metadata crosses this pipe;
+    # at most two frames suffice to reject multi-frame inputs, including concatenated stills.
+    progress = await _command(
+        "ffmpeg", "-v", "error", "-xerror", "-err_detect", "crccheck+explode", "-nostdin",
+        "-i", str(path), "-map", "0:v:0", "-frames:v", "2", "-an",
+        "-fps_mode", "passthrough", "-progress", "pipe:1", "-f", "null", "-",
+    )
+    counts = [int(line[6:]) for line in progress.splitlines() if line.startswith(b"frame=")]
+    if not counts or counts[-1] != 1:
+        raise ValueError("Identity image must be a single still")
+    return {key: header[key] for key in ("width", "height", "format")}
 
 
 def verify_image(path: Path) -> dict[str, Any]:
+    """Synchronous contract for to_thread callers; all pixel work stays external."""
+    path = _guard_path(path)
+    if not path.is_file():
+        raise ValueError("Media file not found")
     if path.stat().st_size > 32 * 1024**2:
         raise ValueError("Identity image exceeds the 32 MiB input limit")
     try:
-        with Image.open(path) as image:
-            if image.format not in ("PNG", "JPEG", "WEBP"):
-                raise ValueError("Unsupported identity image format")
-            if image.width * image.height > 16_000_000 or getattr(image, "n_frames", 1) != 1:
-                raise ValueError("Identity image must be a single still of at most 16 megapixels")
-            info = {"width": image.width, "height": image.height, "format": image.format}
-            image.verify()
-        # JPEG verify() checks the container, not all compressed pixels; decode once before upload.
-        with Image.open(path) as image:
-            image.load()
-        return info
-    except (OSError, Image.DecompressionBombError) as exc:
-        raise ValueError(f"Corrupt or oversized identity image: {exc}") from exc
+        return asyncio.run(_verify_image(path))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Corrupt or unsupported identity image: {exc}") from exc
 
 
 async def _command(*arguments: str) -> bytes:
     process = await asyncio.create_subprocess_exec(
         *arguments, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
+    async def capture(stream, limit, *, tail=False):
+        data = bytearray()
+        while block := await stream.read(65536):
+            data.extend(block)
+            if len(data) > limit:
+                if not tail:
+                    raise ValueError("Media command metadata exceeds bounded output limit")
+                del data[:-limit]
+        return bytes(data)
+
+    readers = [
+        asyncio.create_task(capture(process.stdout, STDOUT_LIMIT)),
+        asyncio.create_task(capture(process.stderr, STDERR_LIMIT, tail=True)),
+    ]
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        stdout, stderr, _ = await asyncio.wait_for(
+            asyncio.gather(*readers, process.wait()), timeout=COMMAND_TIMEOUT,
+        )
     except BaseException:
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+
+        async def discard(stream):
+            while await stream.read(65536):
+                pass
+
+        # Drain without retaining bytes during shutdown: a full pipe must not block
+        # wait() after an output-limit violation or cancellation.
+        drains = [asyncio.create_task(discard(s)) for s in (process.stdout, process.stderr)]
+        try:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+        finally:
+            await asyncio.gather(*drains, return_exceptions=True)
         raise
     if process.returncode:
         raise ValueError(f"{arguments[0]} failed: {stderr.decode(errors='replace')[-2000:]}")
@@ -102,23 +173,6 @@ def _frame_count(video: dict[str, Any]) -> int:
     return count
 
 
-def _strip_png_metadata(path: Path) -> None:
-    # FFmpeg writes pHYs even with metadata disabled; retain only critical PNG chunks.
-    # This edits the encoded container, never decoding or loading pixels in Python.
-    data = path.read_bytes()
-    clean = bytearray(data[:8])
-    offset = 8
-    while offset < len(data):
-        length = int.from_bytes(data[offset:offset + 4], "big")
-        end = offset + length + 12
-        if end > len(data):
-            raise ValueError("Invalid extracted PNG container")
-        if data[offset + 4:offset + 8] in (b"IHDR", b"PLTE", b"IDAT", b"IEND"):
-            clean.extend(data[offset:end])
-        offset = end
-    path.write_bytes(clean)
-
-
 async def _reference_loader_count(path: Path) -> int:
     # Mirror Fantastic H3's timestamp sampler at 24 fps, including half-grid tolerance.
     # ffprobe returns timestamps only: no decoded frame batch enters this process.
@@ -155,12 +209,16 @@ async def prepare_last_frame(parent_video: Path, destination: Path) -> dict[str,
             "-fps_mode", "passthrough", "-frames:v", "1", "-an", "-map_metadata", "-1",
             "-c:v", "png", "-pix_fmt", "rgb24", str(temporary),
         )
-        _strip_png_metadata(temporary)
-        with Image.open(temporary) as image:
-            image.verify()
-            if image.format != "PNG" or image.mode != "RGB":
-                raise ValueError("Final frame must be an RGB PNG")
-            width, height = image.size
+        # FFmpeg emits pHYs and may emit standard sRGB cHRM/gAMA tags, but no
+        # inherited prompt/EXIF/orientation. External RGB hashes establish exact
+        # native pixel preservation; do not rewrite the PNG container in Python.
+        header = await _image_header(temporary)
+        if header["format"] != "PNG" or header["pix_fmt"] != "rgb24":
+            raise ValueError("Final frame must be an RGB PNG")
+        width, height = header["width"], header["height"]
+        if (width, height) != (int(video["width"]), int(video["height"])):
+            raise ValueError("Final frame geometry differs from parent")
+        await _verify_image(temporary)
         _guard_path(destination)
         # Hard-link publication is atomic and refuses even a destination created mid-decode.
         os.link(temporary, destination)
@@ -281,6 +339,8 @@ async def concatenate(chunks: list[Path], destination: Path) -> dict[str, Any]:
     """Make a plainly labelled assembled preview; never discard presumed reference overlap."""
     if not chunks:
         raise ValueError("No accepted chunks to assemble")
+    chunks = [_guard_path(chunk) for chunk in chunks]
+    destination = _destination(destination)
     probes = [await probe(chunk) for chunk in chunks]
     video_streams = [
         next(s for s in data["streams"] if s["codec_type"] == "video") for data in probes
@@ -294,9 +354,6 @@ async def concatenate(chunks: list[Path], destination: Path) -> dict[str, Any]:
     have_audio = [any(s["codec_type"] == "audio" for s in data["streams"]) for data in probes]
     if len(set(have_audio)) != 1:
         raise ValueError("Chunks disagree on audio presence")
-    if destination.exists() or destination.is_symlink():
-        raise ValueError("Refusing to overwrite assembled preview")
-    destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.stem}-{uuid.uuid4().hex}.part.mp4"
     arguments = ["ffmpeg", "-v", "error", "-n"]
     for chunk in chunks:
@@ -326,6 +383,7 @@ async def concatenate(chunks: list[Path], destination: Path) -> dict[str, Any]:
     try:
         await _command(*arguments)
         details = await probe(temporary)
+        _guard_path(destination)
         os.link(temporary, destination)
     finally:
         if temporary.is_file():

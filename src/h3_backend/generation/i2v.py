@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 
+from ..infrastructure.media import sha256_file
 from ..infrastructure.store import contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
 from .models import Run, RunRequest
@@ -88,7 +89,7 @@ class I2VPipe:
                 raise ValueError("Reference must be a regular image file")
             info = await asyncio.to_thread(service.media.verify_image, path)
             digest = await asyncio.to_thread(
-                lambda p=path: hashlib.sha256(p.read_bytes()).hexdigest()
+                sha256_file, path
             )
             references.append(
                 {
@@ -124,7 +125,7 @@ class I2VPipe:
             assets = contained(service.settings.project_root, "assets", must_exist=True)
             source = contained(assets, reference["source"], must_exist=True)
             digest = await asyncio.to_thread(
-                lambda p=source: hashlib.sha256(p.read_bytes()).hexdigest()
+                sha256_file, source
             )
             if digest != reference["sha256"]:
                 raise ValueError("Identity image changed after admission")

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 
+from ..infrastructure.media import sha256_file
 from ..infrastructure.store import contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
 from .models import CONTINUATION_PROMPT, ContinueRequest, Run
@@ -141,7 +142,7 @@ class V2VPipe:
                 raise ValueError("Reference must be a regular image file")
             info = await asyncio.to_thread(service.media.verify_image, path)
             digest = await asyncio.to_thread(
-                lambda p=path: hashlib.sha256(p.read_bytes()).hexdigest()
+                sha256_file, path
             )
             original = next(r for r in identities if r.get("source") == source)
             if original["sha256"] != digest:
@@ -192,7 +193,7 @@ class V2VPipe:
             "source_root": "runs",
             "parent_id": run.parent_id,
             "sha256": await asyncio.to_thread(
-                lambda: hashlib.sha256(frame.read_bytes()).hexdigest()
+                sha256_file, frame
             ),
             "filename": upload["filename"], "upload": upload,
             "has_audio": False, "input_info": frame_info,
@@ -201,7 +202,7 @@ class V2VPipe:
             assets = contained(service.settings.project_root, "assets", must_exist=True)
             source = contained(assets, reference["source"], must_exist=True)
             digest = await asyncio.to_thread(
-                lambda p=source: hashlib.sha256(p.read_bytes()).hexdigest()
+                sha256_file, source
             )
             if digest != reference["sha256"]:
                 raise ValueError("Identity image changed after admission")
@@ -234,7 +235,7 @@ class V2VPipe:
                 "source": service.store.relative_artifact(run.id, "reference_tail.mp4"),
                 "source_root": "runs", "parent_id": run.parent_id,
                 "sha256": await asyncio.to_thread(
-                    lambda: hashlib.sha256(tail.read_bytes()).hexdigest()
+                    sha256_file, tail
                 ),
                 "filename": upload["filename"],
                 "upload": upload,

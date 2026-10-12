@@ -153,7 +153,14 @@ async def test_last_frame_is_exact_rgb_and_not_penultimate(tmp_path):
     with Image.open(destination) as image:
         assert image.mode == "RGB"
         assert image.tobytes() == pixels[-size:]
-        assert not image.info
+        # Benign encoder density/sRGB tags are not inherited prompt/EXIF/orientation.
+        assert set(image.info) <= {"aspect", "dpi", "gamma", "chromaticity"}
+        if "gamma" in image.info:
+            assert image.info["gamma"] == 0.45455
+        if "chromaticity" in image.info:
+            assert image.info["chromaticity"] == (
+                0.3127, 0.329, 0.64, 0.33, 0.3, 0.6, 0.15, 0.06,
+            )
     assert not list(tmp_path.glob("*.part.png"))
 
 
