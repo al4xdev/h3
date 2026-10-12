@@ -8,4 +8,5 @@ __pycache__/
 .env
 .env.*
 *.egg-info/
-.plan/.state/
+.plan/
+.agents/config.json
