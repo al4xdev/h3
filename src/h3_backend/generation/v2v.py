@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -13,7 +14,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 
 from ..infrastructure.media import sha256_file
-from ..infrastructure.store import contained, timestamp
+from ..infrastructure.store import Store, contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
 from .models import CONTINUATION_PROMPT, ContinueRequest, Run
 from .workflow import V2V_CONFIG, WorkflowConfig
@@ -39,6 +40,34 @@ class V2VPipe:
         self._state = V2VPipeState()
         self._sealed = False
         self._submitting = False
+
+    @classmethod
+    def from_run(cls, dispatcher, run: Run) -> V2VPipe:
+        """Restore the exact continuation options, never infer them from runtime defaults."""
+        Store.validate_request(run)
+        info = run.input_info
+        if (run.parent_id is None or info["operation"] != "v2v"
+                or info["mode"] != V2V_CONFIG.mode
+                or run.workflow_hash != dispatcher.builder.hash_for("v2v")
+                or json.dumps(info["workflow_provenance"], sort_keys=True) != json.dumps(
+                    dispatcher.builder.provenance("v2v"), sort_keys=True,
+                ) or info["comfy_extra_pnginfo"] != getattr(dispatcher.builder, "extra_pnginfo", {})):
+            raise ValueError("v2v admission disagrees with its canonical builder")
+        if not isinstance(info["continuation"], dict) or set(info["continuation"]) != set(
+            ContinueRequest.model_fields
+        ):
+            raise ValueError("Continuation snapshot must contain every native option")
+        request = ContinueRequest.model_validate(info["continuation"], strict=True)
+        if (request.seed != run.seed or request.duration_seconds != run.duration_seconds
+                or (request.prompt if request.prompt is not None else CONTINUATION_PROMPT) != run.prompt
+                or not run.prompt.strip()):
+            raise ValueError("Continuation options disagree with admitted input")
+        dispatcher.frames_for_duration(request.duration_seconds)
+        pipe = (cls(dispatcher).have(request).from_parent(run.parent_id).with_last_frame()
+                .with_original_identity().with_motion_tail().with_workflow(V2V_CONFIG).save_chunk())
+        pipe._state = replace(pipe._state, run=run.model_copy(deep=True))
+        pipe._sealed = True
+        return pipe
 
     @property
     def dispatcher(self):
@@ -171,7 +200,7 @@ class V2VPipe:
                     "workflow_provenance": service.builder.provenance("v2v"),
                     "comfy_extra_pnginfo": getattr(service.builder, "extra_pnginfo", {}),
                 },
-            )
+            ), materialize_request=True,
         )
         self._state = replace(self._state, run=run.model_copy(deep=True))
         self._sealed = True
@@ -198,9 +227,11 @@ class V2VPipe:
             "filename": upload["filename"], "upload": upload,
             "has_audio": False, "input_info": frame_info,
         })
-        for index, reference in enumerate(run.references):
-            assets = contained(service.settings.project_root, "assets", must_exist=True)
-            source = contained(assets, reference["source"], must_exist=True)
+        assets = contained(service.settings.project_root, "assets", must_exist=True)
+        paths = [contained(assets, ref["source"], must_exist=True) for ref in run.references]
+        if len(set(paths)) != len(paths) or any(not path.is_file() for path in paths):
+            raise ValueError("Materialized identities must be distinct regular image files")
+        for index, (reference, source) in enumerate(zip(run.references, paths, strict=True)):
             digest = await asyncio.to_thread(
                 sha256_file, source
             )

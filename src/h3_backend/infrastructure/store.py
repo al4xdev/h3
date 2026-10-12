@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -192,17 +193,121 @@ class Store:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def create(self, run: Run) -> Run:
+    def create(self, run: Run, *, materialize_request: bool = False) -> Run:
         with self._lock, storage_guard(self.root):
             if self.directory(run.id).exists():
                 raise ValueError("Run already exists")
+            if materialize_request:
+                self.validate_request(run)
+            # The directory reservation is exclusive, unlike later lifecycle saves.
+            self.directory(run.id).mkdir(exist_ok=False)
             self._save(run)
+            if materialize_request:
+                # Persist the UUID directory reservation before its last commit marker.
+                parent_fd = os.open(self.runs, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+                # Last publication is the commit marker. Imports and fixtures opt out.
+                self._artifact(run.id, "request.json", run.model_dump_json(indent=2), ".request-")
             return run.model_copy(deep=True)
+
+    @staticmethod
+    def validate_request(run: Run) -> None:
+        """Validate a sealed admission record without filesystem or business I/O."""
+        if (str(UUID(run.id)) != run.id or run.state != "queued"
+                or run.created_at != run.updated_at or run.prompt_id is not None
+                or run.output or run.progress or run.timings or run.decision is not None
+                or run.error is not None or run.publication_mode is not None):
+            raise ValueError("Request must be an untouched queued admission snapshot")
+        if set(run.input_info) != {
+            "mode", "operation", "continuation", "workflow_provenance", "comfy_extra_pnginfo",
+        }:
+            raise ValueError("Request contains non-admission input metadata")
+        if (not isinstance(run.input_info["operation"], str)
+                or run.input_info["operation"] not in {"i2v", "v2v"}):
+            raise ValueError("Unsupported materialized operation")
+        if not 1 <= len(run.references) <= (9 if run.parent_id is None else 8):
+            raise ValueError("Invalid admitted identity count")
+        sources = set()
+        for reference in run.references:
+            if (set(reference) != {"type", "role", "source", "source_root", "sha256", "input_info"}
+                    or reference.get("type") != "image" or reference.get("role") != "identity"
+                    or reference.get("source_root") != "assets"):
+                raise ValueError("Request must contain only original identity references")
+            source = reference["source"]
+            if (not isinstance(source, str) or not source or "\\" in source
+                    or Path(source).is_absolute() or ".." in Path(source).parts
+                    or Path(source).as_posix() in sources):
+                raise ValueError("Invalid or duplicate identity path")
+            sources.add(Path(source).as_posix())
+            digest = reference["sha256"]
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(c not in "0123456789abcdef" for c in digest)
+                    or not isinstance(reference["input_info"], dict)):
+                raise ValueError("Invalid identity hash or input metadata")
+            info = reference["input_info"]
+            if (set(info) != {"width", "height", "format"}
+                    or type(info["width"]) is not int or type(info["height"]) is not int
+                    or min(info["width"], info["height"]) <= 0
+                    or info["width"] * info["height"] > 16_000_000
+                    or info["format"] not in ("PNG", "JPEG", "WEBP")):
+                raise ValueError("Invalid admitted image geometry or format")
+        if run.parent_id is not None and str(UUID(run.parent_id)) != run.parent_id:
+            raise ValueError("Invalid request parent")
+
+    @staticmethod
+    def input_projection(run: Run) -> dict:
+        """Execution may enrich references and lifecycle, but never admitted input identity."""
+        return {
+            **{key: getattr(run, key) for key in (
+                "id", "created_at", "seed", "prompt", "duration_seconds", "workflow_hash", "parent_id",
+            )},
+            "references": [
+                {key: reference.get(key) for key in (
+                    "type", "role", "source", "source_root", "sha256", "input_info",
+                )}
+                for reference in run.references if reference.get("role") == "identity"
+            ],
+            "input_info": {key: run.input_info.get(key) for key in (
+                "mode", "operation", "continuation", "workflow_provenance", "comfy_extra_pnginfo",
+            )},
+        }
+
+    def request(self, run_id: str) -> Run:
+        """Bounded, no-follow read of the immutable commit marker for this same UUID."""
+        with self._lock, storage_guard(self.root):
+            path = safe_path(self.directory(run_id), "request.json")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or not 0 < info.st_size <= 256 * 1024):
+                    raise ValueError("Invalid request file type, owner or size")
+                raw = stream.read(256 * 1024 + 1)
+            if len(raw) > 256 * 1024:
+                raise ValueError("Request exceeds metadata size limit")
+            run = Run.model_validate_json(raw, strict=True)
+            self.validate_request(run)
+            if run.id != run_id:
+                raise ValueError("Request ID does not match its directory")
+            if self.input_projection(run) != self.input_projection(self.get(run_id)):
+                raise ValueError("Manifest inputs disagree with immutable request")
+            return run
 
     def get(self, run_id: str) -> Run:
         with self._lock, storage_guard(self.root):
             path = safe_path(self.directory(run_id), "manifest.json")
-            run = Run.model_validate_json(path.read_text(encoding="utf-8"))
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 1024 * 1024:
+                    raise ValueError("Manifest must be bounded regular metadata")
+                raw = stream.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("Manifest exceeds metadata size limit")
+            run = Run.model_validate_json(raw)
             if run.id != run_id:
                 raise ValueError("Manifest ID does not match its directory")
             return run
@@ -322,6 +427,11 @@ class Store:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.link(name, destination)
+                directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             finally:
                 if os.path.exists(name):
                     os.unlink(name)

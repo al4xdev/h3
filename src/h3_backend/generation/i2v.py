@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from time import monotonic
@@ -12,7 +13,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 
 from ..infrastructure.media import sha256_file
-from ..infrastructure.store import contained, timestamp
+from ..infrastructure.store import Store, contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
 from .models import Run, RunRequest
 from .workflow import I2V_CONFIG, WorkflowConfig
@@ -34,6 +35,31 @@ class I2VPipe:
         self._state = I2VPipeState()
         self._sealed = False
         self._submitting = False
+
+    @classmethod
+    def from_run(cls, dispatcher, run: Run) -> I2VPipe:
+        """Hydrate only the native sealed admission; no admission, UUID or media I/O."""
+        Store.validate_request(run)
+        info = run.input_info
+        if (run.parent_id is not None or info["operation"] != "i2v"
+                or info["mode"] != I2V_CONFIG.mode or info["continuation"] is not None
+                or run.workflow_hash != dispatcher.builder.hash_for("i2v")
+                or json.dumps(info["workflow_provenance"], sort_keys=True) != json.dumps(
+                    dispatcher.builder.provenance("i2v"), sort_keys=True,
+                ) or info["comfy_extra_pnginfo"] != getattr(dispatcher.builder, "extra_pnginfo", {})):
+            raise ValueError("i2v admission disagrees with its canonical builder")
+        request = RunRequest.model_validate({
+            "seed": run.seed, "prompt": run.prompt, "duration_seconds": run.duration_seconds,
+            "image": run.references[0]["source"],
+            "images": [reference["source"] for reference in run.references[1:]],
+        }, strict=True)
+        dispatcher.frames_for_duration(request.duration_seconds)
+        if not request.prompt.strip():
+            raise ValueError("Prompt cannot be whitespace")
+        pipe = cls(dispatcher).have(request).with_workflow(I2V_CONFIG).save_chunk()
+        pipe._state = replace(pipe._state, run=run.model_copy(deep=True))
+        pipe._sealed = True
+        return pipe
 
     @property
     def dispatcher(self):
@@ -112,7 +138,7 @@ class I2VPipe:
                     "workflow_provenance": service.builder.provenance("i2v"),
                     "comfy_extra_pnginfo": getattr(service.builder, "extra_pnginfo", {}),
                 },
-            )
+            ), materialize_request=True,
         )
         self._state = replace(self._state, run=run.model_copy(deep=True))
         self._sealed = True
@@ -121,9 +147,11 @@ class I2VPipe:
     async def _prepare(self, run: Run) -> list[dict]:
         service = self.dispatcher
         references = []
-        for index, reference in enumerate(run.references):
-            assets = contained(service.settings.project_root, "assets", must_exist=True)
-            source = contained(assets, reference["source"], must_exist=True)
+        assets = contained(service.settings.project_root, "assets", must_exist=True)
+        paths = [contained(assets, ref["source"], must_exist=True) for ref in run.references]
+        if len(set(paths)) != len(paths) or any(not path.is_file() for path in paths):
+            raise ValueError("Materialized identities must be distinct regular image files")
+        for index, (reference, source) in enumerate(zip(run.references, paths, strict=True)):
             digest = await asyncio.to_thread(
                 sha256_file, source
             )

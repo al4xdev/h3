@@ -122,17 +122,63 @@ class RunService:
         self._active: str | None = None
         self._task: asyncio.Task | None = None
         self._closing = False
+        self.watcher = None
+        self._candidates = asyncio.Queue(maxsize=64)
+        self._observer_task: asyncio.Task | None = None
 
     async def startup(self) -> None:
+        from ..infrastructure.watcher import FileWatcher
+
         self.store.hold_runtime()
         try:
+            self.watcher = FileWatcher(self.settings.project_root, on_request=self._request_hint)
+            self.watcher.start()
+            # Registration precedes restore. Initial scans never submit existing requests.
             self.store.restore()
+            self._observer_task = asyncio.create_task(self._observe_requests(), name="h3-file-hints")
         except Exception:
+            if self.watcher:
+                self.watcher.close()
             self.store.release_runtime()
             raise
 
+    def _request_hint(self, run_id: str) -> None:
+        if self._closing or self._active == run_id:
+            return
+        try:
+            self._candidates.put_nowait((run_id, self._active is not None or self._lock.locked()))
+        except asyncio.QueueFull:
+            self._reject_hint(run_id, "Request hint capacity exceeded; no automatic replay")
+
+    def _reject_hint(self, run_id: str, error: str) -> None:
+        try:
+            run = self.store.get(run_id)
+            if run.state == "queued":
+                self.store.update(run_id, state="failed", error=error)
+        except (OSError, ValueError):
+            logging.getLogger(__name__).warning("Rejected request %s: %s", run_id, error)
+
+    async def _observe_requests(self) -> None:
+        while True:
+            run_id, busy_at_event = await self._candidates.get()
+            try:
+                async with self._lock:
+                    if busy_at_event:
+                        raise Conflict("Global slot was busy when intent arrived; no automatic queue")
+                    await self._start_materialized(run_id)
+            except (OSError, ValueError) as exc:
+                # Only the candidate's live own manifest may receive failure evidence.
+                self._reject_hint(run_id, f"{type(exc).__name__}: {exc}")
+            finally:
+                self._candidates.task_done()
+
     async def shutdown(self) -> None:
         self._closing = True
+        if self.watcher:
+            self.watcher.close()
+        if self._observer_task:
+            self._observer_task.cancel()
+            await asyncio.gather(self._observer_task, return_exceptions=True)
         if self._task and not self._task.done():
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -227,14 +273,61 @@ class RunService:
                     error="Backend stopped before execution completed",
                 )
                 raise Conflict("Backend stopped during admission; no job was submitted")
-            self._active = run.id
-            # The returned model belongs to the caller, not to worker lifecycle bookkeeping.
-            self._task = asyncio.create_task(
-                self._worker(pipe, run.model_copy(deep=True)), name=f"h3-{run.id}"
-            )
+            try:
+                await self._start_materialized(run.id)
+            except (OSError, ValueError) as exc:
+                self.store.update(run.id, state="failed", error=f"{type(exc).__name__}: {exc}")
+                raise
             return run
 
-    async def _worker(self, pipe, run: Run):
+    def _hydrate(self, run: Run):
+        # Native verticals remain the only two business routes, not a generic command registry.
+        if run.input_info.get("operation") == "i2v":
+            from .i2v import I2VPipe
+
+            return I2VPipe.from_run(self, run)
+        if run.input_info.get("operation") == "v2v":
+            from .v2v import V2VPipe
+
+            pipe = V2VPipe.from_run(self, run)
+            parent = self.store.get(run.parent_id)
+            identities = [reference for reference in parent.references
+                          if reference.get("type") == "image"
+                          and reference.get("role") in (None, "identity")]
+            keys = ("source", "sha256")
+            if (parent.state != "accepted" or [tuple(r.get(k) for k in keys) for r in identities]
+                    != [tuple(r.get(k) for k in keys) for r in run.references]
+                    or any(r.get("source_root", "assets") != "assets" for r in identities)
+                    or any(r.get("role") not in (None, "identity", "initial_frame")
+                           for r in parent.references if r.get("type") == "image")):
+                raise Conflict("Continuation request no longer matches its accepted original identity")
+            return pipe
+        raise ValueError("Unsupported materialized operation")
+
+    async def _start_materialized(self, run_id: str) -> bool:
+        """Called under the sole admission lock by HTTP's commit kick or filesystem hints."""
+        if self._active == run_id:
+            return False
+        current = self.store.get(run_id)
+        if current.state != "queued":
+            return False  # Terminal/interrupted records are never replayed, even on duplicate hints.
+        if (current.prompt_id is not None or current.progress or current.output or current.timings
+                or current.decision is not None or current.error is not None
+                or current.publication_mode is not None
+                or any(ref.get("role") != "identity" for ref in current.references)):
+            raise Conflict("Queued manifest already contains execution evidence; no replay")
+        run = self.store.request(run_id)
+        self._hydrate(run)
+        if self._closing or self._active is not None:
+            raise Conflict("Only one backend job may be active; request was not queued for replay")
+        if self.memory_available() < self.settings.minimum_available_bytes:
+            raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
+        self._active = run_id
+        # Registration BEFORE 202 closes the one-GET-wait race. RAM caller pipes are not captured.
+        self._task = asyncio.create_task(self._worker(run_id), name=f"h3-{run_id}")
+        return True
+
+    async def _worker(self, run_id: str):
         start = monotonic()
         stop = asyncio.Event()
         telemetry_task = None
@@ -242,16 +335,21 @@ class RunService:
         interruption = {"reason": "Backend shutdown; own prompt cancellation requested"}
         owner = asyncio.current_task()
         try:
-            self.store.update(run.id, state="running")
+            # Re-read after scheduling too: no mutable admission object is execution authority.
+            run = self.store.request(run_id)
+            pipe = self._hydrate(run)
+            self.store.update(run_id, state="running")
             telemetry_task = asyncio.create_task(self._record_telemetry(run.id, stop))
             guard_task = asyncio.create_task(self._memory_guard(stop, owner, interruption))
+            # Recheck the external global slot for disk-originated admission as well.
+            await self.comfy.ensure_idle()
             await pipe.arun()
         except asyncio.CancelledError:
-            self.store.update(run.id, state="interrupted", error=interruption["reason"])
+            self.store.update(run_id, state="interrupted", error=interruption["reason"])
             raise
         except Exception as exc:  # noqa: BLE001 - persist all worker/plugin failures at this boundary.
             self.store.update(
-                run.id,
+                run_id,
                 state="interrupted" if isinstance(exc, ExecutionInterrupted) else "failed",
                 error=f"{type(exc).__name__}: {exc}",
                 timings={"total_seconds": monotonic() - start},
@@ -267,11 +365,11 @@ class RunService:
                     await asyncio.wait_for(telemetry_task, timeout=10)
                 except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - bounded plugin cleanup.
                     logging.getLogger(__name__).warning(
-                        "Telemetry cleanup failed for run %s: %s", run.id, exc
+                        "Telemetry cleanup failed for run %s: %s", run_id, exc
                     )
                     telemetry_task.cancel()
                     await asyncio.gather(telemetry_task, return_exceptions=True)
-            if self._active == run.id:
+            if self._active == run_id:
                 self._active = None
 
     async def _memory_guard(self, stop, owner, interruption):
