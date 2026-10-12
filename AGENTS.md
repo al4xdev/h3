@@ -2,7 +2,7 @@
 
 ## Objetivo do projeto
 
-Construir um aplicativo local leve que transforme referências e instruções de cena em vídeos encadeados: imagem → primeiro chunk → continuações → revisão → montagem. Preservar continuidade visual e permitir mudanças intencionais de ação/roupa. A API é o motor; benchmark e MCP são instrumentos de desenvolvimento e operação, não o produto final.
+Construir um aplicativo local leve que transforme referências e instruções de cena em vídeos encadeados: imagem → primeiro chunk → continuações → revisão → montagem. Preservar continuidade visual e permitir mudanças intencionais de ação/roupa. Os arquivos materializados em `.data` são a autoridade; HTTP é apenas a ponte local para o navegador. Benchmark e MCP são instrumentos de desenvolvimento e operação, não o produto final.
 
 O dono autorizou trabalho autônomo: investigar, propor planos, implementar fases, testar, gerar benchmarks próprios e criar commits locais. Não esperar aprovação rotineira a cada passo dentro deste escopo. Seguir as revisões de tarefas aprovadas pelo sistema de planos; esta instrução não substitui essa autorização nem as regras do harness. Não editar arquivos gerenciados de planos diretamente.
 
@@ -17,6 +17,16 @@ Autonomia não autoriza: alterar parâmetros de geração para tentar melhorar o
 - `infrastructure/` contém adaptadores técnicos compartilhados, não uma segunda camada de negócio.
 - Backend Python não importa PyTorch nem carrega modelos; ele coordena o ComfyUI. Importação/composição de ferramentas não inicia jobs.
 - Preservar o entrypoint e contratos HTTP existentes, ou migrá-los explicitamente com testes de compatibilidade.
+
+## Decisão mais recente: app local e paths como verdade
+
+- A pasta `.data` fica **no PC**, não no celular. Upload do celular pela página é salvo nessa pasta; também deve ser possível selecionar mídia já materializada ali. Sem sincronização entre dispositivos ou segunda fonte de estado.
+- Servidor Python local é uma ponte pequena: serve JS, lê metadados, recebe upload com escrita atômica e entrega arquivos próprios por streaming/Range. Não construir backend clássico, banco, broker, fila externa, camadas horizontais ou protocolo complexo de mensagens.
+- Pedido explícito fica em arquivo JSON próprio; `.locks` coordenam escritores/executores locais. Um lock sozinho, uma alteração de mídia ou a abertura da página nunca autoriza gerar. Não repetir intenção incerta ou job interrompido automaticamente.
+- Worker observa os paths no PC por eventos de filesystem (Linux/inotify), não por polling front↔back. Notificação SSE apenas informa que um path mudou; o JS relê os arquivos/metadados correspondentes. Registro inicial e recuperação de eventos devem evitar perder mudanças; reconexão não pode reenviar geração.
+- Python não decodifica/manipula pixels nem mantém imagens, frames ou vídeos inteiros na memória. FFmpeg/ffprobe fazem validação, extração, preparação e montagem fora do processo Python. Hash/cópia/streaming de bytes codificados usam buffers limitados. Nenhum Pillow no runtime; JS/Canvas pode montar comparações visuais. Ferramentas CPU históricas de auditoria são separadas do aplicativo.
+- O navegador precisa da ponte para acessar a pasta do PC, especialmente pelo celular; não prometer filesystem direto sem permissão/suporte real. A ponte não expõe a árvore inteira do PC nem permite caminhos arbitrários.
+- Locks/filesystem não eliminam cache de modelos/tensores do ComfyUI nem cache recuperável de arquivos do Linux. Medir RSS de processos separadamente; não prometer ganho só por trocar arquitetura.
 
 ## Geração: simplificar trabalho, não reajustar o resultado
 
