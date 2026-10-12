@@ -9,6 +9,7 @@ from .generation.dispatcher import Conflict, RunService
 from .generation.i2v import router as i2v_router
 from .generation.models import Run, Settings
 from .generation.v2v import router as v2v_router
+from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
 
 
@@ -23,6 +24,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
             await app.state.service.shutdown()
 
     app = FastAPI(title="H3 backend", lifespan=lifespan)
+    app.include_router(grok_router)
     if service is not None:
         app.state.service = service
 
