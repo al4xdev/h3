@@ -244,3 +244,39 @@ async def test_start_failure_does_not_leak_fd_and_close_is_idempotent(tmp_path, 
         watcher.start()
     assert watcher.fd is None and not watcher._watches
     watcher.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["inputs", "assemblies"])
+async def test_deep_manual_file_changes_emit_hints_never_inference(tmp_path, category):
+    candidates = []
+    watcher = FileWatcher(tmp_path, on_request=candidates.append)
+    watcher.start()
+    stream = watcher.events()
+    await anext(stream)
+    directory = tmp_path / ".data" / category / "a/b/c/d/e"
+    directory.mkdir(parents=True)
+    await hint(stream, f".data/{category}/a")
+    assert directory in watcher._watches.values()
+    (directory / "photo.png").write_bytes(b"manual encoded image")
+    await hint(stream, f".data/{category}/a/b/c/d/e/photo.png")
+    (directory / "request.json").write_text("never a native request here")
+    await hint(stream, f".data/{category}/a/b/c/d/e/request.json")
+    assert not candidates
+    await stream.aclose()
+    watcher.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["inputs", "assemblies"])
+async def test_category_relative_unicode_length_boundary_and_fixed_roots(tmp_path, category):
+    watcher = FileWatcher(tmp_path)
+    watcher.start()
+    # These are lexical guard checks: no overly long real filename/directory is created.
+    base = tmp_path / ".data" / category
+    assert watcher._allowed_directory(base / ("é" * 1024))
+    assert not watcher._allowed_directory(base / ("é" * 1025))
+    assert not watcher._allowed_directory(tmp_path / ".data" / "other" / "deep")
+    assert not watcher._allowed_directory(tmp_path / ".data" / "runs" / str(uuid4()) / "nested")
+    assert len(watcher._watches) == 4
+    watcher.close()

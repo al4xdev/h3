@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompts"
 DEFAULT_PROMPT = (PROMPT_ROOT / "initial.md").read_text(encoding="utf-8")
@@ -44,13 +44,34 @@ class Settings:
         )
 
 
+class ImageReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_root: Literal["assets", "inputs", "runs"]
+    path: str = Field(min_length=1, max_length=1024, strict=True)
+
+    @field_validator("path")
+    @classmethod
+    def relative_path(cls, value: str) -> str:
+        if (value.startswith("/") or "\\" in value or any(ord(c) < 32 for c in value)
+                or any(part in {"", ".", ".."} for part in value.split("/"))):
+            raise ValueError("Image reference must be a safe relative path")
+        return value
+
+
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: StrictInt = Field(ge=0, le=2**53 - 1)
     image: str = "dance_reference.png"
     images: list[str] = Field(default_factory=list, max_length=8)
+    references: list[ImageReference] = Field(default_factory=list, max_length=8)
     prompt: str = Field(default=DEFAULT_PROMPT, min_length=1, max_length=12000)
     duration_seconds: float = Field(default=2.3, gt=0, le=3, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def exclusive_references(self) -> RunRequest:
+        if self.references and (self.images or self.image != "dance_reference.png"):
+            raise ValueError("Explicit references cannot be mixed with legacy image aliases")
+        return self
 
 
 class ContinueRequest(BaseModel):

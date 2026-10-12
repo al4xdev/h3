@@ -13,7 +13,8 @@ import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from urllib.parse import quote
+from uuid import UUID, uuid4
 
 from ..generation.models import Run
 
@@ -75,6 +76,10 @@ def storage_guard(root: Path):
         yield
     finally:
         stream.close()
+
+
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+IMAGE_NAMES = frozenset({"initial_frame.png", "last_frame.png"})
 
 
 ARTIFACTS = frozenset({
@@ -156,6 +161,200 @@ class Store:
         self.runs.mkdir(parents=True, exist_ok=True)
         self._initialized = True
 
+    @staticmethod
+    def run_image_parts(source: str) -> tuple[str, str]:
+        parts = source.split("/")
+        if len(parts) == 4 and parts[:2] == [".data", "runs"]:
+            run_id, filename = parts[2:]
+        elif len(parts) == 3 and parts[0] == "runs":
+            run_id, filename = parts[1:]
+        else:
+            raise ValueError("Run image must use an own canonical or verified legacy path")
+        if str(UUID(run_id)) != run_id or filename not in IMAGE_NAMES:
+            raise ValueError("Only own initial_frame.png or last_frame.png are identity sources")
+        return run_id, filename
+
+    def reference_path(self, source_root: str, source: str) -> Path:
+        """Resolve only public still-image categories, never an arbitrary project path."""
+        if (not isinstance(source, str) or not source or len(source) > 1024
+                or "\\" in source or any(ord(c) < 32 for c in source)
+                or Path(source).is_absolute() or ".." in Path(source).parts):
+            raise ValueError("Invalid reference path")
+        if source_root == "runs":
+            run_id, filename = self.run_image_parts(source)
+            self.get(run_id)  # A UUID-shaped folder alone is not a valid own run.
+            path = self.own_artifact(run_id, source, filename)
+        elif source_root in ("assets", "inputs"):
+            if any(part.startswith(".") for part in Path(source).parts):
+                raise ValueError("Private or temporary images are not public references")
+            base = self.root / ("assets" if source_root == "assets" else ".data/inputs")
+            path = safe_path(base, source)
+            if source_root == "inputs" and (path.parent / ".part").exists() and not (path.parent / "metadata.json").exists():
+                raise ValueError("Input publication is incomplete")
+        else:
+            raise ValueError("Unsupported reference root")
+        if path.suffix.lower() not in IMAGE_TYPES:
+            raise ValueError("Unsupported reference image extension")
+        if not path.exists():
+            raise FileNotFoundError(path)
+        if not path.is_file():
+            raise ValueError("Reference must be a regular image file")
+        return path
+
+    @staticmethod
+    def _image_item(source_root: str, source: str, *, name: str | None = None, info=None) -> dict:
+        info = info or {}
+        if not isinstance(info, dict):
+            raise ValueError("Invalid image metadata")  # noqa: TRY004 - malformed metadata is HTTP400.
+        dimensions = {key: value if type(value := info.get(key)) is int and value > 0 else None
+                      for key in ("width", "height")}
+        if source_root == "runs":
+            run_id, filename = Store.run_image_parts(source)
+            url = f"/runs/{run_id}/image?name={filename}"
+        else:
+            url = f"/{source_root}/image?path={quote(source, safe='/')}"
+        return {
+            "id": f"{source_root}:{source}", "source_root": source_root, "path": source,
+            "name": name if name is not None else Path(source).name, "image_url": url,
+            **dimensions,
+        }
+
+    @staticmethod
+    def _image_files(base: Path):
+        """Finite metadata traversal; no symlink follows or media reads/probes."""
+        if not base.exists():
+            return
+        directories = [safe_path(base, ".")]
+        visited = 0
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > 10000:
+                        raise ValueError("Reference catalog exceeds metadata capacity")
+                    if entry.name.startswith(".") or entry.is_symlink():
+                        continue
+                    path = directory / entry.name
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(path)
+                    elif entry.is_file(follow_symlinks=False) and path.suffix.lower() in IMAGE_TYPES:
+                        yield path
+
+    @staticmethod
+    def _input_metadata(path: Path) -> dict:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384:
+                raise ValueError("Input metadata must be a bounded regular file")
+            data = stream.read(16385)
+        if len(data) > 16384:
+            raise ValueError("Input metadata exceeds size limit")
+        result = json.loads(data)
+        if not isinstance(result, dict):
+            raise ValueError("Invalid input metadata")  # noqa: TRY004 - malformed metadata is HTTP400.
+        return result
+
+    def list_inputs(self, *, limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
+        if type(limit) is not int or type(offset) is not int or not (
+            1 <= limit <= 100 and 0 <= offset <= 10000
+        ):
+            raise ValueError("Invalid metadata page bounds")
+        with self._lock, storage_guard(self.root):
+            self._authority()
+            items = []
+            for category, base in (("assets", safe_path(self.root, "assets")),
+                                   ("inputs", safe_path(self.root, ".data/inputs"))):
+                for path in self._image_files(base):
+                    source = path.relative_to(base).as_posix()
+                    metadata = path.parent / "metadata.json"
+                    name, info = path.name, {}
+                    if category == "inputs":
+                        if (path.parent / ".part").exists() and not metadata.exists():
+                            continue  # Upload failure evidence is not a manually placed reference.
+                        if metadata.exists():
+                            info = self._input_metadata(safe_path(path.parent, "metadata.json"))
+                            if (info.get("source_root") != "inputs" or info.get("path") != source
+                                    or info.get("id") != path.parent.name
+                                    or not isinstance(info.get("name"), str)):
+                                raise ValueError("Input metadata disagrees with its own image path")
+                            name = info["name"]
+                    items.append(self._image_item(category, source, name=name, info=info))
+                    if len(items) > 10000:
+                        raise ValueError("Reference catalog exceeds metadata capacity")
+            for index, manifest in enumerate(self.runs.glob("*/manifest.json")):
+                if index >= 10000:
+                    raise ValueError("Run image catalog exceeds metadata capacity")
+                run = self.get(manifest.parent.name)
+                for filename in sorted(IMAGE_NAMES):
+                    source = self.relative_artifact(run.id, filename)
+                    path = self.own_artifact(run.id, source, filename)
+                    if path.is_file():
+                        info = next((ref.get("input_info", {}) for ref in run.references
+                                     if ref.get("source") in (source, f"runs/{run.id}/{filename}")), {})
+                        items.append(self._image_item("runs", source, info=info))
+                        if len(items) > 10000:
+                            raise ValueError("Reference catalog exceeds metadata capacity")
+            items.sort(key=lambda item: (item["source_root"] != "assets", item["source_root"], item["path"]))
+            return items[offset:offset + limit], len(items)
+
+    def reserve_input(self) -> tuple[str, Path]:
+        with self._lock, storage_guard(self.root):
+            self._authority()
+            base = safe_path(self.root, ".data/inputs")
+            base.mkdir(exist_ok=True)
+            input_id = str(uuid4())
+            directory = safe_path(base, input_id)
+            directory.mkdir(exist_ok=False)
+            part = safe_path(directory, ".part")
+            fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            os.close(fd)
+            return input_id, part
+
+    def publish_input(self, input_id: str, name: str, info: dict, digest: str) -> dict:
+        """Publish original encoded bytes without overwrite; metadata is the last commit marker."""
+        if str(UUID(input_id)) != input_id:
+            raise ValueError("Invalid input id")
+        suffix = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}[info["format"]]
+        with self._lock, storage_guard(self.root):
+            base = safe_path(self.root, ".data/inputs")
+            directory = safe_path(base, input_id)
+            part = safe_path(directory, ".part")
+            if not part.is_file():
+                raise ValueError("Upload evidence must be a regular own file")
+            source = f"{input_id}/original{suffix}"
+            destination = safe_path(base, source)
+            marker = safe_path(directory, "metadata.json")
+            if marker.exists():
+                raise FileExistsError("Input metadata already exists")
+            # Any collision retains .part evidence and does not replace the original.
+            os.link(part, destination)
+            for path in (directory, base):
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            metadata = {"id": input_id, "source_root": "inputs", "path": source,
+                        "name": name, **info, "sha256": digest, "created_at": timestamp()}
+            fd, temporary = tempfile.mkstemp(prefix=".metadata-", dir=directory)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(metadata, stream, ensure_ascii=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(temporary, marker)
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            finally:
+                os.unlink(temporary)
+            part.unlink()
+            return self._image_item("inputs", source, name=name, info=info)
+
     def relative_artifact(self, run_id: str, filename: str) -> str:
         if filename not in ARTIFACTS:
             raise ValueError("Unsupported own artifact")
@@ -234,14 +433,17 @@ class Store:
         for reference in run.references:
             if (set(reference) != {"type", "role", "source", "source_root", "sha256", "input_info"}
                     or reference.get("type") != "image" or reference.get("role") != "identity"
-                    or reference.get("source_root") != "assets"):
+                    or reference.get("source_root") not in ("assets", "inputs", "runs")):
                 raise ValueError("Request must contain only original identity references")
             source = reference["source"]
             if (not isinstance(source, str) or not source or "\\" in source
                     or Path(source).is_absolute() or ".." in Path(source).parts
-                    or Path(source).as_posix() in sources):
+                    or any(ord(c) < 32 for c in source)
+                    or (reference["source_root"], Path(source).as_posix()) in sources):
                 raise ValueError("Invalid or duplicate identity path")
-            sources.add(Path(source).as_posix())
+            if reference["source_root"] == "runs":
+                Store.run_image_parts(source)
+            sources.add((reference["source_root"], Path(source).as_posix()))
             digest = reference["sha256"]
             if (not isinstance(digest, str) or len(digest) != 64
                     or any(c not in "0123456789abcdef" for c in digest)
@@ -387,9 +589,15 @@ class Store:
             raise ValueError("Invalid metadata page bounds")
         with self._lock, storage_guard(self.root):
             self._authority()
-            runs = [self.get(path.parent.name) for path in self.runs.glob("*/manifest.json")]
-            runs.sort(key=lambda run: (run.created_at, run.id), reverse=True)
-            return runs[offset:offset + limit], len(runs)
+            order = []
+            for path in self.runs.glob("*/manifest.json"):
+                if len(order) >= 10000:
+                    raise ValueError("Run catalog exceeds metadata capacity")
+                run = self.get(path.parent.name)
+                order.append((run.created_at, run.id))
+            # Keep only ordering keys for the catalog, not every run's provenance/output payload.
+            order.sort(reverse=True)
+            return [self.get(run_id) for _, run_id in order[offset:offset + limit]], len(order)
 
     def update(self, run_id: str, *, state: str | None = None, **changes) -> Run:
         with self._lock, storage_guard(self.root):

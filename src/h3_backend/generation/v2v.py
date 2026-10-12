@@ -152,34 +152,35 @@ class V2VPipe:
                 continue
             if role not in (None, "identity"):
                 raise ValueError("Ambiguous parent image role")
-            if reference.get("source_root", "assets") != "assets":
-                raise ValueError("Identity must originate inside assets")
-            # Legacy role-less sources must still resolve strictly inside assets below.
+            if reference.get("source_root", "assets") not in ("assets", "inputs", "runs"):
+                raise ValueError("Identity must originate inside a public image category")
+            # Legacy role-less sources retain their assets category; no root is inferred from paths.
             identities.append(reference)
         sources = [reference["source"] for reference in identities]
         if not sources:
             raise ValueError("At least one identity image is required")
         if len(sources) > 8:
             raise ValueError("Continuation permits at most eight identity images")
-        assets = contained(service.settings.project_root, "assets", must_exist=True)
-        paths = [contained(assets, source, must_exist=True) for source in sources]
+        paths = [service.store.reference_path(ref.get("source_root", "assets"), ref["source"])
+                 for ref in identities]
         # Compare resolved paths so lexical and symlink aliases cannot consume extra slots.
         if len(set(paths)) != len(paths):
             raise ValueError("Duplicate identity sources are ambiguous")
-        for source, path in zip(sources, paths, strict=True):
+        for original, path in zip(identities, paths, strict=True):
+            source = original["source"]
             if not path.is_file():
                 raise ValueError("Reference must be a regular image file")
             info = await asyncio.to_thread(service.media.verify_image, path)
             digest = await asyncio.to_thread(
                 sha256_file, path
             )
-            original = next(r for r in identities if r.get("source") == source)
             if original["sha256"] != digest:
                 raise ValueError("Original identity image changed since parent generation")
             references.append(
                 {
                     "type": "image", "role": "identity", "source": source,
-                    "source_root": "assets", "sha256": digest, "input_info": info,
+                    "source_root": original.get("source_root", "assets"),
+                    "sha256": digest, "input_info": info,
                 }
             )
         await service.comfy.ensure_idle()
@@ -227,8 +228,8 @@ class V2VPipe:
             "filename": upload["filename"], "upload": upload,
             "has_audio": False, "input_info": frame_info,
         })
-        assets = contained(service.settings.project_root, "assets", must_exist=True)
-        paths = [contained(assets, ref["source"], must_exist=True) for ref in run.references]
+        paths = [service.store.reference_path(ref["source_root"], ref["source"])
+                 for ref in run.references]
         if len(set(paths)) != len(paths) or any(not path.is_file() for path in paths):
             raise ValueError("Materialized identities must be distinct regular image files")
         for index, (reference, source) in enumerate(zip(run.references, paths, strict=True)):

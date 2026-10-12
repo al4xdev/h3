@@ -48,10 +48,15 @@ class I2VPipe:
                     dispatcher.builder.provenance("i2v"), sort_keys=True,
                 ) or info["comfy_extra_pnginfo"] != getattr(dispatcher.builder, "extra_pnginfo", {})):
             raise ValueError("i2v admission disagrees with its canonical builder")
+        if all(ref["source_root"] == "assets" for ref in run.references):
+            sources = {"image": run.references[0]["source"],
+                       "images": [ref["source"] for ref in run.references[1:]]}
+        else:
+            sources = {"references": [{"source_root": ref["source_root"], "path": ref["source"]}
+                                      for ref in run.references]}
         request = RunRequest.model_validate({
             "seed": run.seed, "prompt": run.prompt, "duration_seconds": run.duration_seconds,
-            "image": run.references[0]["source"],
-            "images": [reference["source"] for reference in run.references[1:]],
+            **sources,
         }, strict=True)
         dispatcher.frames_for_duration(request.duration_seconds)
         if not request.prompt.strip():
@@ -104,13 +109,13 @@ class I2VPipe:
         if request.prompt is not None and not request.prompt.strip():
             raise ValueError("Prompt cannot be whitespace")
         references = []
-        sources = [request.image, *request.images]
-        assets = contained(service.settings.project_root, "assets", must_exist=True)
-        paths = [contained(assets, source, must_exist=True) for source in sources]
+        sources = ([(ref.source_root, ref.path) for ref in request.references] if request.references
+                   else [("assets", source) for source in [request.image, *request.images]])
+        paths = [service.store.reference_path(category, source) for category, source in sources]
         # Compare resolved paths so lexical and symlink aliases cannot consume extra slots.
         if len(set(paths)) != len(paths):
             raise ValueError("Duplicate identity sources are ambiguous")
-        for source, path in zip(sources, paths, strict=True):
+        for (category, source), path in zip(sources, paths, strict=True):
             if not path.is_file():
                 raise ValueError("Reference must be a regular image file")
             info = await asyncio.to_thread(service.media.verify_image, path)
@@ -120,7 +125,7 @@ class I2VPipe:
             references.append(
                 {
                     "type": "image", "role": "identity", "source": source,
-                    "source_root": "assets", "sha256": digest, "input_info": info,
+                    "source_root": category, "sha256": digest, "input_info": info,
                 }
             )
         await service.comfy.ensure_idle()
@@ -147,8 +152,8 @@ class I2VPipe:
     async def _prepare(self, run: Run) -> list[dict]:
         service = self.dispatcher
         references = []
-        assets = contained(service.settings.project_root, "assets", must_exist=True)
-        paths = [contained(assets, ref["source"], must_exist=True) for ref in run.references]
+        paths = [service.store.reference_path(ref["source_root"], ref["source"])
+                 for ref in run.references]
         if len(set(paths)) != len(paths) or any(not path.is_file() for path in paths):
             raise ValueError("Materialized identities must be distinct regular image files")
         for index, (reference, source) in enumerate(zip(run.references, paths, strict=True)):

@@ -82,7 +82,7 @@ async def test_resolved_identity_aliases_rejected_at_admission_and_inheritance(t
     service = make_service(tmp_path)
     if alias == "alias.png":
         (tmp_path / "assets" / alias).symlink_to("dance_reference.png")
-    with pytest.raises(ValueError, match="Duplicate"):
+    with pytest.raises(ValueError, match="Duplicate|symlinks"):
         await service.create(RunRequest(seed=1, images=[alias]))
     assert not service.comfy.submitted
     parent = await service.create(RunRequest(seed=1))
@@ -90,7 +90,7 @@ async def test_resolved_identity_aliases_rejected_at_admission_and_inheritance(t
     reference = service.store.get(parent.id).references[0]
     service.store.update(parent.id, references=[reference, {**reference, "source": alias}])
     await service.decide(parent.id, True)
-    with pytest.raises(ValueError, match="Duplicate"):
+    with pytest.raises(ValueError, match="Duplicate|symlinks"):
         await service.continue_run(parent.id, ContinueRequest(seed=2))
     assert len(service.comfy.submitted) == 1
     await service.shutdown()

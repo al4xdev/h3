@@ -117,8 +117,9 @@ class FileWatcher:
             return parts[0] in {"runs", "inputs", "assemblies"}
         if parts[0] == "runs":
             return len(parts) == 2 and self._uuid(parts[1])
-        # Fixed roots and bounded depth, not a general PC filesystem mount.
-        return parts[0] in {"inputs", "assemblies"} and len(parts) <= 4
+        # Match accepted category-relative reference lengths, not an arbitrary nesting depth.
+        # The fixed roots and global watch budget still bound this single technical observer.
+        return parts[0] in {"inputs", "assemblies"} and len("/".join(parts[1:])) <= 1024
 
     @staticmethod
     def _uuid(value: str) -> bool:

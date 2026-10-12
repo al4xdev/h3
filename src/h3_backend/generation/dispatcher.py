@@ -295,9 +295,9 @@ class RunService:
                           if reference.get("type") == "image"
                           and reference.get("role") in (None, "identity")]
             keys = ("source", "sha256")
-            if (parent.state != "accepted" or [tuple(r.get(k) for k in keys) for r in identities]
-                    != [tuple(r.get(k) for k in keys) for r in run.references]
-                    or any(r.get("source_root", "assets") != "assets" for r in identities)
+            if (parent.state != "accepted"
+                    or [(r.get("source_root", "assets"), *(r.get(k) for k in keys)) for r in identities]
+                    != [(r["source_root"], *(r.get(k) for k in keys)) for r in run.references]
                     or any(r.get("role") not in (None, "identity", "initial_frame")
                            for r in parent.references if r.get("type") == "image")):
                 raise Conflict("Continuation request no longer matches its accepted original identity")
