@@ -25,7 +25,9 @@ workflows/                 # grafos nativos, exports golden e manifests necessá
 prompts/                   # templates Markdown de geração/continuação
 assets/                    # referência de identidade normalizada e sua procedência
 tests/                     # suíte pytest versionada (regressões, não dumps)
-tools/export_workflow.mjs  # exportador nativo; não é um teste avulso
+tools/
+├── export_workflow.mjs     # exportador nativo
+└── benchmark_h3.py         # benchmark externo: três chunks + montagem
 pyproject.toml, uv.lock    # dependências e configuração reproduzíveis
 runs/<id>/                 # local: manifest, inputs e chunk.mp4 persistentes
 .dumps/                    # local: scratch e evidências temporárias
@@ -59,3 +61,25 @@ uv run ruff check --no-cache src tests
 ```
 
 A suíte usa transporte Comfy simulado e fixtures sintéticas de mídia: não submete jobs GPU nem precisa gerar novos chunks reais.
+
+## Benchmark real congelado (opt-in)
+
+Com a API atual já rodando e a fila ComfyUI livre, execute uma vez, na raiz:
+
+```fish
+env PYTHONDONTWRITEBYTECODE=1 uv run python tools/benchmark_h3.py --api-url http://127.0.0.1:8010 --output-dir .dumps/benchmarks/baseline --technical-acceptance
+```
+
+O comando **gera três vídeos reais/GPU** em sequência, com seeds `2026101205/6/7`, duração solicitada `2.3`, 56 frames a 24 fps e 480×864 por chunk:
+
+1. Dança suave com o vestido **preto original**.
+2. Continua da pose anterior, pequeno salto; o vestido muda **de preto para vermelho durante o chunk**, terminando **de costas/vermelho**.
+3. Começa **de costas/vermelho**, vira **de frente** e revela o rosto da fotografia original, mantendo o vestido **vermelho**.
+
+A fotografia original nunca é recolorida. O relatório congela Markdown completo, seeds, parâmetros e SHA da referência/cenário. Os dois primeiros parents são aceitos **tecnicamente apenas neste benchmark**, depois dos checks, por autorização explícita da flag; isso não equivale à aprovação visual do dono. O terceiro permanece `ready_for_review`. Sem a flag, nenhuma submissão ocorre. O benchmark não muda a política de revisão da API.
+
+`benchmark.mp4` e `report.json` ficam no diretório local/ignorado informado. A montagem externa preserva os 168 frames (~7 s), sem trim, crossfade ou compensação escondida; áudio é preenchido até cada boundary. As junções são nos frames 56/112 (2,333333/4,666667 s). A cor, pose e recuperação facial precisam de **revisão visual humana**; checks técnicos não provam identidade ou continuidade perceptual.
+
+O diretório precisa ser novo e ficar sob `.dumps/benchmarks/`; arquivos existentes não são sobrescritos. Antes de cada POST o ledger grava a intenção. Se falhar/timeout, **não repetir o comando nesse diretório nem submeter às cegas**: consultar `report.json` e os IDs conhecidos para recuperação explícita. Não há resume automático ou cancelamento global.
+
+O relatório registra tempos wall-clock por chunk/total/montagem, timings do backend, probes/hashes, proveniência e contagem real dos grafos, estado dos parents e métricas disponíveis da telemetria. RAM/VRAM/swap são amostras de 5 s, não picos exatos; IO indisponível é registrado como tal. Modelos/cache não são liberados/reiniciados pelo teste, warm/cold é desconhecido, e uso de memória não é prova de offload para SSD. Mesmas seeds não garantem pixels idênticos. Para comparar uma poda futura, repita **o mesmo cenário** em outro diretório novo e revise o vídeo montado antes de declarar ausência de perda.
