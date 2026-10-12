@@ -1,75 +1,67 @@
 # H3 · Bancada de filme
 
-## Entrega independente (task 15, revisão 1)
+## Entrega independente — plano 15, revisão 2
 
-Assets HTML/CSS/JavaScript sem framework, build, CDN, fontes remotas ou dependências de frontend. A bancada grafite coloca o vídeo em retrato no centro; cobre indica seleção e ações. A régua numerada representa a **cadeia ancestral real**, não a ordem da biblioteca. Fontes locais: títulos condensados, corpo system-ui, dados monoespaçados. No celular, vídeo e decisões vêm antes do formulário e da biblioteca.
+HTML/CSS/JavaScript same-origin, sem framework, build, CDN, fontes remotas, dependências novas ou estado persistido no navegador. A bancada grafite/cobre preserva o vídeo retrato no centro e a régua ancestral real (origem → seleção). No celular, vídeo e decisões precedem formulário e biblioteca. Upload e catálogo usam o mesmo formulário simples.
 
-Esta entrega **não integra a API nem conclui a task 15**. O agente principal é responsável pela migração `.data`, integração HTTP, empacotamento dos assets, documentação raiz e validação final com os vídeos reais. Nenhum arquivo de backend foi alterado aqui.
+**Assets e mocks apenas; integração real pendente do agente principal.** Esta entrega não altera backend, recursos, dados, geração nativa ou benchmark, nem conclui plano/goal. SSE verdadeiro, publicação de upload e segurança dos paths precisam dos gates da ponte Python.
 
-## Mount/contrato para integração
+## Contratos da ponte
 
-Servir same-origin, sem expor a árvore do projeto:
-
-| Caminho | Asset/contrato |
+| Caminho | Contrato |
 | --- | --- |
 | `GET /` | `src/h3_backend/web/index.html` |
-| `GET /ui/app.css` | `src/h3_backend/web/app.css` (`text/css`) |
-| `GET /ui/app.js` | `src/h3_backend/web/app.js` (`text/javascript`, ES module) |
-| `GET /app/config` | `{default_prompt, continuation_prompt, reference_image: "dance_reference.png", duration_seconds: 2.3, workflow_output_profile}` |
-| `GET /runs?limit=50&offset=0` | `{items, total, limit, offset}` |
+| `GET /ui/app.css`, `/ui/app.js` | Assets fixos, MIME CSS/JavaScript ES module |
+| `GET /app/config` | `default_prompt`, `continuation_prompt`, `reference_image:"dance_reference.png"`, `duration_seconds:2.3`, `workflow_output_profile`; flags opcionais `filesystem_events`, `reference_library`, `assembly_enabled:false` |
+| `GET /runs?limit=50&offset=0` | `{items,total,limit,offset}`; itens `id,state,prompt,seed,duration_seconds,created_at,updated_at,parent_id,video_url` |
+| `GET /inputs?limit=50&offset=0` | `{items,total,limit,offset}`; itens `id,source_root,path,name,image_url,width?,height?` |
+| `POST /inputs?name=<encodeURIComponent(file.name)>` | Body **File** bruto, Content-Type do arquivo ou `application/octet-stream`; resposta item do catálogo |
+| `GET /events` | EventSource same-origin; evento `change` (ou default `message`), JSON `{path,invalidation:true}` |
 
-Cada item da coleção: `{id, state, prompt, seed, duration_seconds, created_at, updated_at, parent_id, video_url}`. Ordenação recente e validação de manifests pertencem ao backend. Paginação: 50 itens, offset não negativo; a UI não faz discovery fora dessa coleção. `video_url` deve ser `/runs/{id}/video` somente quando o arquivo próprio estiver publicado em estado `ready_for_review`, `accepted` ou `rejected`; outros estados recebem `null`.
+`source_root` só admite `assets`, `inputs`, `runs`. Paths e nomes são texto, não HTML, CSS selectors ou comandos. Thumbnails só aceitam URLs relativas próprias: `/assets/image?path=…`, `/inputs/image?path=…`, `/runs/{id}/image?name=initial_frame.png|last_frame.png`. O navegador não valida ownership do disco: contenção, formatos reais, symlinks e publicação atômica são responsabilidade da ponte. Paths relativos inseguros e URLs externas são rejeitados na UI também.
 
-Rotas existentes, preservadas:
+A referência original permanece default pelo alias legado. Escolher explicitamente um item envia `references:[{source_root,path}]` no **novo i2v**, sem campos extras do catálogo. Arquivos já no PC e frames publicados entram pelo catálogo, nunca por acesso livre ao filesystem do celular. Upload PNG/JPEG/WebP tem guard de 32 MiB, não vazio, duplo clique e resultado incerto. Nenhum base64, multipart, leitura gigante do File ou blob persistido. A prévia usa a URL própria retornada após publicação. Upload escolhe a imagem, mas **não gera nem revisa**. A validação efetiva do conteúdo pertence ao FFmpeg no PC; os bytes são salvos em `.data` no PC mesmo quando enviados pelo celular.
 
-- `GET /runs/{id}`: Run completo, inclusive `output.path`, `error`, seed, prompt e timestamps. O caminho interno é apenas evidência de publicação, nunca URL/arquivo arbitrário no navegador.
-- `GET /runs/{id}/sequence`: `{schema_version:1, root_id, end_run_id, blocks:[{index,id,parent_id,state,accepted,duration_seconds,duration_source,video_url}]}`. A UI mantém a ordem `blocks` (origem → seleção), sem ordenar IDs ou escolher irmãos. As fronteiras exibidas usam as durações retornadas. A régua não produz montagem nem modifica frames.
-- `GET /runs/{id}/video`: um único player HTML5 com controls, playsinline, preload metadata, object-fit contain, sem autoplay. Sem thumbnails ou dezenas de players. Estado terminal **sozinho** não basta: a UI exige `output.path` no detalhe e URL própria explícita na coleção ou cadeia. Ausência de arquivo, falha ou interrupção não vira vídeo pronto.
-- `POST /runs/{id}/accept` e `/reject`: somente `ready_for_review`; POST sem body, resposta Run. Aceitar não é certificação automática artística. Rejeitar mantém a evidência histórica.
-- `POST /runs/i2v`: `{seed, prompt, duration_seconds:2.3, image:"dance_reference.png"}`. Única referência existente autorizada nesta UI; não há upload/file browser.
-- `POST /runs/{accepted_parent_id}/v2v`: `{seed, prompt, duration_seconds:2.3, reference_tail_seconds:3, include_audio:true}`. Pai e campos são capturados no envio, sem incremento automático de seed ou knobs privados.
+Rotas existentes preservadas:
 
-Seed: somente dígitos, inteiro seguro de `0` a `9007199254740991`; não aceita sinal, espaços, expoente ou decimal. Prompt não vazio/whitespace, até 12000 caracteres; conteúdo é preservado, sem trim do payload. Duração é somente leitura; resolução, sampler e demais parâmetros não são controles da UI.
+- `GET /runs/{id}`: Run completo com `output.path`, erro e timestamps.
+- `GET /runs/{id}/sequence`: mantém `blocks` na ordem recebida, sem ordenar IDs, escolher irmãos ou montar frames.
+- `GET /runs/{id}/video`: player único, controls/playsinline/preload metadata/contain, sem autoplay. Exige estado `ready_for_review|accepted|rejected`, `output.path` no detalhe e URL própria explícita na coleção/cadeia. Falha, interrupção ou arquivo ausente não viram vídeo pronto.
+- `POST /runs/{id}/accept|reject`: apenas `ready_for_review`, ação explícita, sem body. Evidência rejeitada permanece.
+- `POST /runs/i2v`: `{seed,prompt,duration_seconds:2.3,image:"dance_reference.png"}` por default; seleção explícita troca apenas `image` por `references`.
+- `POST /runs/{accepted_parent_id}/v2v`: `{seed,prompt,duration_seconds:2.3,reference_tail_seconds:3,include_audio:true}`. **Sem nova referência**: identidade original do pai é herdada imutavelmente. Catálogo/upload ficam desabilitados nesse modo, com explicação visível.
 
-Recomenda-se CSP same-origin (`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`), Content-Type correto e inclusão explícita dos três assets no wheel. Não há scripts/styles inline no HTML.
+Seed aceita somente dígitos e inteiro seguro `0..9007199254740991` (não sinais, expoente, hexadecimal, decimal ou espaços). Prompt não vazio, até 12000 caracteres, preservado exatamente. Duração e parâmetros de geração continuam fixos. Não há botão nem POST de montagem: `assembly_enabled:false` não promete implementação da fase 18.
 
-## Admissão e recuperação sem replay
+## Eventos, admissão e recuperação
 
-1. Apenas submit explícito envia POST. Formulário e decisões ficam bloqueados durante admissão/wait; um guard no handler e outro no cliente impedem duplo envio.
-2. Geração exige HTTP **202** e ID real da resposta. Mostra que admissão não significa conclusão.
-3. Um único `GET /runs/{own_id}?wait=true`, usando AbortController. Sem polling, intervalos, inferência automática ou retry de API. Depois do resultado há leitura única da coleção e cadeia; não há segundo GET wait implícito.
-4. Falha de rede, resposta inesperada, ID ausente, 5xx ou falha do wait tornam o resultado **incerto**. O botão Gerar permanece desabilitado nessa sessão; a UI não oferece "Gerar novamente" como recuperação. Atualizar faz somente GETs para reconciliação manual dos IDs. Não contorne o bloqueio recarregando para repetir a mesma intenção sem verificar a admissão no backend.
-5. 400/404/409 explícitos são erros sem repetição automática. O usuário pode corrigir a instrução ou aguardar o slot livre. Falha de leitura posterior a um resultado confirmado não é confundida com falha de admissão.
-6. Fechar a página aborta apenas a espera local, **não cancela** o job Comfy. Nenhum endpoint de cancelamento ou controle global é usado.
+1. Config sem flags mantém comportamento legado, sem abrir EventSource ou pedir catálogo.
+2. Com SSE, registra listeners e espera o primeiro `open` **antes do snapshot** de catálogo/runs. Um erro inicial permite snapshot offline; o próximo open relê metadados. Não há timer, polling ou retry de POST.
+3. Hints aceitam paths `runs/…`, `inputs/…` e prefixo real `.data/…`; `.data`/invalidation sem path relê o snapshot inteiro. Telemetria, tmp e `.part` são ignorados. Bursts se agrupam em microtask, uma leitura ativa e um dirty flag; mudanças durante a leitura provocam uma releitura limitada após ela.
+4. Durante geração/revisão/upload, hints ficam dirty até o resultado. Epochs protegem seleção e coleção contra respostas antigas. Refresh de progresso não reassocia `video.src` quando a URL é a mesma. Pagehide fecha EventSource e aborta somente a espera local, **não cancela geração**.
+5. Geração explícita exige um POST **202** com ID real, seguido de exatamente um `GET /runs/{own_id}?wait=true`. Resultado vazio/de outro ID, wait perdido, admissão ambígua ou 5xx bloqueiam nova geração nesta sessão. Refresh/SSE nunca limpam esse bloqueio por suposição e nunca reenviam intenção.
+6. 400/404/409 explícitos não são repetidos. Upload desconhecido também permanece bloqueado para evitar duplicação silenciosa; consulte o catálogo. Uma falha de leitura após publicação confirmada não é tratada como falha de admissão.
 
-Estado transitório existe somente em memória. Não há localStorage/sessionStorage de negócio; JSON/backend permanece a autoridade durável. Prompts, detalhes HTTP e erros usam textContent/createElement, nunca innerHTML. Labels, foco visível, aria-live, skip link, estados textuais e reduced-motion estão presentes.
+Somente estado transitório em memória. textContent/createElement, labels, teclado, foco visível, aria-live, skip link e reduced-motion. CSP recomendado: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`. Sem scripts/styles inline no HTML.
 
-## Testes CPU e navegador totalmente fake
+## Validação CPU e browser totalmente interceptado
 
-Comandos fish, no root do projeto:
+Comandos fish (Playwright/Chromium já instalados; **não instalar npm/dependências**):
 
 ```fish
 node --check src/h3_backend/web/app.js
 node --test tests/frontend_ui.test.mjs
-node tests/frontend_browser_mock.mjs
-```
-
-O browser harness usa **Playwright já instalado**, sem instalar dependências ou iniciar servidor. Todas as requests de `http://h3.mock.invalid` são interceptadas/fulfill; qualquer origem diferente é abortada e falha o teste. **Não apontar para 8010, 8001 ou Comfy.** POSTs são somente fixtures em memória. Se Playwright/Chromium não estiver instalado, executar os contratos Node e comunicar a validação browser pendente ao responsável; não alterar configuração global.
-
-Opcionalmente, fornecer um vídeo próprio existente, somente para leitura e reprodução fake:
-
-```fish
 env H3_UI_TEST_CLIP=runs/02cf408f-c985-47a2-887d-731569d7827a/chunk.mp4 node tests/frontend_browser_mock.mjs
 ```
 
-Esse clip histórico pré-existente foi usado na validação desta entrega. Seu buffer foi servido exclusivamente pela interceptação fake. O teste verifica dimensões reais 480×864, playback explícito/pausa (não autoplay), contain, nenhuma exceção JS, nenhum request externo, keyboard/galeria read-only, cadeia `z-root → a-child` apesar dos IDs, estados sem arquivo, seeds inválidos, aceita/rejeita, continuação com pai e payload exatos, novo bloco, duplo-submit, um wait por ID, 409, admissão ambígua, config/list indisponível e recuperação read-only. Não valida qualidade perceptual da geração.
+13 testes Node, incluindo os oito contratos originais, roots/references, URLs inseguras, File bruto/duplo upload, normalização SSE e espera vazia/ID incorreto. Browser intercepta **todas** as requests de `http://h3.mock.invalid`, bloqueia origem externa e nunca abre processo API/Comfy. EventSource fake controlável reproduz abertura, reconexão, hints e close. POSTs de inferência, review e upload são separados e rotulados no relatório; upload fake não escreve disco.
 
-Evidência local/gitignored em `.dumps/tests/ui/`:
+O clip histórico é lido sem alteração e servido só pelo mock: dimensões 480×864, playback explícito/pausa, sem inferência. Testes cobrem 1440/390/320 sem overflow, XSS textual, estados sem arquivo, cadeia, duplo submit, payloads exatos, upload selecionado sem geração, snapshot SSE-first, burst bounded, dirty durante wait, seleção atrasada, reconexão sem POST e sem limpar incerteza, pagehide e config legado sem flags.
 
-- `desktop-1440.png`, `mobile-390.png`, `mobile-320.png`;
-- `failed-evidence.png`, `empty.png`, `api-error.png`, `admission-uncertain.png`;
-- `mock-requests.json`: trace completo de métodos, paths e payloads fake, exceções e violações de origem.
+Evidências locais novas (não sobrescrevem entrega R1):
 
-## Pendências do responsável pela integração
+- `.dumps/tests/ui-paths/`: desktop/mobile, empty, API error, admission uncertain, failed evidence, reference gallery, upload selected e SSE refreshed.
+- `.dumps/tests/reports/frontend_paths.json`: requests, exceções, violações, contagens de fake inference e fake disk upload.
+- `.dumps/tests/reports/frontend_paths_before.json`: hashes de manifests/mídia existentes de `runs`, `.data/runs` e `assets`; verificação posterior separada.
 
-Implementar coleção/config e mount estreito após a migração segura; testar coleção com manifests reais, MIME/CSP, compatibilidade do Run/sequence, GET de vídeo/range e wheel contendo os assets. Validar playback real em API própria somente após os gates de benchmark/migração. Nenhum benchmark, inferência, alteração de recursos/dados ou controle de GPU foi executado pelos testes de frontend.
+**Pendente do principal:** endpoints verdadeiros/config, stream SSE/inotify e lifecycle real, upload atômico validado, contenção/MIME/CSP/Range, wheel assets e browser read-only em API própria após gates CPU. Nenhum GPU, ajuste de geração, mudança de dados ou certificação perceptual foi executado nesta entrega.

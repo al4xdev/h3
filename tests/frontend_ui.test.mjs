@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
@@ -66,6 +66,40 @@ test('review uses only public routes and preserves actionable HTTP status', asyn
   const client = createClient(async (url, options) => { calls.push([options.method, url]); return reply({detail: '<b>slot busy</b>'}, 409); });
   await assert.rejects(client.decide('own', 'accept'), error => error instanceof HTTPError && error.status === 409 && error.message.includes('<b>'));
   assert.deepEqual(calls, [['POST', '/runs/own/accept']]);
+});
+test('explicit roots preserve source paths and continuations inherit without new sources', () => {
+  for (const source_root of ['assets', 'inputs', 'runs']) {
+    const reference = {source_root, path: source_root === 'runs' ? '.data/runs/own/last_frame.png' : 'photo.png', name: '<img onerror=evil>'};
+    assert.deepEqual(makePayload({seed: '0', prompt: ' exact ', reference}).references, [{source_root, path: reference.path}]);
+    assert.equal(makePayload({seed: '0', prompt: 'exact', reference, continuation: true}).references, undefined);
+  }
+  for (const path of ['../private.png', '/etc/photo.png', 'a/../photo.png', 'a//photo.png', 'a\\\\photo.png', 'a\u0000.png']) assert.throws(() => referenceValue({source_root: 'inputs', path}));
+  assert.throws(() => referenceValue({source_root: 'inputs;evil()', path: 'photo.png'}));
+});
+test('image URLs allow only bridge endpoints with safe relative query paths', () => {
+  for (const url of ['/assets/image?path=dance_reference.png', '/inputs/image?path=id%2Foriginal.png', '/runs/own-id/image?name=last_frame.png']) assert.equal(imageURL(url), url);
+  for (const url of ['https://evil/image', '//evil/image', 'javascript:evil()', '/inputs/image?path=..%2Fsecret', '/inputs/image?path=%2Fetc%2Fa.png', '/inputs/image?path=a.png&other=x', '/runs/own/image?name=chunk.mp4', '/inputs/image?path=a.png#evil', '/anything']) assert.equal(imageURL(url), null);
+});
+test('raw File upload is guarded and never serialized or followed by inference', async () => {
+  const file = new File(['encoded fixture'], 'phone photo.png', {type: 'image/png'});
+  const calls = []; let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const item = {source_root: 'inputs', path: 'id/original.png', image_url: '/inputs/image?path=id%2Foriginal.png'};
+  const client = createClient(async (url, options) => { calls.push({url, options}); await gate; return reply(item, 201); });
+  const first = client.upload(file); await assert.rejects(client.upload(file), /andamento/); release(); assert.deepEqual(await first, item);
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, '/inputs?name=phone%20photo.png'); assert.equal(calls[0].options.body, file); assert.equal(calls[0].options.headers['Content-Type'], 'image/png');
+  for (const invalid of [{size: 0, type: 'image/png'}, {size: 32 * 1024 * 1024 + 1, type: 'image/png'}, {size: 1, type: 'text/html'}]) assert.throws(() => validateUpload(invalid));
+});
+test('SSE hints normalize worker paths, ignore temporary telemetry and accept overflow', () => {
+  for (const path of ['.data', '.data/runs/own/manifest.json', 'runs/own/request.json', '.data/inputs/id/metadata.json']) assert.equal(relevantChange({path, invalidation: true}), true);
+  for (const path of ['runs/own/telemetry.jsonl', '.data/inputs/id/.part', 'runs/own/tmp/manifest.json', 'elsewhere']) assert.equal(relevantChange({path, invalidation: true}), false);
+  assert.equal(relevantChange({path: 'runs/own/manifest.json'}), false);
+});
+test('empty or wrong-ID wait is uncertain and never replayed', async () => {
+  for (const result of [null, {}, {id: 'other', state: 'accepted'}]) {
+    const calls = []; const client = createClient(async (url, options) => { calls.push(url); return options.method === 'POST' ? reply({id: 'own'}, 202) : reply(result); });
+    await assert.rejects(client.generate('/runs/i2v', {}, () => {}), /Espera/); assert.deepEqual(calls, ['/runs/i2v', '/runs/own?wait=true']);
+  }
 });
 test('assets do not contain unsafe bindings, persistence, autoplay or polling', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');

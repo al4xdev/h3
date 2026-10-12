@@ -53,13 +53,22 @@
         <form id="create-form">
           <fieldset id="create-fields" disabled>
             <label for="reference">Imagem de referência</label>
-            <select id="reference" name="image"><option value="dance_reference.png">dance_reference.png</option></select>
+            <select id="reference" name="image"><option value="dance_reference.png">Original · dance_reference.png</option></select>
+            <div id="reference-library" hidden>
+              <img id="reference-preview" class="reference-preview" alt="Referência escolhida para a nova cena" hidden loading="lazy">
+              <p id="reference-path" class="caption reference-path">assets / dance_reference.png</p>
+              <label for="upload-file">Imagem deste aparelho</label>
+              <input id="upload-file" type="file" accept="image/png,image/jpeg,image/webp">
+              <button id="upload" type="button">Enviar imagem ao PC</button>
+              <p class="caption">Do celular ou PC, o arquivo é salvo em .data no PC. Enviar não gera vídeo.</p>
+              <p id="upload-status" class="operation" role="status" aria-live="polite"></p>
+            </div>
             <label for="prompt">Instrução da cena</label>
             <textarea id="prompt" name="prompt" rows="9" maxlength="12000" required aria-describedby="prompt-hint"></textarea>
             <p id="prompt-hint" class="caption">Descreva a ação e o que deve permanecer entre blocos.</p>
             <div class="field-pair"><div><label for="seed">Seed</label><input id="seed" name="seed" type="text" inputmode="numeric" pattern="[0-9]+" value="2026101205" required aria-describedby="seed-hint"></div><div><label for="duration">Duração (s)</label><input id="duration" value="2.3" readonly aria-readonly="true"></div></div>
             <p id="seed-hint" class="caption">Inteiro de 0 a 9007199254740991. Não muda automaticamente.</p>
-            <p id="continuation-note" class="caption" hidden>Continuidade: últimos 3 s e áudio do pai aceito.</p>
+            <p id="continuation-note" class="caption" hidden>Continuidade: últimos 3 s e áudio do pai aceito. A identidade original do pai é herdada; outra imagem só se aplica a uma nova cena.</p>
             <button id="generate" class="primary" type="submit">Gerar novo bloco</button>
           </fieldset>
         </form>

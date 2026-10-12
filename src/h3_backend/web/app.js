@@ -6,10 +6,41 @@ export function parseSeed(value) {
   if (!Number.isSafeInteger(seed) || seed < 0) throw new Error('Seed fora do intervalo de 0 a 9007199254740991.');
   return seed;
 }
-export function makePayload({seed, prompt, image = 'dance_reference.png', continuation = false}) {
+export function referenceValue(reference) {
+  if (!reference || !['assets', 'inputs', 'runs'].includes(reference.source_root) || typeof reference.path !== 'string' || !reference.path || reference.path.startsWith('/') || /[\\\\\u0000-\u001f]/.test(reference.path) || reference.path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Referência local inválida.');
+  return {source_root: reference.source_root, path: reference.path};
+}
+export function imageURL(value) {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || /[\\\\\u0000-\u0020#]/.test(value)) return null;
+  try {
+    const url = new URL(value, 'http://local.invalid');
+    if (url.origin !== 'http://local.invalid') return null;
+    const path = url.searchParams.get('path');
+    if (['/assets/image', '/inputs/image'].includes(url.pathname) && [...url.searchParams.keys()].length === 1 && path) {
+      referenceValue({source_root: url.pathname === '/assets/image' ? 'assets' : 'inputs', path});
+      return value;
+    }
+    if (/^\/runs\/[a-zA-Z0-9-]+\/image$/.test(url.pathname) && [...url.searchParams.keys()].length === 1 && ['initial_frame.png', 'last_frame.png'].includes(url.searchParams.get('name'))) return value;
+  } catch { /* Untrusted catalog URLs never reach an image element. */ }
+  return null;
+}
+export function validateUpload(file) {
+  if (!file || !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error('Escolha uma imagem de até 32 MiB, não vazia.');
+  if (file.type && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Escolha PNG, JPEG ou WebP. O PC valida o conteúdo.');
+  return file;
+}
+export function relevantChange(event) {
+  if (!event || event.invalidation !== true) return false;
+  if (!event.path || event.path === '.data') return true;
+  if (typeof event.path !== 'string') return false;
+  const path = event.path.replace(/^\.data\//, '');
+  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path));
+}
+export function makePayload({seed, prompt, image = 'dance_reference.png', reference = null, continuation = false}) {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma instrução de 1 a 12000 caracteres.');
   const base = {seed: parseSeed(seed), prompt, duration_seconds: 2.3};
   if (continuation) return {...base, reference_tail_seconds: 3, include_audio: true};
+  if (reference) return {...base, references: [referenceValue(reference)]};
   if (image !== 'dance_reference.png') throw new Error('Use a referência original disponível.');
   return {...base, image};
 }
@@ -36,7 +67,21 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
     return response.json();
   }
   let submitting = false;
+  let uploading = false;
   return {
+    async upload(file) {
+      validateUpload(file);
+      if (uploading) throw new Error('Um upload já está em andamento.');
+      uploading = true;
+      try {
+        const response = await fetcher(`/inputs?name=${encodeURIComponent(file.name)}`, {method: 'POST', body: file, headers: {'Content-Type': file.type || 'application/octet-stream'}});
+        if (!response.ok) throw new HTTPError(response.status, 'Upload não confirmado. O PC não publicou a referência.');
+        const item = await response.json();
+        referenceValue(item);
+        if (!imageURL(item.image_url)) throw new Error('Upload retornou uma imagem local inválida; publicação incerta.');
+        return item;
+      } finally { uploading = false; }
+    },
     get: (path, signal) => request(path, {signal}),
     decide: (id, action) => request(`/runs/${encodeURIComponent(id)}/${action}`, {method: 'POST'}),
     async generate(path, payload, onAdmitted, signal) {
@@ -47,7 +92,9 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
         if (typeof admitted.id !== 'string' || !admitted.id) throw new Error('Admissão sem ID: resultado incerto.');
         onAdmitted(admitted);
         // Exactly one long wait for our admitted ID. No interval, polling or retry.
-        return await request(`/runs/${encodeURIComponent(admitted.id)}?wait=true`, {signal});
+        const completed = await request(`/runs/${encodeURIComponent(admitted.id)}?wait=true`, {signal});
+        if (!completed || completed.id !== admitted.id || typeof completed.state !== 'string') throw new Error('Espera sem resultado válido para o ID admitido.');
+        return completed;
       } finally { submitting = false; }
     },
   };
@@ -55,7 +102,8 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
 
 export function startUI(document, client = createClient()) {
   const $ = id => document.getElementById(id);
-  const state = {items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0;
+  const state = {references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   function text(id, value) { $(id).textContent = value; }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
@@ -69,10 +117,13 @@ export function startUI(document, client = createClient()) {
     $('generate').disabled = !state.config || state.busy || state.uncertain || (state.mode === 'continue' && run?.state !== 'accepted');
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
-    $('reference').disabled = state.mode === 'continue';
+    $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
+    $('upload-file').disabled = $('upload').disabled = !state.config?.reference_library || state.mode === 'continue' || state.uploadBusy || state.uploadUncertain;
+    $('generate').disabled ||= state.uploadBusy;
+    $('upload').textContent = state.uploadBusy ? 'Enviando ao PC…' : 'Enviar imagem ao PC';
     $('continuation-note').hidden = state.mode !== 'continue';
     text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar novo bloco');
-    text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${run?.id ?? '—'}.` : 'Começar pela referência original.');
+    text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${run?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
     $('previous').disabled = state.offset === 0;
     $('next').disabled = state.offset + state.limit >= state.total;
   }
@@ -135,21 +186,62 @@ export function startUI(document, client = createClient()) {
     if (state.mode === 'continue' && run?.state !== 'accepted') state.mode = 'new';
     renderLibrary(); renderSequence(); controls();
   }
+  function showReference() {
+    const item = state.reference || state.references.find(item => item.source_root === 'assets' && item.path === 'dance_reference.png');
+    text('reference-path', item ? `${item.source_root} / ${item.path}` : 'assets / dance_reference.png');
+    const url = imageURL(item?.image_url);
+    $('reference-preview').hidden = !url;
+    if (url) $('reference-preview').src = url; else $('reference-preview').removeAttribute('src');
+  }
+  async function loadReferences() {
+    if (!state.config?.reference_library) return;
+    const result = await client.get('/inputs?limit=50&offset=0');
+    if (!Array.isArray(result.items)) throw new Error('Catálogo de referências inválido.');
+    state.references = result.items.filter(item => { try { referenceValue(item); return Boolean(imageURL(item.image_url)); } catch { return false; } });
+    const select = $('reference'); select.replaceChildren(element('option', '', 'Original · dance_reference.png'));
+    select.firstChild.value = 'dance_reference.png';
+    for (const [index, item] of state.references.entries()) {
+      const option = element('option', '', `${item.source_root} · ${item.name || item.path}`); option.value = String(index); select.append(option);
+    }
+    const index = state.references.findIndex(item => item.source_root === state.reference?.source_root && item.path === state.reference?.path);
+    // An explicit selection is not silently replaced when its catalog page changes.
+    if (state.reference && index < 0) { const option = element('option', '', `${state.reference.source_root} · ${state.reference.name || state.reference.path}`); option.value = 'selected'; select.append(option); }
+    select.value = state.reference ? (index < 0 ? 'selected' : String(index)) : 'dance_reference.png';
+    showReference();
+  }
+  async function upload() {
+    if (state.busy || state.uploadBusy || state.uploadUncertain || state.mode === 'continue') return;
+    const file = $('upload-file').files?.[0];
+    try { validateUpload(file); } catch (error) { message('upload-status', error.message, true); return; }
+    state.uploadBusy = true; controls(); message('upload-status', 'Enviando arquivo ao PC. Nenhuma geração será iniciada.');
+    try {
+      state.reference = await client.upload(file); showReference();
+      message('upload-status', 'Imagem salva no PC e escolhida para uma nova cena.');
+      try { await loadReferences(); } catch (error) { message('upload-status', `Imagem publicada; catálogo indisponível: ${error.message}`, true); }
+    } catch (error) {
+      state.uploadUncertain = !(error instanceof HTTPError) || error.status >= 500;
+      message('upload-status', `Upload não confirmado: ${error.message}. ${state.uploadUncertain ? 'Consulte o catálogo; não envie novamente nesta sessão.' : 'Corrija o arquivo antes de enviar.'}`, true);
+    } finally { state.uploadBusy = false; controls(); drainChanges(); }
+  }
   async function loadLibrary() {
+    const epoch = ++libraryEpoch;
     $('library').setAttribute('aria-busy', 'true');
     try {
       const result = await client.get(`/runs?limit=${state.limit}&offset=${state.offset}`);
       if (!Array.isArray(result.items) || !Number.isInteger(result.total)) throw new Error('Resposta inválida da biblioteca.');
+      if (epoch !== libraryEpoch || stopped) return;
       state.items = result.items; state.total = result.total; renderLibrary();
     } finally { $('library').setAttribute('aria-busy', 'false'); }
   }
   async function select(id, knownRun) {
+    if (state.busy && !knownRun) return;
     const epoch = ++state.epoch;
     text('sequence-message', 'Carregando cadeia…');
     try {
       const run = knownRun || await client.get(`/runs/${encodeURIComponent(id)}`);
       if (epoch !== state.epoch) return;
-      state.selected = run; state.sequence = null; renderRun();
+      if (state.selected?.id !== run.id) state.sequence = null;
+      state.selected = run; renderRun();
       const sequence = await client.get(`/runs/${encodeURIComponent(id)}/sequence`);
       if (epoch !== state.epoch) return;
       if (!Array.isArray(sequence.blocks)) throw new Error('Resposta inválida da cadeia.');
@@ -162,6 +254,21 @@ export function startUI(document, client = createClient()) {
     const config = await client.get('/app/config');
     if (config.reference_image !== 'dance_reference.png' || config.duration_seconds !== 2.3 || typeof config.default_prompt !== 'string' || typeof config.continuation_prompt !== 'string') throw new Error('Configuração incompatível com os parâmetros preservados.');
     state.config = config; $('prompt').value = config.default_prompt;
+    $('reference-library').hidden = !config.reference_library;
+    if (config.filesystem_events && !events && document.defaultView?.EventSource) {
+      events = new document.defaultView.EventSource('/events');
+      const change = event => { try { if (relevantChange(JSON.parse(event.data))) queueRefresh(); } catch { /* Malformed hints are not commands. */ } };
+      events.addEventListener('change', change);
+      events.addEventListener('message', change);
+      // The first snapshot follows server subscription, not merely construction
+      // of EventSource. An initial connection error permits an honest offline
+      // snapshot; the eventual open then invalidates it without replaying POSTs.
+      await new Promise(resolve => {
+        let initialized = false;
+        events.addEventListener('open', () => { if (initialized) queueRefresh(); else { initialized = true; resolve(); } });
+        events.addEventListener('error', () => { if (!initialized) { initialized = true; resolve(); } });
+      });
+    }
     text('profile', `Perfil: ${config.workflow_output_profile}`); controls();
   }
   async function syncConfirmedRun(run) {
@@ -169,18 +276,34 @@ export function startUI(document, client = createClient()) {
     try { await loadLibrary(); await select(run.id, run); }
     catch (error) { message('notice', `Resultado confirmado; biblioteca não atualizada: ${error.message}. Atualizar faz apenas leitura.`, true); }
   }
-  async function refresh() {
+  function queueRefresh() { dirty = true; drainChanges(); }
+  function drainChanges() {
+    if (stopped || refreshActive || state.busy || state.uploadBusy || !dirty) return;
+    dirty = false;
+    // One microtask coalesces a burst, without a timer or completion polling.
+    refreshActive = true;
+    queueMicrotask(() => refresh(true));
+  }
+  async function refresh(fromEvent = false) {
+    if (!fromEvent && (refreshActive || state.busy || state.uploadBusy)) { dirty = true; return; }
+    refreshActive = true;
+    const selectionEpoch = state.epoch;
     message('notice', 'Atualizando metadados… Nenhuma geração será iniciada.');
     try {
       if (!state.config) await loadConfig();
+      await loadReferences();
       await loadLibrary();
-      if (state.selected) await select(state.selected.id);
-      else if (state.items.length) await select(state.items[0].id);
+      if (!state.busy && selectionEpoch === state.epoch) {
+        if (state.selected) await select(state.selected.id);
+        else if (state.items.length) await select(state.items[0].id);
+      }
       message('notice', state.uncertain ? 'Resultado anterior incerto. Consulte os IDs e não duplique o envio.' : 'Biblioteca atualizada. Gerar e revisar exigem ação explícita.');
     } catch (error) { message('notice', `Biblioteca indisponível: ${error.message}. Use Atualizar para consultar novamente.`, true); }
+    finally { refreshActive = false; drainChanges(); }
   }
   async function decide(action) {
     if (state.busy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
+    ++state.epoch; ++libraryEpoch;
     state.busy = true; controls();
     const id = state.selected.id;
     try {
@@ -190,18 +313,19 @@ export function startUI(document, client = createClient()) {
     } catch (error) {
       if (!(error instanceof HTTPError) || error.status >= 500) state.uncertain = true;
       message('operation', `Decisão não confirmada: ${error.message}. Atualize os metadados antes de agir; não repita uma decisão incerta.`, true);
-    } finally { state.busy = false; controls(); }
+    } finally { state.busy = false; controls(); drainChanges(); }
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.busy || state.uncertain || !state.config) return;
+    if (state.busy || state.uploadBusy || state.uncertain || !state.config) return;
     const continuation = state.mode === 'continue';
     if (continuation && state.selected?.state !== 'accepted') return;
     let payload;
-    try { payload = makePayload({seed: $('seed').value, prompt: $('prompt').value, image: $('reference').value, continuation}); }
+    try { payload = makePayload({seed: $('seed').value, prompt: $('prompt').value, reference: state.reference, continuation}); }
     catch (error) { message('operation', error.message, true); return; }
     const parent = continuation ? state.selected.id : null;
     const path = parent ? `/runs/${encodeURIComponent(parent)}/v2v` : '/runs/i2v';
+    ++state.epoch; ++libraryEpoch;
     state.busy = true; state.waitController = new AbortController(); controls();
     message('operation', 'Enviando uma solicitação. A admissão ainda não foi confirmada.');
     let admittedID = null;
@@ -217,9 +341,11 @@ export function startUI(document, client = createClient()) {
       // Generate button as recovery; read-only refresh is the safe next step.
       state.uncertain = admittedID !== null || !(error instanceof HTTPError) || error.status >= 500;
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
-    } finally { state.busy = false; state.waitController = null; controls(); }
+    } finally { state.busy = false; state.waitController = null; controls(); drainChanges(); }
   }
-  $('refresh').addEventListener('click', refresh);
+  $('reference').addEventListener('change', () => { if (state.mode === 'continue' || state.busy) return; const value = $('reference').value; state.reference = value === 'dance_reference.png' ? null : state.references[Number(value)] || state.reference; showReference(); controls(); });
+  $('upload').addEventListener('click', upload);
+  $('refresh').addEventListener('click', () => refresh());
   $('previous').addEventListener('click', () => { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.limit); refresh(); } });
   $('next').addEventListener('click', () => { if (state.offset + state.limit < state.total) { state.offset += state.limit; refresh(); } });
   $('new-mode').addEventListener('click', () => setMode('new'));
@@ -228,14 +354,15 @@ export function startUI(document, client = createClient()) {
   $('reject').addEventListener('click', () => decide('reject'));
   $('create-form').addEventListener('submit', generate);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
-  document.defaultView?.addEventListener('pagehide', () => state.waitController?.abort());
-  const ready = Promise.allSettled([
-    loadConfig(),
+  document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; events?.close(); state.waitController?.abort(); });
+  refreshActive = true;
+  const ready = loadConfig().then(() => Promise.allSettled([
+    loadReferences(),
     loadLibrary().then(() => state.items.length ? select(state.items[0].id) : undefined),
-  ]).then(results => {
+  ]), error => [{status: 'rejected', reason: error}]).then(results => {
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
-    controls();
+    controls(); refreshActive = false; drainChanges();
   });
   return {state, ready};
 }
