@@ -163,10 +163,13 @@ class ComfyClient:
                     if response.json().get("prompt_id") != prompt_id:
                         raise ComfyError("ComfyUI did not preserve the supplied prompt ID")
                     try:
-                        await self._consume(socket, prompt_id, on_progress)
+                        terminal = await self._consume(socket, prompt_id, on_progress)
+                        return await self._after_terminal(
+                            socket, prompt_id, on_progress, terminal
+                        )
                     except (websockets.exceptions.ConnectionClosed, OSError):
                         # Open the replacement before checking history to close the completion gap.
-                        # One recovery history read; subsequent terminal success gets one result read.
+                        # One recovery read; only own terminal events authorize later result reads.
                         checked = False
                         for attempt in range(2):
                             try:
@@ -177,16 +180,17 @@ class ComfyClient:
                                     )
                                     if entry is not None:
                                         return entry
-                                    await self._consume(replacement, prompt_id, on_progress)
-                                break
+                                    terminal = await self._consume(
+                                        replacement, prompt_id, on_progress
+                                    )
+                                    return await self._after_terminal(
+                                        replacement, prompt_id, on_progress, terminal
+                                    )
                             except (websockets.exceptions.ConnectionClosed, OSError):
                                 if checked or attempt == 1:
                                     raise ExecutionInterrupted(
                                         "WebSocket reconnect exhausted; outcome unknown"
                                     )
-                        # A terminal event after the one recovery check authorizes one result read.
-                        return self._completed(await self.history(prompt_id), prompt_id)
-                    return self._completed(await self.history(prompt_id), prompt_id)
         except BaseException:
             if submitted:
                 # Only the caller-supplied UUID is ever canceled, including uncertain HTTP outcomes.
@@ -205,7 +209,21 @@ class ComfyClient:
             raise ComfyError("Terminal event without confirmed successful history")
         return entry
 
-    async def _consume(self, socket, prompt_id: str, on_progress) -> None:
+    async def _after_terminal(self, socket, prompt_id: str, on_progress, terminal: str) -> dict:
+        history = await self.history(prompt_id)
+        entry = history_terminal(history, prompt_id)
+        if entry is not None:
+            return entry
+        if terminal == "execution_success":
+            # Comfy sends execution_success before task_done commits history. Its own
+            # executing(node=None) follows that commit; only this event permits a final read.
+            await self._consume(socket, prompt_id, on_progress, post_commit_only=True)
+            history = await self.history(prompt_id)
+        return self._completed(history, prompt_id)
+
+    async def _consume(
+        self, socket, prompt_id: str, on_progress, *, post_commit_only: bool = False
+    ) -> str:
         while True:
             message = await socket.recv()
             if isinstance(message, bytes):
@@ -213,7 +231,9 @@ class ComfyClient:
             event = json.loads(message)
             terminal = terminal_event(event, prompt_id)
             if terminal == "success":
-                return
+                if not post_commit_only or event["type"] == "executing":
+                    return event["type"]
+                continue
             if terminal == "failed":
                 raise ComfyError(str(event.get("data", {})))
             if terminal == "interrupted":
