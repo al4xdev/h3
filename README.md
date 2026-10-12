@@ -66,6 +66,18 @@ uv run ruff check --no-cache src tests
 
 A suíte usa transporte Comfy simulado e fixtures sintéticas de mídia: não submete jobs GPU nem precisa gerar novos chunks reais.
 
+## Perfil de saída (opt-in)
+
+O default continua `baseline`: 75 nós i2v/78 v2v, com a prévia nativa. `H3_WORKFLOW_OUTPUT_PROFILE=final_only` remove **apenas** `18`, `176`, `177` (prévia/decode vídeo/decode áudio exclusivos), deixando 72/75 nós. Todos os nós e links restantes são iguais; o output final `34` continua usando os decodes originais do denoised output1. Modelos, sampler, guias, condicionamento e parâmetros não são reajustados. Perfis desconhecidos falham antes de admitir jobs.
+
+Para selecionar o perfil na API (comando fish; **inicia a API**, não inferência por si):
+
+```fish
+env PYTHONDONTWRITEBYTECODE=1 H3_WORKFLOW_OUTPUT_PROFILE=final_only uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
+```
+
+Para restaurar o default, omita a variável ou use `H3_WORKFLOW_OUTPUT_PROFILE=baseline`. A proveniência registra `output_profile`, `removed_preview_nodes` e `effective_baseline_hash`; `workflow_hash` continua identificando o export golden original, enquanto o SHA do payload persistido identifica o JSON realmente submetido. `.data`/armazenamento e o cenário da CLI não mudam nesta fase. Remover a prévia não implica ganho proporcional de RAM/VRAM: modelos e cache continuam residentes. A comparação real e inspeção visual ainda são necessárias antes de promover esse perfil.
+
 ## Benchmark real congelado (opt-in)
 
 Com a API atual já rodando e a fila ComfyUI livre, execute uma vez, na raiz:

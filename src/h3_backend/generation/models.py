@@ -26,6 +26,11 @@ class Settings:
     inference_deadline: float = 1200.0
     minimum_available_bytes: int = 1536 * 1024**2
     memory_check_interval: float = 5.0
+    workflow_output_profile: Literal["baseline", "final_only"] = "baseline"
+
+    def __post_init__(self) -> None:
+        if self.workflow_output_profile not in ("baseline", "final_only"):
+            raise ValueError("Workflow output profile must be baseline or final_only")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -35,6 +40,7 @@ class Settings:
             comfy_root=Path(os.getenv("H3_COMFY_ROOT", str(cls.comfy_root))).resolve(),
             comfy_pid=int(os.environ["H3_COMFY_PID"]) if os.getenv("H3_COMFY_PID") else None,
             inference_deadline=float(os.getenv("H3_INFERENCE_DEADLINE", "1200")),
+            workflow_output_profile=os.getenv("H3_WORKFLOW_OUTPUT_PROFILE", "baseline"),
         )
 
 

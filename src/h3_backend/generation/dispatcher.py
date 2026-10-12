@@ -91,7 +91,9 @@ class RunService:
         if builder is None:
             from .workflow import WorkflowBuilder
 
-            builder = WorkflowBuilder(settings.project_root)
+            builder = WorkflowBuilder(
+                settings.project_root, output_profile=settings.workflow_output_profile,
+            )
         if frames_for_duration is None:
             from .workflow import frames_for_duration as frames
 

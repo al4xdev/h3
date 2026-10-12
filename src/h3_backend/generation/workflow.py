@@ -8,7 +8,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,9 @@ V2V_CONFIG = WorkflowConfig(
     "v2v", "continuation", ("272", 0), ("272", "274", "276"), 0,
     ("initial_frame", "identity", "motion_video"), 8, 9, 1,
 )
+
+OutputProfile = Literal["baseline", "final_only"]
+PREVIEW_NODES = ("18", "176", "177")
 
 
 def frames_for_duration(seconds: float) -> int:
@@ -71,7 +74,12 @@ def _media_entry(reference: dict[str, Any]) -> dict[str, Any]:
 
 
 class WorkflowBuilder:
-    def __init__(self, project_root: Path, mode: str = "normal"):
+    def __init__(
+        self, project_root: Path, mode: str = "normal", *, output_profile: OutputProfile = "baseline",
+    ):
+        if output_profile not in ("baseline", "final_only"):
+            raise ValueError("Workflow output profile must be baseline or final_only")
+        self._output_profile = output_profile
         # Constructor aliases are for old callers; production dispatches per build.
         aliases = {"normal": "i2v", "continuation": "v2v", "i2v": "i2v", "v2v": "v2v"}
         if mode not in aliases:
@@ -92,7 +100,7 @@ class WorkflowBuilder:
         self.allowed_inputs = manifest["allowed_inputs"]
         self.extra_pnginfo = copy.deepcopy(manifest["extra_pnginfo"])
         for operation in ("i2v", "v2v"):
-            self._verify_links(self.baseline_for(operation), operation)
+            self._verify_links(self.effective_baseline_for(operation), operation)
 
     @staticmethod
     def config_for(operation: str) -> WorkflowConfig:
@@ -110,6 +118,18 @@ class WorkflowBuilder:
             if node_id not in config.guide_helpers:
                 del graph[node_id]
         graph["125:14"]["inputs"]["conditioning"] = list(config.conditioning)
+        return graph
+
+    @property
+    def output_profile(self) -> OutputProfile:
+        return self._output_profile
+
+    def effective_baseline_for(self, operation: str) -> dict[str, Any]:
+        """Project the native operation without changing any surviving node or link."""
+        graph = self.baseline_for(operation)
+        if self.output_profile == "final_only":
+            for node_id in PREVIEW_NODES:
+                del graph[node_id]
         return graph
 
     @property
@@ -131,6 +151,9 @@ class WorkflowBuilder:
             "workflow_hash": self.hash_for(operation),
             "operation": operation,
             "config": asdict(self.config_for(operation)),
+            "output_profile": self.output_profile,
+            "removed_preview_nodes": list(PREVIEW_NODES) if self.output_profile == "final_only" else [],
+            "effective_baseline_hash": self.payload_hash(self.effective_baseline_for(operation)),
         }
 
     @staticmethod
@@ -147,6 +170,8 @@ class WorkflowBuilder:
             ("125:12", "sampler", ["22:6", 0]),
             ("125:12", "sigmas", ["542", 0]),
         ):
+            if node_id == "176" and self.output_profile == "final_only":
+                continue
             if graph[node_id]["inputs"].get(field) != expected:
                 raise ValueError(f"Missing or changed virtual link {node_id}.{field}")
         if any(node in graph for node in ("279", "296", "368")):
@@ -254,19 +279,20 @@ class WorkflowBuilder:
         videos = sum(entry["kind"] == "video" for entry in entries)
         if not 1 <= pictures <= config.max_pictures or videos > config.max_videos:
             raise ValueError("Supply one to nine identity images and at most three videos")
-        graph = self.baseline_for(operation)
+        graph = self.effective_baseline_for(operation)
         graph["365"]["inputs"]["prompt"] = prompt
         graph["16"]["inputs"]["seed"] = seed
         graph["22:23"]["inputs"]["value"] = duration_seconds
         graph["416"]["inputs"]["media_state"] = json.dumps(entries)
         graph["34"]["inputs"]["filename_prefix"] = filename_prefix
-        graph["18"]["inputs"]["filename_prefix"] = str(prefix.with_name("preview"))
+        if self.output_profile == "baseline":
+            graph["18"]["inputs"]["filename_prefix"] = str(prefix.with_name("preview"))
         self.verify_changes(graph, operation)
         return graph
 
     def verify_changes(self, graph: dict[str, Any], operation: str | None = None) -> None:
         operation = self._default_operation if operation is None else operation
-        baseline = self.baseline_for(operation)
+        baseline = self.effective_baseline_for(operation)
         if graph.keys() != baseline.keys():
             raise ValueError("The frozen graph's nodes cannot change")
         for node_id, original in baseline.items():
@@ -288,7 +314,9 @@ class WorkflowBuilder:
     def validate_object_info(
         self, object_info: dict[str, Any], operation: str | None = None,
     ) -> None:
-        baseline = self.baseline_for(self._default_operation if operation is None else operation)
+        baseline = self.effective_baseline_for(
+            self._default_operation if operation is None else operation,
+        )
         for node_id, node in baseline.items():
             if node["class_type"] not in object_info:
                 raise ValueError(f"Missing ComfyUI class {node['class_type']} ({node_id})")
@@ -310,6 +338,8 @@ class WorkflowBuilder:
             ("18", "format"),
             ("34", "format"),
         ):
+            if node_id == "18" and self.output_profile == "final_only":
+                continue
             node = baseline[node_id]
             schema = object_info[node["class_type"]]["input"]["required"][field]
             choices = schema[0]
