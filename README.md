@@ -6,13 +6,21 @@ API de geração por blocos, com revisão humana, sobre os grafos nativos valida
 
 ```text
 src/h3_backend/
+├── __init__.py
 ├── api.py                 # HTTP, consulta e revisão
-├── routes/
+├── generation/            # fatia vertical de geração
+│   ├── __init__.py
 │   ├── i2v.py             # I2VPipe: fluxo completo de imagem → chunk
-│   └── v2v.py             # V2VPipe: fluxo completo de continuação → chunk
-├── service.py             # dispatcher único: slot, RAM, worker e lifecycle
-├── workflow.py            # builder único + WorkflowConfig imutável
-└── comfy.py, media.py, models.py, store.py, telemetry.py
+│   ├── v2v.py             # V2VPipe: fluxo completo de continuação → chunk
+│   ├── dispatcher.py      # dispatcher único: slot, RAM, worker e lifecycle
+│   ├── workflow.py        # builder único + WorkflowConfig imutável
+│   └── models.py          # requests, settings e Run da geração
+└── infrastructure/        # adaptadores compartilhados existentes
+    ├── __init__.py
+    ├── comfy.py
+    ├── media.py
+    ├── store.py
+    └── telemetry.py
 workflows/                 # grafos nativos, exports golden e manifests necessários
 prompts/                   # templates Markdown de geração/continuação
 assets/                    # referência de identidade normalizada e sua procedência
@@ -26,7 +34,7 @@ runs/<id>/                 # local: manifest, inputs e chunk.mp4 persistentes
 └── references/            # cópia privada original apontada pelo manifest de referência
 ```
 
-Cada operação concentra sua composição fluente, estado e etapas sequenciais no próprio arquivo. Os setters não fazem I/O; o dispatcher admite um único job e seu worker executa o pipe. `workflow.py` usa `continuation_api.json` como template canônico e configura i2v/v2v sem modificar os exports validados.
+Cada operação concentra sua composição fluente, estado, router e etapas sequenciais no próprio arquivo de `generation/`. Os setters não fazem I/O; `generation/dispatcher.py` admite um único job e seu worker executa o pipe. `generation/workflow.py` usa `continuation_api.json` como template canônico e configura i2v/v2v sem modificar os exports validados. `infrastructure/` reúne somente adaptadores existentes, não novos serviços de negócio. O entrypoint continua `h3_backend.api:app`.
 
 `POST /runs/i2v` e `POST /runs/{parent_id}/v2v` retornam **202**. A continuação exige parent aceito e usa seu último frame, a identidade original e a cauda recente. Os aliases `/runs` e `/runs/{parent_id}/continue` continuam válidos. Aceitar um run não gera automaticamente o próximo.
 

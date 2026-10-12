@@ -1,7 +1,7 @@
 import pytest
 from test_service import make_service
 
-from h3_backend.models import ContinueRequest, RunRequest
+from h3_backend.generation.models import ContinueRequest, RunRequest
 
 
 @pytest.mark.asyncio

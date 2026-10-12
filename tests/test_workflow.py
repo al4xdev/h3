@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from h3_backend.workflow import I2V_CONFIG, V2V_CONFIG, WorkflowBuilder, frames_for_duration
+from h3_backend.generation.workflow import (
+    I2V_CONFIG,
+    V2V_CONFIG,
+    WorkflowBuilder,
+    frames_for_duration,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 

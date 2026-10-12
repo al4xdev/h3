@@ -12,9 +12,9 @@ from fractions import Fraction
 from pathlib import Path
 from time import monotonic
 
-from .comfy import ComfyClient, ExecutionInterrupted
+from ..infrastructure.comfy import ComfyClient, ExecutionInterrupted
+from ..infrastructure.store import Store, contained, timestamp
 from .models import ContinueRequest, Run, RunRequest, Settings
-from .store import Store, contained, timestamp
 
 
 class Conflict(ValueError):
@@ -97,11 +97,11 @@ class RunService:
 
             frames_for_duration = frames
         if media is None:
-            from . import media as media_module
+            from ..infrastructure import media as media_module
 
             media = media_module
         if telemetry is None:
-            from .telemetry import record_telemetry
+            from ..infrastructure.telemetry import record_telemetry
 
             telemetry = record_telemetry
         self.settings = settings
@@ -171,7 +171,7 @@ class RunService:
             )
 
     async def create(self, request: RunRequest) -> Run:
-        from .routes.i2v import I2VPipe
+        from .i2v import I2VPipe
         from .workflow import I2V_CONFIG
 
         return await self.submit(
@@ -179,7 +179,7 @@ class RunService:
         )
 
     async def continue_run(self, parent_id: str, request: ContinueRequest) -> Run:
-        from .routes.v2v import V2VPipe
+        from .v2v import V2VPipe
         from .workflow import V2V_CONFIG
 
         return await self.submit(

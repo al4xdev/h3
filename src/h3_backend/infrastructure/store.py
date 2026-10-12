@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-from .models import Run
+from ..generation.models import Run
 
 TRANSITIONS = {
     "queued": {"running", "failed", "interrupted"},

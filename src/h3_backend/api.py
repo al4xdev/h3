@@ -5,11 +5,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from .comfy import QueueBusy
-from .models import Run, Settings
-from .routes.i2v import router as i2v_router
-from .routes.v2v import router as v2v_router
-from .service import Conflict, RunService
+from .generation.dispatcher import Conflict, RunService
+from .generation.i2v import router as i2v_router
+from .generation.models import Run, Settings
+from .generation.v2v import router as v2v_router
+from .infrastructure.comfy import QueueBusy
 
 
 def create_app(*, settings: Settings | None = None, service: RunService | None = None) -> FastAPI:

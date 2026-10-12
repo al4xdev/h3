@@ -3,9 +3,9 @@ import pytest
 from test_api import Service
 
 from h3_backend.api import create_app
-from h3_backend.models import RunRequest
-from h3_backend.routes.i2v import router as i2v_router
-from h3_backend.routes.v2v import router as v2v_router
+from h3_backend.generation.i2v import router as i2v_router
+from h3_backend.generation.models import RunRequest
+from h3_backend.generation.v2v import router as v2v_router
 
 
 @pytest.mark.asyncio
@@ -33,8 +33,8 @@ async def test_explicit_routes_and_aliases_are_isolated(tmp_path):
     endpoints = {route.path: route.endpoint for route in [*i2v_router.routes, *v2v_router.routes]}
     assert endpoints["/runs"] is endpoints["/runs/i2v"]
     assert endpoints["/runs/{parent_id}/continue"] is endpoints["/runs/{parent_id}/v2v"]
-    assert endpoints["/runs/i2v"].__module__ == "h3_backend.routes.i2v"
-    assert endpoints["/runs/{parent_id}/v2v"].__module__ == "h3_backend.routes.v2v"
+    assert endpoints["/runs/i2v"].__module__ == "h3_backend.generation.i2v"
+    assert endpoints["/runs/{parent_id}/v2v"].__module__ == "h3_backend.generation.v2v"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://fake") as client:
         for url in ("/runs/i2v", "/runs"):

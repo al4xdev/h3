@@ -7,7 +7,7 @@ from test_api import Service
 from test_store import make_run
 
 from h3_backend.api import create_app
-from h3_backend.store import Store
+from h3_backend.infrastructure.store import Store
 
 
 def block(store, parent=None, *, accepted=True, verified=True):

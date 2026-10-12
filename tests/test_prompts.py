@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from h3_backend.models import ContinueRequest, RunRequest
-from h3_backend.workflow import WorkflowBuilder
+from h3_backend.generation.models import ContinueRequest, RunRequest
+from h3_backend.generation.workflow import WorkflowBuilder
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN = '''# Scene — dança suave

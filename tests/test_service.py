@@ -4,8 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from h3_backend.models import CONTINUATION_PROMPT, ContinueRequest, RunRequest, Settings
-from h3_backend.service import Conflict, RunService, output_source, verify_video
+from h3_backend.generation.dispatcher import Conflict, RunService, output_source, verify_video
+from h3_backend.generation.models import CONTINUATION_PROMPT, ContinueRequest, RunRequest, Settings
 
 PROBE = {
     "streams": [

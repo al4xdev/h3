@@ -4,9 +4,9 @@ import httpx
 import pytest
 
 from h3_backend.api import create_app
-from h3_backend.models import Run
-from h3_backend.service import Conflict
-from h3_backend.store import Store, timestamp
+from h3_backend.generation.dispatcher import Conflict
+from h3_backend.generation.models import Run
+from h3_backend.infrastructure.store import Store, timestamp
 
 
 class Service:
@@ -16,8 +16,8 @@ class Service:
         self.pipes = []
 
     async def submit(self, pipe):
-        from h3_backend.routes.i2v import I2VPipe
-        from h3_backend.routes.v2v import V2VPipe
+        from h3_backend.generation.i2v import I2VPipe
+        from h3_backend.generation.v2v import V2VPipe
 
         self.pipes.append(pipe)
         if isinstance(pipe, I2VPipe):

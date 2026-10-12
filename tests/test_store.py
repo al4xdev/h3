@@ -2,8 +2,8 @@ from uuid import uuid4
 
 import pytest
 
-from h3_backend.models import Run
-from h3_backend.store import Store, contained, timestamp
+from h3_backend.generation.models import Run
+from h3_backend.infrastructure.store import Store, contained, timestamp
 
 
 def make_run():

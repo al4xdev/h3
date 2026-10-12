@@ -4,10 +4,10 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 import pytest
 from test_service import make_service
 
-from h3_backend.models import ContinueRequest, RunRequest
-from h3_backend.routes.i2v import I2VPipe
-from h3_backend.routes.v2v import V2VPipe
-from h3_backend.workflow import I2V_CONFIG, V2V_CONFIG
+from h3_backend.generation.i2v import I2VPipe
+from h3_backend.generation.models import ContinueRequest, RunRequest
+from h3_backend.generation.v2v import V2VPipe
+from h3_backend.generation.workflow import I2V_CONFIG, V2V_CONFIG
 
 
 def i2v(service, request=None):

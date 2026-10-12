@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from h3_backend.telemetry import record_telemetry
+from h3_backend.infrastructure.telemetry import record_telemetry
 
 
 async def test_global_and_process_metrics_are_distinct(tmp_path):

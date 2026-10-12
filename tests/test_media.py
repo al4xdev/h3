@@ -5,8 +5,14 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from h3_backend import media
-from h3_backend.media import concatenate, prepare_last_frame, prepare_tail, probe, verify_image
+from h3_backend.infrastructure import media
+from h3_backend.infrastructure.media import (
+    concatenate,
+    prepare_last_frame,
+    prepare_tail,
+    probe,
+    verify_image,
+)
 
 
 async def fixture_video(path: Path, audio: bool, *, fps="24", frames=56):

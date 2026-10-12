@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-PROMPT_ROOT = Path(__file__).resolve().parents[2] / "prompts"
+PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompts"
 DEFAULT_PROMPT = (PROMPT_ROOT / "initial.md").read_text(encoding="utf-8")
 CONTINUATION_PROMPT = (PROMPT_ROOT / "continuation.md").read_text(encoding="utf-8")
 RunState = Literal[
@@ -19,7 +19,7 @@ RunState = Literal[
 
 @dataclass(frozen=True)
 class Settings:
-    project_root: Path = Path(__file__).resolve().parents[2]
+    project_root: Path = Path(__file__).resolve().parents[3]
     comfy_url: str = "http://127.0.0.1:8001"
     comfy_root: Path = Path("/home/alex/comfyui")
     comfy_pid: int | None = None

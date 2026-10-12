@@ -7,7 +7,7 @@ import httpx
 import pytest
 from websockets.exceptions import ConnectionClosedError
 
-from h3_backend.comfy import ComfyClient, QueueBusy, terminal_event
+from h3_backend.infrastructure.comfy import ComfyClient, QueueBusy, terminal_event
 
 
 class Socket:
