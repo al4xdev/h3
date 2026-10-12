@@ -1,0 +1,30 @@
+[project]
+name = "h3-backend"
+version = "0.1.0"
+description = "Review-gated ComfyUI H3 orchestration without a frontend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "websockets>=15,<17",
+  "uvicorn>=0.34,<1",
+  "pillow>=11,<13",
+  "psutil>=7,<8",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/h3_backend"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

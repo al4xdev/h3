@@ -1,0 +1,42 @@
+{
+  "status": "functional_reference_only_baseline_with_visible_seam",
+  "tests_passed": 43,
+  "ruff": "passed",
+  "api_nodes": 75,
+  "workflow_api_sha256": "10e0e8141131a371430525eb6ec0befa6bf3d9dd6aad7cfc8a547bc5aece9b8f",
+  "original_workflow_sha256": "14e09cd1a3873966ecfa52ff73878f8642a5236155d1b509adab60e4148072fd",
+  "initial_run": "0a28ae2d-72ff-431e-8f4f-1fc456e3d910",
+  "reference_only_child_run": "b1587caa-bb33-4fc1-81bf-fc2eb0b85dae",
+  "frames_per_chunk": 56,
+  "fps": 24,
+  "chunk_seconds": 2.3333333333333335,
+  "assembled_seconds": 4.666667,
+  "local_preview": "runs/b1587caa-bb33-4fc1-81bf-fc2eb0b85dae/preview_two_chunks.mp4",
+  "local_preview_sha256": "44359e1e82ab1b41ea0a7d61317ad51b94137bde72c9088cd6cdaf8a2bd8a938",
+  "media_binaries_versioned": false,
+  "validated": [
+    "Python backend executes exported ComfyUI graph without a frontend",
+    "Explicit virtual links and frozen generation configuration",
+    "Full Markdown and reference tags survive JSON transport verbatim",
+    "Image and paired-audio video references uploaded for the second chunk",
+    "Own-job WebSocket completion and atomic output publication",
+    "Human approval gate and persistent manifests",
+    "External concatenation preserves all frames and audio boundaries",
+    "Original workflow and downloaded reference remain untouched"
+  ],
+  "known_limitations": [
+    "The reference-only child did not anchor its first frame",
+    "A visible pose jump remains at 2.333 seconds; this is not a validated seamless pipeline",
+    "The original photo and clips do not show feet",
+    "The first dance test used default saver metadata flags; original flags were subsequently restored and tested with a non-inference fixture"
+  ],
+  "next_requested_contract": {
+    "workflow_initial": "existing image-only baseline",
+    "workflow_continuation": "anchored initial frame plus identity image and video context",
+    "Picture 1": "exact last decoded frame of accepted parent",
+    "Picture 2": "original identity/face image",
+    "Video 1": "last three seconds of accepted parent, clamped to available duration",
+    "first_frame_guide": "native MiniMaxH3AddGuide at frame_idx=0 using Picture 1",
+    "prompt": "full Markdown with native reference tags"
+  }
+}

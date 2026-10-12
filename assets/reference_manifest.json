@@ -1,0 +1,14 @@
+{
+  "original_source": "/home/alex/Downloads/Qwen_image_2.1_00119.png",
+  "original_sha256": "1a193263b32a7e8f54b93dd0b2ebdacd2be6d0208d69305aaf46b99e76c40a87",
+  "original_format": "PNG",
+  "private_exact_copy": ".dumps/references/Qwen_image_2.1_00119.png",
+  "normalized": "dance_reference.png",
+  "normalized_sha256": "668550fbe3973a423262dd2a3a4888127d7966eff5476353799ced1b1b032d98",
+  "size": [
+    1024,
+    1024
+  ],
+  "normalization": "PNG RGB, original prompt/aspect metadata removed, EXIF orientation applied",
+  "correction": "read_image preview was WebP; actual source verified via Pillow is PNG. Preview SHA256 is not raw-file SHA256."
+}
