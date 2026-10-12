@@ -1,6 +1,6 @@
-# H3 backend
+# H3 — app local de vídeo
 
-API de geração por blocos, com revisão humana, sobre os grafos nativos validados do ComfyUI. Sem frontend ou inferência PyTorch dentro do backend.
+Geração por blocos e revisão humana sobre os grafos nativos validados do ComfyUI. `.data` no PC é a autoridade; Python faz a ponte local e coordena ferramentas externas, sem carregar modelos ou pixels. A integração do frontend com observação de paths está em andamento; o contrato escolhido está em [arquitetura local](docs/local_architecture.md).
 
 As decisões permanentes de autonomia, arquitetura vertical, benchmark, MCP, dados e frontend estão em [`AGENTS.md`](AGENTS.md). A meta é um aplicativo local leve de vídeos encadeados, não apenas um teste de geração.
 
@@ -57,7 +57,9 @@ Cada operação concentra sua composição fluente, estado, router e etapas sequ
 
 ## Validar sem recriar caches
 
-Requer `uv`, Python ≥3.12 e FFmpeg/ffprobe no PATH. Na raiz do projeto:
+Requer `uv`, Python ≥3.12 e FFmpeg/ffprobe no PATH. Pillow é dependência **somente de desenvolvimento** para testes/tooling histórico; o runtime usa FFmpeg/ffprobe externos e hashes/streaming com buffers limitados. Não há imagens ou frames decodificados no Python da aplicação.
+
+Para validar o projeto, na raiz:
 
 ```fish
 uv sync
@@ -77,7 +79,7 @@ Para selecionar o perfil na API (comando fish; **inicia a API**, não inferênci
 env PYTHONDONTWRITEBYTECODE=1 H3_WORKFLOW_OUTPUT_PROFILE=final_only uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
 ```
 
-Para restaurar o default, omita a variável ou use `H3_WORKFLOW_OUTPUT_PROFILE=baseline`. A proveniência registra `output_profile`, `removed_preview_nodes` e `effective_baseline_hash`; `workflow_hash` continua identificando o export golden original, enquanto o SHA do payload persistido identifica o JSON realmente submetido. `.data`/armazenamento e o cenário da CLI não mudam nesta fase. Remover a prévia não implica ganho proporcional de RAM/VRAM: modelos e cache continuam residentes. A comparação real e inspeção visual ainda são necessárias antes de promover esse perfil.
+Para restaurar o default, omita a variável ou use `H3_WORKFLOW_OUTPUT_PROFILE=baseline`. A proveniência registra `output_profile`, `removed_preview_nodes` e `effective_baseline_hash`; `workflow_hash` continua identificando o export golden original, enquanto o SHA do payload persistido identifica o JSON realmente submetido. `.data`/armazenamento e o cenário da CLI não mudam nesta fase. Remover a prévia não implica ganho proporcional de RAM/VRAM: modelos e cache continuam residentes. A comparação real já foi concluída: baseline410.259s e final_only451.258s, com 168 frames/7s, cenário/presets preservados e inspeção visual amostrada. O processo/cache externo mudou entre execuções; esses tempos não permitem atribuir desempenho à poda. Evidência local: `.dumps/benchmarks/final-only-three-chunks/report.json` e `.dumps/tests/reports/output_profile_comparison.json`.
 
 ## Benchmark real congelado (opt-in)
 
