@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "h3_benchmark": {
+      "builtin": true,
+      "toolsDir": ".agents/tools",
+      "timeoutMs": 30000,
+      "failOnStartupError": true
+    }
+  }
+}
