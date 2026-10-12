@@ -1,11 +1,12 @@
 import copy
 import hashlib
 import json
+from dataclasses import FrozenInstanceError, fields, is_dataclass
 from pathlib import Path
 
 import pytest
 
-from h3_backend.workflow import WorkflowBuilder, frames_for_duration
+from h3_backend.workflow import I2V_CONFIG, V2V_CONFIG, WorkflowBuilder, frames_for_duration
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,9 +83,9 @@ def test_prefix_safety(prefix):
 def test_checksum_detects_changed_baseline(tmp_path):
     destination = tmp_path / "workflows"
     destination.mkdir()
-    for name in ("normal_api.json", "baseline_manifest.json"):
+    for name in ("continuation_api.json", "continuation_manifest.json", "baseline_manifest.json"):
         (destination / name).write_bytes((ROOT / "workflows" / name).read_bytes())
-    with (destination / "normal_api.json").open("a") as output:
+    with (destination / "continuation_api.json").open("a") as output:
         output.write(" ")
     with pytest.raises(ValueError, match="checksum"):
         WorkflowBuilder(tmp_path)
@@ -99,9 +100,11 @@ def test_saver_flags_match_original_ui_envelope():
     assert flags["VHS_KeepIntermediate"] is False
 
 
-def test_validates_models_without_fallback():
+@pytest.mark.parametrize("operation", ["i2v", "v2v"])
+def test_validates_models_without_fallback(operation):
     builder = WorkflowBuilder(ROOT)
-    info = {node["class_type"]: {"input": {"required": {}}} for node in builder.baseline.values()}
+    baseline = builder.baseline_for(operation)
+    info = {node["class_type"]: {"input": {"required": {}}} for node in baseline.values()}
     for node_id, field in (
         ("171:4", "unet_name"),
         ("171:3", "clip_name"),
@@ -112,15 +115,23 @@ def test_validates_models_without_fallback():
         ("18", "format"),
         ("34", "format"),
     ):
-        node = builder.baseline[node_id]
+        node = baseline[node_id]
         schema = info[node["class_type"]]["input"]["required"]
         choices = schema.setdefault(field, [[]])[0]
         if node["inputs"][field] not in choices:
             choices.append(node["inputs"][field])
-    builder.validate_object_info(info)
+    builder.validate_object_info(info, operation=operation)
+    if operation == "i2v":
+        assert "MiniMaxH3AddGuide" not in info
+        with pytest.raises(ValueError, match="Missing ComfyUI class"):
+            builder.validate_object_info(info, operation="v2v")
+    else:
+        incomplete = {key: value for key, value in info.items() if key != "MiniMaxH3AddGuide"}
+        with pytest.raises(ValueError, match="Missing ComfyUI class"):
+            builder.validate_object_info(incomplete, operation="v2v")
     info["UNETLoader"]["input"]["required"]["unet_name"][0] = []
     with pytest.raises(ValueError, match="Selected model"):
-        builder.validate_object_info(info)
+        builder.validate_object_info(info, operation=operation)
 
 
 def continuation_references(identities=1):
@@ -215,3 +226,107 @@ def test_continuation_checksum_and_unknown_mode(tmp_path):
         WorkflowBuilder(tmp_path, "continuation")
     with pytest.raises(ValueError, match="mode"):
         WorkflowBuilder(ROOT, "unknown")
+
+
+@pytest.mark.parametrize("operation,filename", [
+    ("i2v", "normal_api.json"), ("v2v", "continuation_api.json"),
+])
+def test_routed_baseline_is_structurally_identical_to_native_golden(operation, filename):
+    builder = WorkflowBuilder(ROOT)
+    raw = (ROOT / "workflows" / filename).read_bytes()
+    assert builder.baseline_for(operation) == json.loads(raw)
+    assert builder.hash_for(operation) == hashlib.sha256(raw).hexdigest()
+
+
+def test_configs_are_frozen_and_have_an_explicit_field_allowlist():
+    expected = {
+        "operation", "mode", "conditioning", "guide_helpers", "guide_frame",
+        "reference_roles", "max_identities", "max_pictures", "max_videos",
+    }
+    for config in (I2V_CONFIG, V2V_CONFIG):
+        assert is_dataclass(config)
+        assert {field.name for field in fields(config)} == expected
+        with pytest.raises(FrozenInstanceError):
+            config.operation = "other"
+        assert isinstance(config.conditioning, tuple)
+        assert isinstance(config.guide_helpers, tuple)
+        assert isinstance(config.reference_roles, tuple)
+    assert V2V_CONFIG.max_identities == 8
+    assert V2V_CONFIG.guide_frame == 0
+    assert I2V_CONFIG.guide_frame is None
+
+
+def test_one_instance_dispatches_without_mode_mutation_or_cross_run_leaks():
+    builder = WorkflowBuilder(ROOT)
+    initial = build(builder)
+    continuation = build(builder, operation="v2v", references=continuation_references(8))
+    assert len(initial) == 75 and len(continuation) == 78
+    assert build(builder, operation="i2v") == initial
+    assert builder.mode == "normal"
+    continuation["272"]["inputs"]["frame_idx"] = 12
+    assert builder.baseline_for("v2v")["272"]["inputs"]["frame_idx"] == 0
+    with pytest.raises(ValueError, match="operation"):
+        build(builder, operation="")
+
+
+@pytest.mark.parametrize("role,kind", [
+    ("initial_frame", "image"), ("motion_video", "video"), ("identity", "video"),
+])
+def test_i2v_rejects_explicit_continuation_roles(role, kind):
+    with pytest.raises(ValueError, match="identity image roles"):
+        build(WorkflowBuilder(ROOT), references=[reference(kind, role=role)])
+
+
+def test_routing_delta_allowlist_and_no_initial_helper_links():
+    builder = WorkflowBuilder(ROOT)
+    original = builder.baseline_for("v2v")
+    routed = builder.baseline_for("i2v")
+    assert original.keys() - routed.keys() == {"272", "274", "276"}
+    expected = copy.deepcopy(original)
+    for helper in ("272", "274", "276"):
+        del expected[helper]
+    expected["125:14"]["inputs"]["conditioning"] = ["471", 0]
+    assert routed == expected
+    for node in routed.values():
+        for value in node["inputs"].values():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                assert value[0] not in {"272", "274", "276"}
+                assert value[0] in routed
+    for node, field, value in (
+        ("125:14", "conditioning", ["272", 0]),
+        ("125:12", "latent_image", ["5", 0]),
+    ):
+        damaged = copy.deepcopy(routed)
+        damaged[node]["inputs"][field] = value
+        with pytest.raises(ValueError):
+            builder.verify_changes(damaged, "i2v")
+
+
+def test_only_canonical_graph_is_needed_at_runtime(tmp_path):
+    directory = tmp_path / "workflows"
+    directory.mkdir()
+    for filename in ("continuation_api.json", "continuation_manifest.json", "baseline_manifest.json"):
+        (directory / filename).write_bytes((ROOT / "workflows" / filename).read_bytes())
+    builder = WorkflowBuilder(tmp_path)
+    assert builder.baseline_for("i2v") == WorkflowBuilder(ROOT).baseline
+    build(builder, operation="v2v", references=continuation_references())
+
+
+def test_provenance_distinguishes_canonical_golden_and_execution_hashes():
+    builder = WorkflowBuilder(ROOT)
+    canonical_hash = hashlib.sha256((ROOT / "workflows/continuation_api.json").read_bytes()).hexdigest()
+    for operation in ("i2v", "v2v"):
+        provenance = builder.provenance(operation)
+        assert provenance["canonical_template_hash"] == canonical_hash
+        assert provenance["operation"] == operation
+        assert provenance["config"]["operation"] == operation
+        assert provenance["workflow_hash"] == builder.hash_for(operation)
+        refs = continuation_references() if operation == "v2v" else [reference()]
+        graph = build(builder, operation=operation, references=refs)
+        expected = hashlib.sha256(json.dumps(
+            graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()).hexdigest()
+        assert builder.payload_hash(graph) == expected
+        assert expected != provenance["workflow_hash"]
+        assert expected != canonical_hash
+        assert builder.payload_hash(build(builder, operation=operation, references=refs, seed=43)) != expected

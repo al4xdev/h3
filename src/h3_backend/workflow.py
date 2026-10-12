@@ -6,8 +6,29 @@ import copy
 import hashlib
 import json
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+
+@dataclass(frozen=True)
+class WorkflowConfig:
+    operation: str
+    mode: str
+    conditioning: tuple[str, int]
+    guide_helpers: tuple[str, ...]
+    guide_frame: int | None
+    reference_roles: tuple[str, ...]
+    max_identities: int
+    max_pictures: int
+    max_videos: int
+
+
+I2V_CONFIG = WorkflowConfig("i2v", "normal", ("471", 0), (), None, ("identity",), 9, 9, 3)
+V2V_CONFIG = WorkflowConfig(
+    "v2v", "continuation", ("272", 0), ("272", "274", "276"), 0,
+    ("initial_frame", "identity", "motion_video"), 8, 9, 1,
+)
 
 
 def frames_for_duration(seconds: float) -> int:
@@ -51,22 +72,74 @@ def _media_entry(reference: dict[str, Any]) -> dict[str, Any]:
 
 class WorkflowBuilder:
     def __init__(self, project_root: Path, mode: str = "normal"):
-        if mode not in ("normal", "continuation"):
-            raise ValueError("Workflow mode must be normal or continuation")
-        self.mode = mode
+        # Constructor aliases are for old callers; production dispatches per build.
+        aliases = {"normal": "i2v", "continuation": "v2v", "i2v": "i2v", "v2v": "v2v"}
+        if mode not in aliases:
+            raise ValueError("Workflow mode must be normal, continuation, i2v or v2v")
+        self._default_operation = aliases[mode]
+        self.mode = self.config_for(self._default_operation).mode
         directory = project_root / "workflows"
-        raw = (directory / f"{mode}_api.json").read_bytes()
-        manifest_name = "baseline_manifest.json" if mode == "normal" else "continuation_manifest.json"
-        manifest = json.loads((directory / manifest_name).read_text())
-        self.hash = hashlib.sha256(raw).hexdigest()
-        if self.hash != manifest["api_sha256"]:
+        raw = (directory / "continuation_api.json").read_bytes()
+        manifest = json.loads((directory / "continuation_manifest.json").read_text())
+        self.canonical_template_hash = hashlib.sha256(raw).hexdigest()
+        if self.canonical_template_hash != manifest["api_sha256"]:
             raise ValueError("Frozen workflow checksum mismatch; review the new baseline first")
-        self.baseline = json.loads(raw)
+        self._canonical = json.loads(raw)
+        self._manifests = {
+            "i2v": json.loads((directory / "baseline_manifest.json").read_text()),
+            "v2v": manifest,
+        }
         self.allowed_inputs = manifest["allowed_inputs"]
         self.extra_pnginfo = copy.deepcopy(manifest["extra_pnginfo"])
-        self._verify_links(self.baseline)
+        for operation in ("i2v", "v2v"):
+            self._verify_links(self.baseline_for(operation), operation)
 
-    def _verify_links(self, graph: dict[str, Any]) -> None:
+    @staticmethod
+    def config_for(operation: str) -> WorkflowConfig:
+        if operation == "i2v":
+            return I2V_CONFIG
+        if operation == "v2v":
+            return V2V_CONFIG
+        raise ValueError("Workflow operation must be i2v or v2v")
+
+    def baseline_for(self, operation: str) -> dict[str, Any]:
+        config = self.config_for(operation)
+        graph = copy.deepcopy(self._canonical)
+        # This is the complete routing allowlist, matching the two native exports.
+        for node_id in V2V_CONFIG.guide_helpers:
+            if node_id not in config.guide_helpers:
+                del graph[node_id]
+        graph["125:14"]["inputs"]["conditioning"] = list(config.conditioning)
+        return graph
+
+    @property
+    def baseline(self) -> dict[str, Any]:
+        return self.baseline_for(self._default_operation)
+
+    @property
+    def hash(self) -> str:
+        return self.hash_for(self._default_operation)
+
+    def hash_for(self, operation: str) -> str:
+        self.config_for(operation)
+        # Legacy workflow_hash identifies the raw golden export, not a run payload.
+        return self._manifests[operation]["api_sha256"]
+
+    def provenance(self, operation: str) -> dict[str, Any]:
+        return {
+            "canonical_template_hash": self.canonical_template_hash,
+            "workflow_hash": self.hash_for(operation),
+            "operation": operation,
+            "config": asdict(self.config_for(operation)),
+        }
+
+    @staticmethod
+    def payload_hash(graph: dict[str, Any]) -> str:
+        raw = json.dumps(graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _verify_links(self, graph: dict[str, Any], operation: str | None = None) -> None:
+        config = self.config_for(self._default_operation if operation is None else operation)
         for node_id, field, expected in (
             ("5", "vae", ["171:2", 0]),
             ("176", "vae", ["171:2", 0]),
@@ -84,7 +157,7 @@ class WorkflowBuilder:
             ("520", "any_01", ["5", 1]),
             ("125:12", "latent_image", ["520", 0]),
             ("125:12", "guider", ["125:14", 0]),
-            ("125:14", "conditioning", ["272" if self.mode == "continuation" else "471", 0]),
+            ("125:14", "conditioning", list(config.conditioning)),
             ("511", "any_01", ["417", 9]),
             ("510", "any_01", ["417", 12]),
             ("5", "ref_videos.ref_video_0", ["511", 0]),
@@ -96,14 +169,14 @@ class WorkflowBuilder:
                 ("5", f"ref_images.ref_image_{index}", ["417", index]),
                 ("418", f"pictures.<Picture {index + 1}>", ["417", index]),
             ])
-        if self.mode == "continuation":
+        if config.guide_helpers:
             for node_id, class_type in (
                 ("272", "MiniMaxH3AddGuide"), ("274", "ImageResizeKJv2"), ("276", "GetImageSize")
             ):
                 if graph.get(node_id, {}).get("class_type") != class_type:
                     raise ValueError(f"Missing native guide helper {node_id}")
             links.extend([
-                ("272", "frame_idx", 0),
+                ("272", "frame_idx", config.guide_frame),
                 ("272", "positive", ["471", 0]),
                 ("272", "latent", ["520", 0]),
                 ("272", "vae", ["171:2", 0]),
@@ -121,13 +194,16 @@ class WorkflowBuilder:
                 raise ValueError(f"Missing or changed native link {node_id}.{field}")
 
     @staticmethod
-    def _verify_continuation_roles(references: list[dict[str, Any]]) -> None:
+    def _verify_continuation_roles(
+        references: list[dict[str, Any]], config: WorkflowConfig = V2V_CONFIG,
+    ) -> None:
         # The native splitter preserves image order within categories: never silently reorder.
-        if not 3 <= len(references) <= 10:
+        if not 3 <= len(references) <= config.max_identities + 2:
             raise ValueError("Continuation requires initial_frame, one to eight identities, motion_video")
-        expected = [("image", "initial_frame")]
-        expected += [("image", "identity")] * (len(references) - 2)
-        expected += [("video", "motion_video")]
+        initial_role, identity_role, motion_role = config.reference_roles
+        expected = [("image", initial_role)]
+        expected += [("image", identity_role)] * (len(references) - 2)
+        expected += [("video", motion_role)]
         if [(ref.get("type"), ref.get("role")) for ref in references] != expected:
             raise ValueError("Continuation references must be ordered initial_frame, identity, motion_video")
         initial = references[0]
@@ -145,7 +221,10 @@ class WorkflowBuilder:
         duration_seconds: float,
         references: list[dict[str, Any]],
         filename_prefix: str,
+        operation: str | None = None,
     ) -> dict[str, Any]:
+        operation = self._default_operation if operation is None else operation
+        config = self.config_for(operation)
         frames_for_duration(duration_seconds)
         if not prompt.strip() or len(prompt) > 12000:
             raise ValueError("Prompt must contain between 1 and 12000 characters")
@@ -160,27 +239,37 @@ class WorkflowBuilder:
             or "%" in filename_prefix
         ):
             raise ValueError("Saver prefix must be a safe relative path under h3_backend/")
-        if self.mode == "continuation":
-            self._verify_continuation_roles(references)
+        if config.guide_helpers:
+            self._verify_continuation_roles(references, config)
+        elif any(
+            ref.get("role") is not None and (
+                ref["role"] not in config.reference_roles or ref.get("type") != "image"
+            )
+            for ref in references
+        ):
+            # Untyped references remain compatible; explicit continuation roles never leak into i2v.
+            raise ValueError("Initial workflow only accepts explicit identity image roles")
         entries = [_media_entry(reference) for reference in references]
         pictures = sum(entry["kind"] == "picture" for entry in entries)
         videos = sum(entry["kind"] == "video" for entry in entries)
-        if not 1 <= pictures <= 9 or videos > 3:
+        if not 1 <= pictures <= config.max_pictures or videos > config.max_videos:
             raise ValueError("Supply one to nine identity images and at most three videos")
-        graph = copy.deepcopy(self.baseline)
+        graph = self.baseline_for(operation)
         graph["365"]["inputs"]["prompt"] = prompt
         graph["16"]["inputs"]["seed"] = seed
         graph["22:23"]["inputs"]["value"] = duration_seconds
         graph["416"]["inputs"]["media_state"] = json.dumps(entries)
         graph["34"]["inputs"]["filename_prefix"] = filename_prefix
         graph["18"]["inputs"]["filename_prefix"] = str(prefix.with_name("preview"))
-        self.verify_changes(graph)
+        self.verify_changes(graph, operation)
         return graph
 
-    def verify_changes(self, graph: dict[str, Any]) -> None:
-        if graph.keys() != self.baseline.keys():
+    def verify_changes(self, graph: dict[str, Any], operation: str | None = None) -> None:
+        operation = self._default_operation if operation is None else operation
+        baseline = self.baseline_for(operation)
+        if graph.keys() != baseline.keys():
             raise ValueError("The frozen graph's nodes cannot change")
-        for node_id, original in self.baseline.items():
+        for node_id, original in baseline.items():
             node = graph[node_id]
             if node.keys() != original.keys():
                 raise ValueError(f"Unexpected node structure change: {node_id}")
@@ -194,10 +283,13 @@ class WorkflowBuilder:
             for field, value in original["inputs"].items():
                 if field not in allowed and node["inputs"][field] != value:
                     raise ValueError(f"Frozen input changed: {node_id}.{field}")
-        self._verify_links(graph)
+        self._verify_links(graph, operation)
 
-    def validate_object_info(self, object_info: dict[str, Any]) -> None:
-        for node_id, node in self.baseline.items():
+    def validate_object_info(
+        self, object_info: dict[str, Any], operation: str | None = None,
+    ) -> None:
+        baseline = self.baseline_for(self._default_operation if operation is None else operation)
+        for node_id, node in baseline.items():
             if node["class_type"] not in object_info:
                 raise ValueError(f"Missing ComfyUI class {node['class_type']} ({node_id})")
         # These are the selected, not subgraph-default, model names. Never silently substitute.
@@ -207,7 +299,7 @@ class WorkflowBuilder:
             ("171:2", "vae_name"),
             ("171:1", "vae_name"),
         ):
-            node = self.baseline[node_id]
+            node = baseline[node_id]
             schema = object_info[node["class_type"]]["input"]["required"][field]
             choices = schema[0]
             if not isinstance(choices, list) or node["inputs"][field] not in choices:
@@ -218,7 +310,7 @@ class WorkflowBuilder:
             ("18", "format"),
             ("34", "format"),
         ):
-            node = self.baseline[node_id]
+            node = baseline[node_id]
             schema = object_info[node["class_type"]]["input"]["required"][field]
             choices = schema[0]
             if isinstance(choices, list) and node["inputs"][field] not in choices:

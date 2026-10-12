@@ -6,7 +6,9 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from .comfy import QueueBusy
-from .models import ContinueRequest, Run, RunRequest, Settings
+from .models import Run, Settings
+from .routes.i2v import router as i2v_router
+from .routes.v2v import router as v2v_router
 from .service import Conflict, RunService
 
 
@@ -51,9 +53,8 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
 
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-    @app.post("/runs", response_model=Run, status_code=202)
-    async def create_run(request: RunRequest):
-        return await backend().create(request)
+    app.include_router(i2v_router)
+    app.include_router(v2v_router)
 
     @app.get("/runs/{run_id}", response_model=Run)
     async def get_run(run_id: str, wait: bool = False):
@@ -73,9 +74,9 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     async def reject_run(run_id: str):
         return await backend().decide(run_id, False)
 
-    @app.post("/runs/{run_id}/continue", response_model=Run, status_code=202)
-    async def continue_run(run_id: str, request: ContinueRequest):
-        return await backend().continue_run(run_id, request)
+    @app.get("/runs/{run_id}/sequence")
+    def get_sequence(run_id: str):
+        return backend().store.sequence(run_id)
 
     return app
 

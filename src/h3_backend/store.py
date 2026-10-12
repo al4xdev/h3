@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import threading
@@ -79,6 +80,75 @@ class Store:
             if run.id != run_id:
                 raise ValueError("Manifest ID does not match its directory")
             return run
+
+    def sequence(self, run_id: str) -> dict:
+        """Read only the selected ancestor chain; never discover/choose a sibling branch."""
+        with self._lock:
+            chain = []
+            seen = set()
+            current_id = run_id
+            while current_id is not None:
+                if current_id in seen:
+                    raise ValueError("Cycle in run sequence")
+                seen.add(current_id)
+                try:
+                    run = self.get(current_id)
+                except FileNotFoundError as exc:
+                    if current_id == run_id:
+                        raise
+                    raise ValueError("Sequence parent is missing") from exc
+                if chain and run.state != "accepted":
+                    raise ValueError("Sequence ancestor must be accepted")
+                if (
+                    run.decision is not None and run.state in {"accepted", "rejected"}
+                    and run.decision.get("accepted") is not (run.state == "accepted")
+                ):
+                    raise ValueError("Sequence state disagrees with approval")
+                chain.append(run)
+                current_id = run.parent_id
+            blocks = []
+            for index, run in enumerate(reversed(chain)):
+                path = run.output.get("path")
+                if path is not None:
+                    if not isinstance(path, str):
+                        raise ValueError("Invalid sequence output path")
+                    expected = self.directory(run.id) / "chunk.mp4"
+                    if contained(self.root, path) != expected:
+                        raise ValueError("Sequence output must be the run's own chunk")
+                probe = run.output.get("probe", {})
+                if not isinstance(probe, dict):
+                    # ValueError is the API's malformed-manifest -> HTTP400 boundary.
+                    raise ValueError("Invalid sequence probe metadata")  # noqa: TRY004
+                streams = probe.get("streams", [])
+                if not isinstance(streams, list) or any(not isinstance(s, dict) for s in streams):
+                    raise ValueError("Invalid sequence stream metadata")
+                video = next((s for s in streams if s.get("codec_type") == "video"), {})
+                duration = video.get("duration")
+                try:
+                    if isinstance(duration, bool):
+                        raise TypeError
+                    seconds = float(duration) if duration is not None else run.duration_seconds
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Invalid sequence duration") from exc
+                if not math.isfinite(seconds) or seconds <= 0:
+                    raise ValueError("Invalid sequence duration")
+                blocks.append({
+                    "index": index,
+                    "id": run.id,
+                    "parent_id": run.parent_id,
+                    "state": run.state,
+                    "accepted": run.state == "accepted",
+                    "duration_seconds": seconds,
+                    "duration_source": "verified_video" if duration is not None else "requested",
+                    "video_url": f"/runs/{run.id}/video"
+                        if run.state in {"ready_for_review", "accepted", "rejected"} else None,
+                })
+            return {
+                "schema_version": 1,
+                "root_id": chain[-1].id,
+                "end_run_id": run_id,
+                "blocks": blocks,
+            }
 
     def update(self, run_id: str, *, state: str | None = None, **changes) -> Run:
         with self._lock:

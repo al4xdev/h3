@@ -1,5 +1,5 @@
 import pytest
-from test_service import Builder, make_service
+from test_service import make_service
 
 from h3_backend.models import ContinueRequest, RunRequest
 
@@ -7,9 +7,6 @@ from h3_backend.models import ContinueRequest, RunRequest
 @pytest.mark.asyncio
 async def test_workflow_selection_and_literal_prompt(tmp_path):
     service = make_service(tmp_path)
-    anchored = Builder()
-    anchored.hash = "anchored-sha"
-    service.continuation_builder = anchored
     parent = await service.create(RunRequest(seed=1))
     await service._task
     await service.decide(parent.id, True)
@@ -18,8 +15,10 @@ async def test_workflow_selection_and_literal_prompt(tmp_path):
     await service._task
     result = service.store.get(child.id)
     assert result.workflow_hash == "anchored-sha"
-    assert len(service.builder.calls) == len(anchored.calls) == 1
-    assert anchored.calls[0]["prompt"] == markdown
+    assert len(service.builder.calls) == 2
+    assert [call["operation"] for call in service.builder.calls] == ["i2v", "v2v"]
+    assert service.builder.validations == ["i2v", "v2v"]
+    assert service.builder.calls[1]["prompt"] == markdown
     assert result.prompt == result.input_info["effective_markdown"] == markdown
     assert (service.store.directory(child.id) / "prompt.md").read_bytes() == markdown.encode()
     await service.shutdown()

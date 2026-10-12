@@ -1,0 +1,62 @@
+{
+  "plan": {"id": 3, "revision": 1, "approved_hash": "9642c97721996914255179758128f900ffc71227d5634ebbf7d3452a78b3e506"},
+  "previous_commit": "d974ce0",
+  "status": "implemented_and_validated_without_new_gpu_inference",
+  "dispatcher": {
+    "module": "src/h3_backend/workflow.py",
+    "class": "WorkflowBuilder",
+    "runtime_instances_per_service": 1,
+    "canonical_graph": "workflows/continuation_api.json",
+    "canonical_template_sha256": "88d43c730587c73f6b3fba58412631f962e829981cc5531022a34785ce2d73b1",
+    "configuration": "Frozen WorkflowConfig dataclass with I2V_CONFIG and V2V_CONFIG constants; per-call explicit operation, no mode mutation",
+    "i2v": {"nodes": 75, "conditioning": ["471", 0], "removed_helpers": ["272", "274", "276"], "golden_workflow_hash": "10e0e8141131a371430525eb6ec0befa6bf3d9dd6aad7cfc8a547bc5aece9b8f"},
+    "v2v": {"nodes": 78, "conditioning": ["272", 0], "guide_frame": 0, "maximum_identities": 8, "golden_workflow_hash": "88d43c730587c73f6b3fba58412631f962e829981cc5531022a34785ce2d73b1"},
+    "equivalence": "Both routed baselines are structurally identical to the native golden exports; no guessed sampler or virtual links",
+    "hash_contract": "Run.workflow_hash remains the historical mode-specific raw golden export hash. input_info.workflow_provenance records canonical template hash, operation and effective config. input_info.workflow_api_sha256 hashes the exact persisted parameterized workflow_api.json bytes separately.",
+    "legacy_builder_compatibility": "normal/continuation constructor aliases retained for older callers, not separate production instances"
+  },
+  "operation_isolation": {
+    "http_modules": ["src/h3_backend/routes/i2v.py", "src/h3_backend/routes/v2v.py"],
+    "i2v_pipeline": ["create", "_admit_i2v", "_prepare_i2v", "_execute_i2v"],
+    "v2v_pipeline": ["continue_run", "_admit_v2v", "_prepare_v2v", "_execute_v2v"],
+    "shared": "Single backend lock, active slot, memory guard, dispatcher, Store and ComfyClient; network cancellation/atomic publication/telemetry preserved",
+    "no_multiplexed_pipeline": true,
+    "explicit_routes": ["POST /runs/i2v", "POST /runs/{parent_id}/v2v"],
+    "legacy_aliases": ["POST /runs", "POST /runs/{parent_id}/continue"],
+    "admission_status": 202,
+    "unchanged": "Request schemas, default prompts/literal Markdown, accepted-parent gate, role/identity inheritance and limits, WebSocket before submission, long-wait, no file polling, own-prompt cancellation and no restart replay"
+  },
+  "sequence_contract": {
+    "route": "GET /runs/{run_id}/sequence",
+    "schema_version": 1,
+    "root_fields": ["schema_version", "root_id", "end_run_id", "blocks"],
+    "block_fields": ["index", "id", "parent_id", "state", "accepted", "duration_seconds", "duration_source", "video_url"],
+    "index_base": 0,
+    "scope": "Only requested end-run ancestor chain, in root-to-end order; no sibling selection, scanning, copy, migration or mutable sequence index",
+    "storage": "Existing runs/<id>/chunk.mp4 and manifests stay independent and in place",
+    "duration": "Stored video probe duration when available; explicit requested fallback for legacy manifests without verified duration",
+    "video_url": "Existing /runs/<id>/video URL for ready/reviewed states, null for unavailable states",
+    "guards": "Canonical IDs, contained own-chunk paths, manifest IDs, cycles, missing/unaccepted ancestors, approval contradictions, malformed nested probe data and nonfinite/invalid duration",
+    "io": "Query reads only JSON manifests; tests forbid binary reads, video access and inference. No concatenation or decoding in sequence endpoint.",
+    "real_chain_verified": ["0a28ae2d-72ff-431e-8f4f-1fc456e3d910", "c55fdb4e-d55b-4956-b23b-abcc518966f3"],
+    "real_chain_state": "Both accepted, two blocks at2.333333s each; HTTP200; accepted manifest/video hashes unchanged before/after read-only verification"
+  },
+  "validation": {
+    "tests_command": "uv run pytest -q",
+    "tests_passed": 116,
+    "lint_command": "uv run ruff check src tests",
+    "lint": "passed",
+    "whitespace": "git diff --check passed",
+    "frozen_files": "git diff --exit-code d974ce0 -- workflows prompts src/h3_backend/comfy.py src/h3_backend/media.py src/h3_backend/models.py passed",
+    "coverage": "Dataclass immutability, only canonical graph runtime source, golden graph equality, routing allowlist, both-mode object-info validation, exact roles/Markdown/limits, no cross-run graph leaks, explicit aliases, cross-operation global slot, running RAM guards, shutdown/failures, literal artifact hash/provenance, lineage branching/cycles/path/approval guards and malformed metadata HTTP400"
+  },
+  "runtime_safety": {
+    "new_gpu_submissions": 0,
+    "new_real_video_concatenations": 0,
+    "new_native_graph_exports": 0,
+    "comfyui_global_controls_changed": false,
+    "accepted_runs_modified": false,
+    "note": "CPU regression tests retain existing synthetic FFmpeg fixtures; no new real chunk or preview generated"
+  },
+  "scope": "No frontend, no post-processing removal, no model/sampler/resolution/attention/VAEs/decode/saver changes, no push; exact approved refactor only"
+}

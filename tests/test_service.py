@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 
 import pytest
 
@@ -50,17 +51,28 @@ class Media:
 
 
 class Builder:
-    hash = "baseline-sha"
-
     def __init__(self):
         self.calls = []
+        self.validations = []
 
-    def validate_object_info(self, info):
+    def hash_for(self, operation):
+        return {"i2v": "baseline-sha", "v2v": "anchored-sha"}[operation]
+
+    def provenance(self, operation):
+        return {
+            "canonical_template_sha256": "canonical-sha",
+            "operation": operation,
+            "config": {"operation": operation, "guide_frame_zero": operation == "v2v"},
+        }
+
+    def validate_object_info(self, info, *, operation):
         assert info == {"fake": True}
+        self.validations.append(operation)
 
     def build(self, **kwargs):
+        assert kwargs["operation"] in {"i2v", "v2v"}
         self.calls.append(kwargs)
-        return {"baseline": True}
+        return {"operation": kwargs["operation"], "seed": kwargs["seed"]}
 
 
 class Comfy:
@@ -149,6 +161,8 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     assert ready.state == "ready_for_review"
     assert ready.prompt_id == service.comfy.submitted[0]
     assert ready.publication_mode == "atomic_copy_from_comfy_output"
+    assert ready.workflow_hash == "baseline-sha"
+    assert ready.input_info["operation"] == "i2v"
     assert (service.store.directory(run.id) / "workflow_api.json").is_file()
     assert service.video_path(run.id).read_bytes() == b"fake-video"
     with pytest.raises(Conflict):
@@ -166,6 +180,8 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     assert final.references[0]["sha256"] != ready.references[0]["sha256"]
     assert final.references[1]["sha256"] == ready.references[0]["sha256"]
     assert final.input_info["mode"] == "continuation"
+    assert final.workflow_hash == "anchored-sha"
+    assert final.input_info["operation"] == "v2v"
     assert [slot["tag"] for slot in final.input_info["slot_map"]] == [
         "<Picture 1>", "<Picture 2>", "<Video 1>"
     ]
@@ -186,6 +202,17 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     ]
     assert descendant.references[1]["source"] == "dance_reference.png"
     assert descendant.references[0]["parent_id"] == child.id
+    assert service.builder.validations == ["i2v", "v2v", "v2v"]
+    assert [call["operation"] for call in service.builder.calls] == ["i2v", "v2v", "v2v"]
+    for generated in (ready, final, descendant):
+        artifact = service.store.directory(generated.id) / "workflow_api.json"
+        assert generated.input_info["workflow_api_sha256"] == hashlib.sha256(
+            artifact.read_bytes()
+        ).hexdigest()
+        assert generated.input_info["workflow_api_sha256"] != generated.workflow_hash
+        assert generated.input_info["workflow_provenance"] == service.builder.provenance(
+            generated.input_info["operation"]
+        )
     await service.shutdown()
 
 
@@ -267,23 +294,36 @@ def test_output_source_and_ffprobe_constraints(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_low_memory_preflight_and_running_guard(tmp_path):
+@pytest.mark.parametrize("operation", ["i2v", "v2v"])
+async def test_low_memory_preflight_and_running_guard(tmp_path, operation):
     service = make_service(tmp_path)
+    parent = None
+    if operation == "v2v":
+        parent = await service.create(RunRequest(seed=1))
+        await service._task
+        await service.decide(parent.id, True)
+
+    async def create():
+        if operation == "v2v":
+            return await service.continue_run(parent.id, ContinueRequest(seed=2))
+        return await service.create(RunRequest(seed=2))
+
+    submitted = len(service.comfy.submitted)
     available = [0]
     service.memory_available = lambda: available[0]
     with pytest.raises(Conflict, match="RAM"):
-        await service.create(RunRequest(seed=1))
-    assert not service.comfy.submitted
+        await create()
+    assert len(service.comfy.submitted) == submitted
     available[0] = 8 * 1024**3
     service.comfy.gate = asyncio.Event()
-    run = await service.create(RunRequest(seed=1))
+    run = await create()
     available[0] = 0
     with pytest.raises(asyncio.CancelledError):
         await service._task
     final = service.store.get(run.id)
     assert final.state == "interrupted" and final.prompt_id is not None
     assert "RAM dropped" in final.error
-    assert len(service.comfy.submitted) == 1
+    assert len(service.comfy.submitted) == submitted + 1
     await service.shutdown()
 
 
@@ -325,4 +365,87 @@ async def test_canceled_http_wait_preserves_execution_task(tmp_path):
     service.comfy.gate.set()
     final = await service.wait_run(run.id)
     assert final.state == "ready_for_review"
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["i2v", "v2v"])
+async def test_operations_share_global_slot(tmp_path, operation):
+    service = make_service(tmp_path)
+    parent = await service.create(RunRequest(seed=1))
+    await service._task
+    await service.decide(parent.id, True)
+    service.comfy.gate = asyncio.Event()
+    if operation == "i2v":
+        active = await service.create(RunRequest(seed=2))
+        with pytest.raises(Conflict, match="one backend job"):
+            await service.continue_run(parent.id, ContinueRequest(seed=3))
+    else:
+        active = await service.continue_run(parent.id, ContinueRequest(seed=2))
+        with pytest.raises(Conflict, match="one backend job"):
+            await service.create(RunRequest(seed=3))
+    assert service._active == active.id
+    service.comfy.gate.set()
+    await service._task
+    assert len(service.comfy.submitted) == 2
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_i2v_never_prepares_parent_media(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("i2v must not access a parent or prepare continuation media")
+
+    monkeypatch.setattr(service, "video_path", forbidden)
+    monkeypatch.setattr(service.media, "prepare_last_frame", forbidden)
+    monkeypatch.setattr(service.media, "prepare_tail", forbidden)
+    run = await service.create(RunRequest(seed=1))
+    await service._task
+    assert service.store.get(run.id).state == "ready_for_review"
+    assert service.builder.calls[0]["operation"] == "i2v"
+    assert [ref["role"] for ref in service.builder.calls[0]["references"]] == ["identity"]
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_v2v_low_memory_and_shutdown_are_shared_guards(tmp_path):
+    service = make_service(tmp_path)
+    parent = await service.create(RunRequest(seed=1))
+    await service._task
+    await service.decide(parent.id, True)
+    service.memory_available = lambda: 0
+    with pytest.raises(Conflict, match="RAM"):
+        await service.continue_run(parent.id, ContinueRequest(seed=2))
+    assert len(service.comfy.submitted) == 1
+    service.memory_available = lambda: 8 * 1024**3
+    child = await service.continue_run(parent.id, ContinueRequest(seed=2))
+    await service.shutdown()
+    assert service.store.get(child.id).state == "interrupted"
+    assert len(service.comfy.submitted) == 1
+    with pytest.raises(Conflict):
+        await service.create(RunRequest(seed=3))
+    with pytest.raises(Conflict):
+        await service.continue_run(parent.id, ContinueRequest(seed=3))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["i2v", "v2v"])
+async def test_identity_mutation_after_admission_fails_without_submission(tmp_path, operation):
+    service = make_service(tmp_path)
+    if operation == "v2v":
+        parent = await service.create(RunRequest(seed=1))
+        await service._task
+        await service.decide(parent.id, True)
+        run = await service.continue_run(parent.id, ContinueRequest(seed=2))
+    else:
+        run = await service.create(RunRequest(seed=1))
+    submitted = len(service.comfy.submitted)
+    (tmp_path / "assets" / "dance_reference.png").write_bytes(b"changed-image")
+    await service._task
+    result = service.store.get(run.id)
+    assert result.state == "failed" and "changed after admission" in result.error
+    assert len(service.comfy.submitted) == submitted
+    assert service._active is None
     await service.shutdown()
