@@ -49,7 +49,7 @@ class FakeAPI:
         index = len(self.requests)
         run_id = f"00000000-0000-0000-0000-{index:012d}"
         prompt_id = f"10000000-0000-0000-0000-{index:012d}"
-        directory = self.root / "runs" / run_id
+        directory = self.root / ".data" / "runs" / run_id
         directory.mkdir(parents=True)
         (directory / "chunk.mp4").write_bytes(f"video{index}".encode())
         graph = json.loads((self.root / "workflows/continuation_api.json").read_text())
@@ -67,12 +67,12 @@ class FakeAPI:
             (directory / "reference_tail.mp4").write_bytes(b"paired-audio-tail")
             references = [
                 {"role": "initial_frame", "parent_id": parent_id,
-                 "source": f"runs/{run_id}/initial_frame.png",
+                 "source": f".data/runs/{run_id}/initial_frame.png",
                  "sha256": benchmark.sha256(directory / "initial_frame.png"),
                  "input_info": {"source_frame_count": 56, "source_frame_index": 55}},
                 identity,
                 {"role": "motion_video", "parent_id": parent_id, "has_audio": True,
-                 "source": f"runs/{run_id}/reference_tail.mp4",
+                 "source": f".data/runs/{run_id}/reference_tail.mp4",
                  "sha256": benchmark.sha256(directory / "reference_tail.mp4"),
                  "input_info": {"requested_seconds": 3, "actual_seconds": 56 / 24,
                                 "loaded_reference_frames": 56, "effective_reference_frames": 56,
@@ -88,11 +88,11 @@ class FakeAPI:
                "seed": request["seed"], "prompt": request["prompt"], "duration_seconds": 2.3,
                "state": "ready_for_review", "error": None, "decision": None,
                "references": references, "workflow_hash": "golden-v2v" if parent_id else "golden-i2v",
-               "input_info": {"workflow_api": f"runs/{run_id}/workflow_api.json",
+               "input_info": {"workflow_api": f".data/runs/{run_id}/workflow_api.json",
                               "workflow_api_sha256": benchmark.sha256(directory / "workflow_api.json"),
                               "workflow_provenance": {"operation": "v2v" if parent_id else "i2v"},
                               "slot_map": [{"tag": tag} for tag in ("<Picture 1>", "<Picture 2>", "<Video 1>")]},
-               "output": {"path": f"runs/{run_id}/chunk.mp4", "probe": media_probe()},
+               "output": {"path": f".data/runs/{run_id}/chunk.mp4", "probe": media_probe()},
                "timings": {"total_seconds": 0.5, "prepare_seconds": 0.1}}
         self.runs[run_id] = run
         return run

@@ -172,9 +172,9 @@ class I2VPipe:
             input_info={
                 **current.input_info,
                 "workflow_api_sha256": workflow_sha256,
-                "workflow_api": f"runs/{run.id}/workflow_api.json",
-                "prompt_markdown": f"runs/{run.id}/prompt.md",
-                "telemetry": f"runs/{run.id}/telemetry.jsonl",
+                "workflow_api": service.store.relative_artifact(run.id, "workflow_api.json"),
+                "prompt_markdown": service.store.relative_artifact(run.id, "prompt.md"),
+                "telemetry": service.store.relative_artifact(run.id, "telemetry.jsonl"),
                 "effective_markdown": run.prompt,
                 "slot_map": [
                     {
@@ -219,7 +219,7 @@ class I2VPipe:
             state="ready_for_review",
             publication_mode="atomic_copy_from_comfy_output",
             output={
-                "path": f"runs/{run.id}/chunk.mp4",
+                "path": service.store.relative_artifact(run.id, "chunk.mp4"),
                 "probe": info,
                 "source": str(source),
                 "node": "34",

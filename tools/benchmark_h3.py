@@ -284,12 +284,13 @@ class BenchmarkPipe:
                 Path(temporary).unlink()
 
     def _file(self, relative: str, expected: Path) -> Path:
-        if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
-            raise BenchmarkError("Artifact path must be relative and contained")
-        candidate = self.root / relative
-        if candidate.is_symlink():
-            raise BenchmarkError("Artifact must not be a symlink")
-        path = candidate.resolve()
+        # Reuse the storage ownership contract; import remains free of runtime/GPU side effects.
+        from h3_backend.infrastructure.store import Store
+
+        try:
+            path = Store(self.root).own_artifact(expected.parent.name, relative, expected.name)
+        except (ValueError, TypeError) as exc:
+            raise BenchmarkError("Artifact is not the run's own expected path") from exc
         if path != expected.resolve() or not path.is_relative_to(self.root):
             raise BenchmarkError("Artifact is not the run's own expected path")
         sha256(path)
@@ -306,7 +307,7 @@ class BenchmarkPipe:
             )
         ):
             raise BenchmarkError("Returned request/lineage differs from frozen benchmark")
-        directory = self.root / "runs" / run_id
+        directory = self.root / ".data" / "runs" / run_id
         video = self._file(run["output"]["path"], directory / "chunk.mp4")
         details = await self.probe(video)
         check_probe(details, 56)
@@ -351,7 +352,11 @@ class BenchmarkPipe:
             anchor_path = self._file(anchor["source"], directory / "initial_frame.png")
             if sha256(anchor_path) != anchor["sha256"]:
                 raise BenchmarkError("Anchor checksum mismatch")
-            await self.anchor_verifier(self.root / parent["output"]["path"], anchor_path)
+            parent_video = self._file(
+                parent["output"]["path"],
+                self.root / ".data" / "runs" / parent["id"] / "chunk.mp4",
+            )
+            await self.anchor_verifier(parent_video, anchor_path)
             tail_path = self._file(motion["source"], directory / "reference_tail.mp4")
             tail = motion["input_info"]
             if sha256(tail_path) != motion["sha256"] or (

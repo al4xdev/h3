@@ -17,7 +17,7 @@ def block(store, parent=None, *, accepted=True, verified=True):
         "decision": {"accepted": True} if accepted else None,
     })
     if verified:
-        run.output = {"path": f"runs/{run.id}/chunk.mp4", "probe": {
+        run.output = {"path": store.relative_artifact(run.id, "chunk.mp4"), "probe": {
             "streams": [{"codec_type": "video", "duration": "2.333333"}]
         }}
     return store.create(run)
@@ -29,7 +29,7 @@ def test_sequence_is_ordered_branch_specific_metadata_only(tmp_path, monkeypatch
     child = block(store, root)
     sibling = block(store, root)
     end = block(store, child, accepted=False)
-    before = {p: p.read_bytes() for p in tmp_path.glob("runs/*/manifest.json")}
+    before = {p: p.read_bytes() for p in store.runs.glob("*/manifest.json")}
     read_text = Path.read_text
 
     def only_manifests(path, *args, **kwargs):

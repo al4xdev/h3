@@ -188,7 +188,8 @@ class V2VPipe:
         upload = await service.comfy.upload(frame, f"h3_{run.id}_initial_frame.png")
         references.append({
             "type": "image", "role": "initial_frame",
-            "source": f"runs/{run.id}/initial_frame.png", "source_root": "runs",
+            "source": service.store.relative_artifact(run.id, "initial_frame.png"),
+            "source_root": "runs",
             "parent_id": run.parent_id,
             "sha256": await asyncio.to_thread(
                 lambda: hashlib.sha256(frame.read_bytes()).hexdigest()
@@ -230,7 +231,7 @@ class V2VPipe:
         references.append(
             {
                 "type": "video", "role": "motion_video",
-                "source": f"runs/{run.id}/reference_tail.mp4",
+                "source": service.store.relative_artifact(run.id, "reference_tail.mp4"),
                 "source_root": "runs", "parent_id": run.parent_id,
                 "sha256": await asyncio.to_thread(
                     lambda: hashlib.sha256(tail.read_bytes()).hexdigest()
@@ -274,9 +275,9 @@ class V2VPipe:
             input_info={
                 **current.input_info,
                 "workflow_api_sha256": workflow_sha256,
-                "workflow_api": f"runs/{run.id}/workflow_api.json",
-                "prompt_markdown": f"runs/{run.id}/prompt.md",
-                "telemetry": f"runs/{run.id}/telemetry.jsonl",
+                "workflow_api": service.store.relative_artifact(run.id, "workflow_api.json"),
+                "prompt_markdown": service.store.relative_artifact(run.id, "prompt.md"),
+                "telemetry": service.store.relative_artifact(run.id, "telemetry.jsonl"),
                 "effective_markdown": run.prompt,
                 "slot_map": [
                     {
@@ -321,7 +322,7 @@ class V2VPipe:
             state="ready_for_review",
             publication_mode="atomic_copy_from_comfy_output",
             output={
-                "path": f"runs/{run.id}/chunk.mp4",
+                "path": service.store.relative_artifact(run.id, "chunk.mp4"),
                 "probe": info,
                 "source": str(source),
                 "node": "34",

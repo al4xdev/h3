@@ -124,7 +124,12 @@ class RunService:
         self._closing = False
 
     async def startup(self) -> None:
-        self.store.restore()
+        self.store.hold_runtime()
+        try:
+            self.store.restore()
+        except Exception:
+            self.store.release_runtime()
+            raise
 
     async def shutdown(self) -> None:
         self._closing = True
@@ -140,7 +145,10 @@ class RunService:
                     error="Backend stopped before execution completed",
                 )
             self._active = None
-        await self.comfy.close()
+        try:
+            await self.comfy.close()
+        finally:
+            self.store.release_runtime()
 
     async def wait_run(self, run_id: str) -> Run:
         self.store.get(run_id)
@@ -157,7 +165,13 @@ class RunService:
         run = self.store.get(run_id)
         if run.state not in {"ready_for_review", "accepted", "rejected"}:
             raise Conflict("Run has no reviewed/ready video")
-        return contained(self.store.directory(run_id), "chunk.mp4", must_exist=True)
+        path = self.store.own_artifact(
+            run_id, run.output.get("path", self.store.relative_artifact(run_id, "chunk.mp4")),
+            "chunk.mp4",
+        )
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
 
     async def decide(self, run_id: str, accepted: bool) -> Run:
         async with self._lock:

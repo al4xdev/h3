@@ -4,7 +4,7 @@ API de geração por blocos, com revisão humana, sobre os grafos nativos valida
 
 As decisões permanentes de autonomia, arquitetura vertical, benchmark, MCP, dados e frontend estão em [`AGENTS.md`](AGENTS.md). A meta é um aplicativo local leve de vídeos encadeados, não apenas um teste de geração.
 
-`.data/` é o destino definido para estados/JSONs/mídia persistente da aplicação. O runtime atual ainda usa `runs/`: a migração/compatibilidade será uma fase própria, com hashes e sem apagar os blocos existentes. `.dumps/` continua somente como scratch/evidência.
+O Store grava estados/JSONs/mídia persistente em `.data/runs/<UUID>/`. `runs/` permanece como âncora legada intacta: projetos com esse legado exigem [migração offline verificada](docs/data_storage.md), sem reescrever manifests ou apagar vídeos. O runtime só usa a autoridade canônica após recibo válido. `.dumps/` continua como scratch/evidência; recursos `workflows/`, `prompts/` e `assets/` permanecem na raiz do projeto.
 
 ## Organização
 
@@ -33,7 +33,8 @@ tools/
 ├── export_workflow.mjs     # exportador nativo
 └── benchmark_h3.py         # benchmark externo: três chunks + montagem
 pyproject.toml, uv.lock    # dependências e configuração reproduzíveis
-runs/<id>/                 # local: manifest, inputs e chunk.mp4 persistentes
+.data/runs/<id>/           # local: manifest, inputs e chunk.mp4 persistentes
+runs/<id>/                 # legado preservado, nunca fallback gravável
 .dumps/                    # local: scratch e evidências temporárias
 ├── tests/requests/        # requests experimentais
 ├── tests/reports/         # relatórios históricos e checks de integridade
