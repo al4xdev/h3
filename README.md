@@ -2,6 +2,10 @@
 
 API de geração por blocos, com revisão humana, sobre os grafos nativos validados do ComfyUI. Sem frontend ou inferência PyTorch dentro do backend.
 
+As decisões permanentes de autonomia, arquitetura vertical, benchmark, MCP, dados e frontend estão em [`AGENTS.md`](AGENTS.md). A meta é um aplicativo local leve de vídeos encadeados, não apenas um teste de geração.
+
+`.data/` é o destino definido para estados/JSONs/mídia persistente da aplicação. O runtime atual ainda usa `runs/`: a migração/compatibilidade será uma fase própria, com hashes e sem apagar os blocos existentes. `.dumps/` continua somente como scratch/evidência.
+
 ## Organização
 
 ```text
