@@ -1,12 +1,14 @@
-"""Small, backend-only SuperGrok operation; no history or inference replay."""
+"""Independent Grok text editor and local config; no video coupling or replay."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from stat import S_ISREG
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, FastAPI, Request
@@ -28,6 +30,107 @@ class PromptRequest(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("Must not be blank")
         return value
+
+
+DEFAULT_EDITOR_SYSTEM = (
+    "Transforme a ideia simples do usuário em uma instrução de cena clara, no idioma dele. "
+    "Preserve a ação, roupa, pose e ordem das mudanças pedidas; descreva a continuidade de modo "
+    "conciso. Não invente identidade, aparência, ações ou mudanças não solicitadas. "
+    "Não inclua explicações, títulos, parâmetros técnicos, nodes, seed, duração, resolução, "
+    "sampler ou ajustes do modelo. Responda somente com a instrução editável da cena, "
+    "em até 12000 caracteres. Você edita texto: não edita imagens nem gera vídeos."
+)
+EDITOR_MAX_BYTES = 1024 * 1024
+
+
+class EditorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    system_prompt: str = Field(min_length=1, max_length=100_000, strict=True)
+    model: str = Field(default="", max_length=256, strict=True)
+
+    @field_validator("system_prompt", "model")
+    @classmethod
+    def nonblank(cls, value: str, info) -> str:
+        if not value.strip() and (info.field_name == "system_prompt" or value):
+            raise ValueError("Must not be blank")
+        return value
+
+
+@contextmanager
+def editor_directory(root: Path, *, create: bool = False):
+    # Fixed relative names and no-follow directory descriptors keep editor I/O
+    # separate from credentials, even when an on-disk entry is replaced by a link.
+    descriptors = []
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(directory)
+        for name in (".data", "grok"):
+            if create:
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
+            try:
+                directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=directory)
+            except FileNotFoundError:
+                if create:
+                    raise
+                yield None
+                return
+            descriptors.append(directory)
+        yield directory
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def read_editor_file(directory: int | None) -> EditorConfig | None:
+    if directory is None:
+        return None
+    try:
+        descriptor = os.open("editor.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > EDITOR_MAX_BYTES:
+            raise ValueError("Invalid editor configuration file")
+        raw = stream.read(EDITOR_MAX_BYTES + 1)
+    if len(raw) > EDITOR_MAX_BYTES:
+        raise ValueError("Editor configuration exceeds limit")
+    return EditorConfig.model_validate_json(raw)
+
+
+def read_editor(root: Path) -> EditorConfig:
+    with editor_directory(root) as directory:
+        value = read_editor_file(directory)
+    return value or EditorConfig(system_prompt=DEFAULT_EDITOR_SYSTEM,
+                                 model=os.getenv("H3_GROK_MODEL", ""))
+
+
+def save_editor(root: Path, payload: EditorConfig) -> EditorConfig:
+    with editor_directory(root, create=True) as directory:
+        # A corrupt existing configuration is evidence, not permission to erase it.
+        read_editor_file(directory)
+        temporary = f".editor-{uuid4()}.part"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload.model_dump_json().encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, "editor.json", src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            # Only this invocation's verified directory-local temporary is removed.
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+    return payload
 
 
 class FlowRequest(BaseModel):
@@ -124,6 +227,8 @@ async def grok_lifespan(app: FastAPI):
     grok = Grok(OAuthManager(root / ".data" / "grok" / "oauth.json"),
                 os.getenv("H3_GROK_MODEL", ""))
     app.state.grok = grok
+    app.state.grok_editor_root = root
+    app.state.grok_editor_lock = asyncio.Lock()
     try:
         yield
     finally:
@@ -140,6 +245,36 @@ async def invoke(operation, *args) -> JSONResponse:
         return reply({"error": error.code, "detail": str(error)}, error.status)
     except OSError:
         return reply({"error": "storage_error", "detail": "Could not store Grok credentials."}, 500)
+
+
+@router.get("/editor")
+async def editor_config(request: Request):
+    try:
+        value = await asyncio.to_thread(read_editor, request.app.state.grok_editor_root)
+        return reply(value.model_dump())
+    except (ValueError, OSError):
+        return reply({"error": "editor_storage_error",
+                      "detail": "Editor configuration is invalid or inaccessible; not replaced."}, 409)
+
+
+@router.put("/editor")
+async def update_editor_config(request: Request):
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > EDITOR_MAX_BYTES:
+            return reply({"error": "editor_too_large", "detail": "Editor JSON exceeds limit."}, 413)
+        raw.extend(chunk)
+    try:
+        payload = EditorConfig.model_validate_json(raw)
+    except ValueError:
+        return reply({"error": "invalid_editor", "detail": "Use only bounded system_prompt and model."}, 422)
+    try:
+        async with request.app.state.grok_editor_lock:
+            value = await asyncio.to_thread(save_editor, request.app.state.grok_editor_root, payload)
+        return reply(value.model_dump())
+    except (ValueError, OSError):
+        return reply({"error": "editor_storage_error",
+                      "detail": "Editor configuration could not be saved; inspect local configuration."}, 409)
 
 
 @router.post("")

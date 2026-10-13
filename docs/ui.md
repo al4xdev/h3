@@ -4,7 +4,7 @@
 
 HTML/CSS/JavaScript same-origin, sem framework, build, CDN, fontes remotas, dependências novas ou estado persistido no navegador. A bancada grafite/cobre preserva o vídeo retrato no centro e a régua ancestral real (origem → seleção). No celular, vídeo e decisões precedem formulário e biblioteca. Upload e catálogo usam o mesmo formulário simples.
 
-**Assets e mocks apenas; integração real pendente do agente principal.** Esta entrega não altera backend, recursos, dados, geração nativa ou benchmark, nem conclui plano/goal. SSE verdadeiro, publicação de upload e segurança dos paths precisam dos gates da ponte Python.
+A entrega original de assets/mocks não concluía a integração. A ponte agora foi implementada separadamente no commit `6eae6f9`; o principal já validou leitura real de biblioteca/SSE/Range e reprodução sem POST. A biblioteca com 12 cards revelou compressão flex: `flex-shrink:0` mantém todos os filhos dentro de cada card e a lista rolável limitada. **Esta revisão acrescenta somente o editor Grok/configuração isolada e a correção visual; fechamento e revalidação real da UI final permanecem com o principal.** Não altera geração nativa, recursos ou dados existentes.
 
 ## Contratos da ponte
 
@@ -54,7 +54,7 @@ node --test tests/frontend_ui.test.mjs
 env H3_UI_TEST_CLIP=runs/02cf408f-c985-47a2-887d-731569d7827a/chunk.mp4 node tests/frontend_browser_mock.mjs
 ```
 
-13 testes Node, incluindo os oito contratos originais, roots/references, URLs inseguras, File bruto/duplo upload, normalização SSE e espera vazia/ID incorreto. Browser intercepta **todas** as requests de `http://h3.mock.invalid`, bloqueia origem externa e nunca abre processo API/Comfy. EventSource fake controlável reproduz abertura, reconexão, hints e close. POSTs de inferência, review e upload são separados e rotulados no relatório; upload fake não escreve disco.
+18 testes Node, incluindo os oito contratos originais, cinco de Grok e os de roots/references, URLs inseguras, File bruto/duplo upload, normalização SSE e espera vazia/ID incorreto. Browser intercepta **todas** as requests de `http://h3.mock.invalid`, bloqueia origem externa e nunca abre processo API/Comfy. EventSource fake controlável reproduz abertura, reconexão, hints e close. POSTs de inferência, review e upload são separados e rotulados no relatório; upload fake não escreve disco.
 
 O clip histórico é lido sem alteração e servido só pelo mock: dimensões 480×864, playback explícito/pausa, sem inferência. Testes cobrem 1440/390/320 sem overflow, XSS textual, estados sem arquivo, cadeia, duplo submit, payloads exatos, upload selecionado sem geração, snapshot SSE-first, burst bounded, dirty durante wait, seleção atrasada, reconexão sem POST e sem limpar incerteza, pagehide e config legado sem flags.
 
@@ -64,4 +64,41 @@ Evidências locais novas (não sobrescrevem entrega R1):
 - `.dumps/tests/reports/frontend_paths.json`: requests, exceções, violações, contagens de fake inference e fake disk upload.
 - `.dumps/tests/reports/frontend_paths_before.json`: hashes de manifests/mídia existentes de `runs`, `.data/runs` e `assets`; verificação posterior separada.
 
-**Pendente do principal:** endpoints verdadeiros/config, stream SSE/inotify e lifecycle real, upload atômico validado, contenção/MIME/CSP/Range, wheel assets e browser read-only em API própria após gates CPU. Nenhum GPU, ajuste de geração, mudança de dados ou certificação perceptual foi executado nesta entrega.
+## Editor de cena Grok — plano 20, revisão 2
+
+Um botão **Detalhar com Grok** envia somente ideia atual + system prompt + modelo
+opcional a `POST /grok`. Texto estável volta ao campo editável; resposta velha vira
+proposta explícita. Não é chat, não recebe fotos/paths e nunca envia geração,
+aceitação, continuação ou montagem. Confira e use **Gerar** separadamente.
+
+Details **Configurar Grok** oferece system prompt e ID de modelo opcionais, mais
+**Salvar configuração no PC**. Fica fora do formulário nativo para Enter no modelo
+não enviar vídeo. `GET /grok/editor` é leitura local inerte no startup;
+`PUT /grok/editor` publica `.data/grok/editor.json`, nunca OAuth. Modelo vazio no
+pedido defere ao ambiente; nenhum modelo é escolhido automaticamente. Leia
+[contratos, autenticação e limites](grok.md). Sem calls remotas na abertura/SSE,
+sem catálogo/auth automático ou repetição de pedido incerto.
+
+Novos mocks cobrem conteúdo literal/XSS, ideia simples, system/model, PUT explícito,
+Grok duplo clique sem POST nativo, draft mais novo/proposta/Usar, geração somente
+pelo botão nativo, erro/oversize/unknown sem truncar/retry ou limpar incerteza nativa,
+config indisponível sem bloquear geração e Enter no modelo. A regressão de 12 cards
+longos verifica bounding boxes de todos os filhos em 1440/393/320. Phone real-emulado
+393×852, touch e escala 2, verifica detalhe sem envio nativo e sem overflow.
+
+Evidências desta revisão, separadas das anteriores:
+
+- `.dumps/tests/ui-grok/`: desktop/mobile e estados anteriores; `grok-detailed-desktop`,
+  `grok-stale-proposal`, `grok-oversized-error`, `grok-uncertain`,
+  `grok-phone-393-touch-2x` e `library-many-{1440,393,320}` PNGs.
+- `.dumps/tests/reports/grok_editor.json`: requests e contagens distintas de Grok
+  fake, PUT config, inferência/review/upload fake, erros e bloqueios externos.
+- `.dumps/tests/reports/library_bounds_after.json`: children/card, altura e shrink.
+- `.dumps/tests/reports/grok_editor_hashcheck.json`: 162 arquivos protegidos
+  originais/canônicos/assets comparados, sem credenciais.
+
+**Pendente do principal:** browser real read-only final com configuração Grok e
+correção dos cards, empacotamento/validação de assets e fechamento das tarefas.
+Testes Grok são offline; não provam elegibilidade/cobrança/provider real. Nenhum
+GPU, ajuste de geração, alteração de recursos ou certificação perceptual foi
+executado nesta entrega.

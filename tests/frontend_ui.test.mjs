@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
@@ -100,6 +100,39 @@ test('empty or wrong-ID wait is uncertain and never replayed', async () => {
     const calls = []; const client = createClient(async (url, options) => { calls.push(url); return options.method === 'POST' ? reply({id: 'own'}, 202) : reply(result); });
     await assert.rejects(client.generate('/runs/i2v', {}, () => {}), /Espera/); assert.deepEqual(calls, ['/runs/i2v', '/runs/own?wait=true']);
   }
+});
+test('Grok sends only literal idea/system/model and empty model defers to environment', () => {
+  const prompt = 'ela dá um salto e o vestido fica vermelho';
+  assert.deepEqual(grokPayload({prompt, system_prompt: 'Preserve a cena', model: ''}), {prompt, system_prompt: 'Preserve a cena'});
+  assert.deepEqual(grokPayload({prompt, system_prompt: 'Sistema', model: 'chosen-id'}), {prompt, system_prompt: 'Sistema', model: 'chosen-id'});
+  assert.deepEqual(editorPayload({system_prompt: '  custom  ', model: ''}), {system_prompt: '  custom  ', model: ''});
+  for (const config of [{system_prompt: ''}, {system_prompt: 'x'.repeat(100001)}, {system_prompt: 'x', model: 'm'.repeat(257)}, {system_prompt: 'x', model: ' '}]) assert.throws(() => editorPayload(config));
+  assert.throws(() => grokPayload({prompt: ' ', system_prompt: 'x'}));
+});
+test('Grok output stays literal and scene limits never silently truncate', () => {
+  const text = '<img onerror=evil()> vestido vermelho'; assert.equal(sceneText(text), text);
+  assert.equal(sceneText('x'.repeat(12000)).length, 12000);
+  for (const text of [null, '', ' ', 'x'.repeat(12001)]) assert.throws(() => sceneText(text));
+});
+test('Grok has a separate double-click guard and one text POST with no native wait', async () => {
+  const calls = []; let release; const gate = new Promise(resolve => { release = resolve; });
+  const client = createClient(async (url, options) => { calls.push([url, options.method, JSON.parse(options.body)]); await gate; return reply({text: 'Cena editável', model: 'fake'}); });
+  const payload = {prompt: 'salto', system_prompt: 'detalhe', model: ''};
+  const first = client.detail(payload); await assert.rejects(client.detail(payload), /detalhando/); release(); assert.equal(await first, 'Cena editável');
+  assert.deepEqual(calls, [['/grok', 'POST', {system_prompt: 'detalhe', prompt: 'salto'}]]);
+});
+test('Grok failures never retry and editor save uses isolated PUT only', async () => {
+  for (const mode of ['network', '500', 'oversized']) {
+    const calls = []; const client = createClient(async (url, options) => { calls.push([url, options.method]); if (mode === 'network') throw new Error('lost response'); return mode === '500' ? reply({detail: 'provider unavailable'}, 500) : reply({text: 'x'.repeat(12001)}); });
+    await assert.rejects(client.detail({prompt: 'ideia', system_prompt: 'sistema'})); assert.deepEqual(calls, [['/grok', 'POST']]);
+  }
+  const calls = []; const client = createClient(async (url, options) => { calls.push([url, options.method, JSON.parse(options.body)]); return reply({system_prompt: 'custom', model: ''}); });
+  await client.saveEditor({system_prompt: 'custom', model: ''}); assert.deepEqual(calls, [['/grok/editor', 'PUT', {system_prompt: 'custom', model: ''}]]);
+});
+test('Grok snapshots reject older draft, mode, selection or editor response', () => {
+  const before = {revision: 1, mode: 'new', selected: 'one', prompt: 'jump', system_prompt: 'system', model: ''};
+  assert.equal(draftMatches(before, {...before}), true);
+  for (const [key, value] of Object.entries({revision: 2, mode: 'continue', selected: 'other', prompt: 'new draft', system_prompt: 'new system', model: 'chosen'})) assert.equal(draftMatches(before, {...before, [key]: value}), false);
 });
 test('assets do not contain unsafe bindings, persistence, autoplay or polling', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');

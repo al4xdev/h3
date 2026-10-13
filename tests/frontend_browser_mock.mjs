@@ -6,7 +6,7 @@ import {createRequire} from 'node:module';
 const require = createRequire(import.meta.url);
 const {chromium} = require('playwright');
 const root = resolve(new URL('..', import.meta.url).pathname);
-const artifacts = resolve(root, '.dumps/tests/ui-paths');
+const artifacts = resolve(root, '.dumps/tests/ui-grok');
 await mkdir(artifacts, {recursive: true});
 const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
 let media = null;
@@ -22,10 +22,13 @@ const references = [{id: 'original', source_root: 'assets', path: 'dance_referen
 const mkRun = (id, state, parent_id = null, prompt = malicious) => ({id, state, parent_id, prompt, seed: 2026101205, duration_seconds: 2.3, created_at: '2026-10-12T20:00:00Z', updated_at: '2026-10-12T20:00:01Z', output: {path: `runs/${id}/chunk.mp4`}, error: null});
 let runs = [mkRun('a-child', 'ready_for_review', 'z-root'), mkRun('z-root', 'accepted'), {...mkRun('failed-root', 'failed'), error: 'Falha histórica preservada', output: {}}];
 const requests = []; const exceptions = []; const violations = [];
+let editor = {system_prompt: 'Preserve ação, roupa, pose e ordem. Responda só com a cena.', model: ''};
+let grokMode = 'normal'; let grokGate = null; let releaseGrok;
+const detailedScene = 'Ela dá um salto. Durante o movimento, o vestido fica vermelho. Preserve a identidade original. <img onerror="window.hacked=true">';
 let mode = 'normal'; let generated = 0; let releaseWait; let waitGate = null; let releaseDetail; let detailGate = null;
 const browser = await chromium.launch({headless: true});
 const context = await browser.newContext({viewport: {width: 1440, height: 1000}, reducedMotion: 'reduce', serviceWorkers: 'block'});
-await context.route('**/*', async route => {
+const routeRequest = async route => {
   const request = route.request(); const url = new URL(request.url());
   if (url.origin !== 'http://h3.mock.invalid') { violations.push(request.url()); await route.abort(); return; }
   const path = url.pathname; const method = request.method();
@@ -34,6 +37,16 @@ await context.route('**/*', async route => {
   if (path === '/') return route.fulfill({contentType: 'text/html', body: assets['index.html']});
   if (path === '/ui/app.css') return route.fulfill({contentType: 'text/css', body: assets['app.css']});
   if (path === '/ui/app.js') return route.fulfill({contentType: 'text/javascript', body: assets['app.js']});
+  if (path === '/grok/editor' && method === 'GET') return grokMode === 'editor-error' ? json({detail: 'Configuração local indisponível'}, 409) : json(editor);
+  if (path === '/grok/editor' && method === 'PUT') { editor = request.postDataJSON(); return json(editor); }
+  if (path === '/grok' && method === 'POST') {
+    if (grokGate) await grokGate;
+    if (grokMode === 'network') return route.abort('connectionfailed');
+    if (grokMode === 'error') return json({detail: 'Modelo ou conexão precisa ser configurado'}, 400);
+    if (grokMode === 'oversized') return json({text: 'x'.repeat(12001), model: 'fake'});
+    return json({text: detailedScene, model: 'fake'});
+  }
+  if (path.startsWith('/grok/auth/')) { violations.push('Authentication/model catalog must never start automatically'); return json({detail: 'Forbidden test call'}, 409); }
   if (path === '/inputs' && method === 'GET') return json({items: references, total: references.length, limit: 50, offset: 0});
   if (path === '/inputs' && method === 'POST') {
     assert.equal(url.searchParams.get('name'), 'phone photo.png');
@@ -76,8 +89,9 @@ await context.route('**/*', async route => {
   if (path === '/runs/z-root' && detailGate) await detailGate;
   if (url.searchParams.get('wait') === 'true') { if (waitGate) await waitGate; run.state = 'ready_for_review'; run.output = {path: `runs/${id}/chunk.mp4`}; }
   return json(run);
-});
-await context.addInitScript(() => {
+};
+await context.route('**/*', routeRequest);
+const mockStartup = () => {
   window.mockEvents = []; window.startupOrder = [];
   const fetch = window.fetch.bind(window);
   window.fetch = (...args) => { window.startupOrder.push(String(args[0])); return fetch(...args); };
@@ -86,10 +100,12 @@ await context.addInitScript(() => {
     close() { this.closed = true; }
     emit(type, data) { this.dispatchEvent(type === 'open' ? new Event(type) : new MessageEvent(type, {data: JSON.stringify(data)})); }
   };
-});
+};
+await context.addInitScript(mockStartup);
 const page = await context.newPage(); page.on('pageerror', error => exceptions.push(error.message));
 const ready = async () => { await page.goto('http://h3.mock.invalid/'); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); };
 const posts = () => requests.filter(item => item.method === 'POST');
+const capture = async options => { await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); }); await page.screenshot(options); };
 try {
   await ready();
   assert.equal(posts().length, 0, 'initial reads cannot generate');
@@ -113,11 +129,11 @@ try {
   }
   await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
   assert.equal(await page.locator('.skip').evaluate(node => getComputedStyle(node).top), '-100px');
-  await page.screenshot({path: resolve(artifacts, 'desktop-1440.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'desktop-1440.png'), fullPage: true});
   for (const width of [390, 320]) {
     await page.setViewportSize({width, height: 844});
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px horizontal overflow`);
-    await page.screenshot({path: resolve(artifacts, `mobile-${width}.png`), fullPage: true});
+    await capture({path: resolve(artifacts, `mobile-${width}.png`), fullPage: true});
   }
   await page.setViewportSize({width: 1440, height: 1000});
   detailGate = new Promise(resolve => { releaseDetail = resolve; });
@@ -134,7 +150,7 @@ try {
   assert.equal(await page.locator('#accept').isDisabled(), true);
   assert.equal(await page.locator('#continue-mode').isDisabled(), true);
   assert.equal(posts().length, 0);
-  await page.screenshot({path: resolve(artifacts, 'failed-evidence.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'failed-evidence.png'), fullPage: true});
   await page.locator('.clip-card').filter({hasText: 'a-child'}).click();
   await page.locator('#accept').waitFor({state: 'visible'});
   await page.waitForFunction(() => !document.getElementById('accept').disabled);
@@ -172,9 +188,9 @@ try {
   await page.evaluate(() => mockEvents[0].emit('open'));
   await page.locator('#notice').filter({hasText: 'Resultado anterior incerto'}).waitFor();
   assert.equal(await page.locator('#generate').isDisabled(), true, 'SSE cannot clear uncertainty');
-  await page.screenshot({path: resolve(artifacts, 'admission-uncertain.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'admission-uncertain.png'), fullPage: true});
   mode = 'empty'; await ready(); assert.equal(await page.locator('.clip-card').count(), 0);
-  await page.screenshot({path: resolve(artifacts, 'empty.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'empty.png'), fullPage: true});
   // False-ready files and all nonplayable states must not attach a media URL.
   for (const state of ['ready_for_review', 'accepted', 'rejected', 'queued', 'running', 'interrupted']) {
     mode = 'normal'; runs = [{...mkRun(`no-file-${state}`, state), output: {}}];
@@ -202,7 +218,7 @@ try {
   assert.equal(await page.locator('#reference-path').textContent(), 'inputs / my_photo.png');
   assert.equal(await page.locator('#reference-library img').count(), 1);
   assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
-  await page.screenshot({path: resolve(artifacts, 'reference-gallery.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'reference-gallery.png'), fullPage: true});
   await page.locator('#seed').fill('42'); await page.locator('#prompt').fill('Imagem do PC');
   await page.locator('#generate').click();
   await page.locator('#operation').filter({hasText: 'generated-3'}).waitFor();
@@ -215,7 +231,7 @@ try {
   assert.equal(posts().length, beforeUpload + 1, 'Upload alone cannot infer');
   const uploaded = posts().at(-1); assert.equal(uploaded.body.diskUploadFake, true); assert.equal(uploaded.body.bytes, image.length);
   assert.equal(await page.locator('#reference-path').textContent(), 'inputs / mock-upload/original.png');
-  await page.screenshot({path: resolve(artifacts, 'upload-selected.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'upload-selected.png'), fullPage: true});
   await page.locator('#reference').selectOption('2');
   waitGate = new Promise(resolve => { releaseWait = resolve; });
   await page.locator('#generate').click();
@@ -237,20 +253,126 @@ try {
   assert.equal(posts().length, beforeSSE, 'Reconnect and hints are read-only');
   assert.ok(requests.filter(item => item.path.startsWith('/inputs?limit')).length - beforeReads <= 2, 'Burst coalesces to bounded reads');
   assert.equal(await page.locator('#player').getAttribute('src'), playerSrc);
-  await page.screenshot({path: resolve(artifacts, 'sse-refreshed.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'sse-refreshed.png'), fullPage: true});
   await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
   assert.equal(await page.evaluate(() => mockEvents.every(event => event.closed)), true);
   mode = 'list-error'; await page.goto('http://h3.mock.invalid/');
   await page.locator('#notice').filter({hasText: 'API indisponível'}).waitFor();
   assert.equal(await page.locator('#notice b').count(), 0);
-  await page.screenshot({path: resolve(artifacts, 'api-error.png'), fullPage: true});
+  await capture({path: resolve(artifacts, 'api-error.png'), fullPage: true});
   delete config.filesystem_events; delete config.reference_library; mode = 'normal'; await ready();
   assert.equal(await page.evaluate(() => mockEvents.length), 0, 'Legacy config does not open SSE');
   assert.equal(await page.locator('#reference-library').isHidden(), true);
+  const nativePosts = () => posts().filter(item => item.path.startsWith('/runs')).length;
+  const grokPosts = () => posts().filter(item => item.path === '/grok');
+  assert.equal(grokPosts().length, 0, 'Grok must not run on load or SSE');
+  await page.locator('.grok-settings summary').click();
+  await page.locator('#grok-system').fill('Detalhe a ideia sem inventar ações ou parâmetros.');
+  await page.locator('#grok-model').fill('explicit-fake-model');
+  const beforeConfigEnter = posts().length;
+  await page.locator('#grok-model').press('Enter');
+  assert.equal(posts().length, beforeConfigEnter, 'Model ID Enter must not submit the native generation form');
+  await page.locator('#grok-save').click();
+  await page.locator('#grok-config-status').filter({hasText: 'Configuração salva'}).waitFor();
+  assert.deepEqual(requests.filter(item => item.method === 'PUT').at(-1).body, {system_prompt: 'Detalhe a ideia sem inventar ações ou parâmetros.', model: 'explicit-fake-model'});
+  const beforeGrokNative = nativePosts();
+  await page.locator('#prompt').fill('ela dá um salto e o vestido fica vermelho');
+  await page.locator('#grok-detail').evaluate(button => { button.click(); button.click(); });
+  await page.locator('#grok-status').filter({hasText: 'Texto detalhado'}).waitFor();
+  assert.equal(grokPosts().length, 1); assert.equal(nativePosts(), beforeGrokNative);
+  assert.equal(await page.locator('#prompt').inputValue(), detailedScene);
+  assert.deepEqual(grokPosts().at(-1).body, {prompt: 'ela dá um salto e o vestido fica vermelho', system_prompt: editor.system_prompt, model: 'explicit-fake-model'});
+  assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
+  await capture({path: resolve(artifacts, 'grok-detailed-desktop.png'), fullPage: true});
+  grokGate = new Promise(resolve => { releaseGrok = resolve; });
+  await page.locator('#prompt').fill('Outra ideia simples'); await page.locator('#grok-model').fill('');
+  await page.locator('#grok-detail').click();
+  await page.locator('#prompt').fill('Rascunho mais novo, não substituir');
+  releaseGrok(); grokGate = null;
+  await page.locator('#grok-status').filter({hasText: 'proposta ficou separada'}).waitFor();
+  assert.equal(await page.locator('#prompt').inputValue(), 'Rascunho mais novo, não substituir');
+  assert.equal(grokPosts().at(-1).body.model, undefined, 'Empty model defers to configured environment');
+  assert.equal(nativePosts(), beforeGrokNative);
+  await capture({path: resolve(artifacts, 'grok-stale-proposal.png'), fullPage: true});
+  await page.locator('#grok-use').click();
+  assert.equal(await page.locator('#prompt').inputValue(), detailedScene);
+  assert.equal(nativePosts(), beforeGrokNative, 'Use proposal does not generate');
+  await page.locator('#seed').fill('42'); await page.locator('#generate').click();
+  await page.locator('#operation').filter({hasText: 'generated-5'}).waitFor();
+  await page.waitForFunction(() => !document.getElementById('generate').disabled);
+  assert.equal(nativePosts(), beforeGrokNative + 1, 'Only explicit Generate can submit native work');
+  grokMode = 'error'; const preserved = await page.locator('#prompt').inputValue();
+  await page.locator('#grok-detail').click();
+  await page.locator('#grok-status').filter({hasText: 'HTTP 400'}).waitFor();
+  assert.equal(await page.locator('#prompt').inputValue(), preserved);
+  assert.equal(await page.locator('#grok-detail').isEnabled(), true);
+  grokMode = 'oversized'; await page.locator('#grok-detail').click();
+  await page.locator('#grok-status').filter({hasText: 'sem truncar'}).waitFor();
+  assert.equal(await page.locator('#prompt').inputValue(), preserved);
+  await capture({path: resolve(artifacts, 'grok-oversized-error.png'), fullPage: true});
+  grokMode = 'normal'; await ready();
+  grokGate = new Promise(resolve => { releaseGrok = resolve; });
+  await page.locator('#prompt').fill('salto vermelho'); await page.locator('#grok-detail').click();
+  mode = 'ambiguous'; await page.locator('#generate').click();
+  await page.locator('#operation').filter({hasText: 'Resultado incerto'}).waitFor();
+  releaseGrok(); grokGate = null;
+  await page.locator('#grok-status').filter({hasText: 'proposta ficou separada'}).waitFor();
+  assert.equal(await page.locator('#generate').isDisabled(), true, 'Grok completion cannot reset native uncertainty');
+  assert.equal(await page.locator('#prompt').inputValue(), 'salto vermelho');
+  mode = 'normal'; grokMode = 'network'; await ready();
+  await page.locator('#grok-detail').click();
+  await page.locator('#grok-status').filter({hasText: 'Resultado incerto'}).waitFor();
+  const uncertainGrokCount = grokPosts().length;
+  await page.locator('#refresh').click();
+  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
+  assert.equal(grokPosts().length, uncertainGrokCount); assert.equal(await page.locator('#grok-detail').isDisabled(), true);
+  await capture({path: resolve(artifacts, 'grok-uncertain.png'), fullPage: true});
+  grokMode = 'editor-error'; await ready();
+  assert.equal(await page.locator('#grok-detail').isDisabled(), true); assert.equal(await page.locator('#generate').isEnabled(), true, 'Editor failure must not block native generation');
+  grokMode = 'normal';
+  runs = Array.from({length: 12}, (_, index) => mkRun(`many-${index}`, index === 0 ? 'ready_for_review' : 'accepted', null, ('# Cena longa\nEla dá um salto e o vestido fica vermelho. Preserve a ordem, a pose e a identidade original.\n').repeat(12)));
+  await ready();
+  const bounds = [];
+  for (const width of [1440, 393, 320]) {
+    await page.setViewportSize({width, height: 844});
+    const cards = await page.locator('.clip-card').evaluateAll(nodes => nodes.map(node => {
+      const box = node.getBoundingClientRect();
+      return {height: box.height, shrink: getComputedStyle(node).flexShrink, top: box.top, bottom: box.bottom, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflow: getComputedStyle(node).overflow, children: [...node.children].map(child => { const rect = child.getBoundingClientRect(); return {className: child.className, inside: rect.top >= box.top && rect.bottom <= box.bottom, height: rect.height, top: rect.top, bottom: rect.bottom, scrollHeight: child.scrollHeight, clientHeight: child.clientHeight, overflow: getComputedStyle(child).overflow}; })};
+    }));
+    assert.equal(cards.length, 12);
+    assert.ok(cards.every(card => card.shrink === '0' && card.children.every(child => child.inside)), `${width}px library children must remain inside each card`);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px long-library horizontal overflow`);
+    const ancestors = await page.locator('#library').evaluate(node => [node, node.parentElement].map(item => { const box = item.getBoundingClientRect(); return {className: item.className, height: box.height, top: box.top, bottom: box.bottom, scrollHeight: item.scrollHeight, clientHeight: item.clientHeight, overflow: getComputedStyle(item).overflow}; }));
+    if (width < 640) assert.ok(ancestors[0].clientHeight <= 430 && ancestors[0].scrollHeight > ancestors[0].clientHeight, 'Phone library remains bounded and scrollable');
+    bounds.push({width, cards, ancestors});
+    if (media) await page.waitForFunction(() => document.getElementById('player').readyState >= 2);
+    await capture({path: resolve(artifacts, `library-many-${width}.png`), fullPage: true});
+  }
+  await writeFile(resolve(root, '.dumps/tests/reports/library_bounds_after.json'), JSON.stringify(bounds, null, 2));
+  const phone = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
+  await phone.route('**/*', routeRequest); await phone.addInitScript(mockStartup);
+  const phonePage = await phone.newPage(); phonePage.on('pageerror', error => exceptions.push(error.message));
+  await phonePage.goto('http://h3.mock.invalid/');
+  await phonePage.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  assert.equal(await phonePage.evaluate(() => navigator.maxTouchPoints > 0 && devicePixelRatio === 2), true);
+  await phonePage.locator('#prompt').fill('ela dá um salto e o vestido fica vermelho');
+  const phoneNativeBefore = nativePosts(); await phonePage.locator('#grok-detail').tap();
+  await phonePage.locator('#grok-status').filter({hasText: 'Texto detalhado'}).waitFor();
+  assert.equal(nativePosts(), phoneNativeBefore);
+  assert.ok(await phonePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  if (media) {
+    // Explicit prerecorded fixture playback settles the decoder, never autoplay.
+    await phonePage.locator('#player').evaluate(async player => { await player.play(); });
+    await phonePage.waitForFunction(() => document.getElementById('player').currentTime > 0.05);
+    await phonePage.locator('#player').evaluate(player => player.pause());
+  }
+  await phonePage.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
+  await phonePage.screenshot({path: resolve(artifacts, 'grok-phone-393-touch-2x.png'), fullPage: true});
+  await phone.close();
   assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
   assert.equal(await page.evaluate(() => localStorage.length), 0);
   console.log(`PASS mock browser: ${requests.length} intercepted requests, ${posts().length} fake POSTs, zero live API/GPU requests`);
 } finally {
-  await writeFile(resolve(root, '.dumps/tests/reports/frontend_paths.json'), JSON.stringify({requests, exceptions, violations, media: Boolean(media), fakeInferencePosts: posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, fakeDiskUploads: posts().filter(item => item.body?.diskUploadFake).length}, null, 2));
+  await writeFile(resolve(root, '.dumps/tests/reports/grok_editor.json'), JSON.stringify({requests, exceptions, violations, media: Boolean(media), fakeInferencePosts: posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, fakeDiskUploads: posts().filter(item => item.body?.diskUploadFake).length, fakeGrokPosts: posts().filter(item => item.path === '/grok').length, fakeEditorSaves: requests.filter(item => item.path === '/grok/editor' && item.method === 'PUT').length, phone: {width: 393, height: 852, touch: true, scale: 2}, protectedProof: '.dumps/tests/reports/grok_editor_hashcheck.json', cloudRequests: 0, gpuRequests: 0}, null, 2));
   await browser.close();
 }

@@ -44,6 +44,22 @@ export function makePayload({seed, prompt, image = 'dance_reference.png', refere
   if (image !== 'dance_reference.png') throw new Error('Use a referência original disponível.');
   return {...base, image};
 }
+export function editorPayload({system_prompt, model = ''}) {
+  if (typeof system_prompt !== 'string' || !system_prompt.trim() || system_prompt.length > 100000 || typeof model !== 'string' || model.length > 256 || (model && !model.trim())) throw new Error('Configuração Grok inválida: system prompt até 100000 caracteres e ID do modelo até 256.');
+  return {system_prompt, model};
+}
+export function grokPayload({prompt, system_prompt, model = ''}) {
+  const config = editorPayload({system_prompt, model});
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma ideia de 1 a 12000 caracteres.');
+  return {system_prompt: config.system_prompt, prompt, ...(model ? {model} : {})};
+}
+export function sceneText(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw new Error('Grok não devolveu uma cena válida de até 12000 caracteres. O rascunho foi mantido, sem truncar.');
+  return value;
+}
+export function draftMatches(before, after) {
+  return ['revision', 'mode', 'selected', 'prompt', 'system_prompt', 'model'].every(key => before[key] === after[key]);
+}
 export function playableURL(run, summary, block) {
   if (!run || !PLAYABLE.has(run.state)) return null;
   // Detail has no public URL. Require evidence of a published file and an explicit
@@ -68,7 +84,18 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
   }
   let submitting = false;
   let uploading = false;
+  let detailing = false;
   return {
+    saveEditor: payload => request('/grok/editor', {method: 'PUT', body: editorPayload(payload)}),
+    async detail(payload) {
+      if (detailing) throw new Error('Grok já está detalhando uma ideia.');
+      const body = grokPayload(payload);
+      detailing = true;
+      try {
+        const result = await request('/grok', {method: 'POST', body, expectedStatus: 200});
+        return sceneText(result?.text);
+      } finally { detailing = false; }
+    },
     async upload(file) {
       validateUpload(file);
       if (uploading) throw new Error('Um upload já está em andamento.');
@@ -103,7 +130,7 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
 export function startUI(document, client = createClient()) {
   const $ = id => document.getElementById(id);
   let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0;
-  const state = {references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  const state = {editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   function text(id, value) { $(id).textContent = value; }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
@@ -124,14 +151,68 @@ export function startUI(document, client = createClient()) {
     $('continuation-note').hidden = state.mode !== 'continue';
     text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar novo bloco');
     text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${run?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
+    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain;
+    $('grok-save').disabled = !state.editorReady || state.editorSaving;
+    $('grok-system').disabled = $('grok-model').disabled = !state.editorReady;
+    text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar com Grok');
     $('previous').disabled = state.offset === 0;
     $('next').disabled = state.offset + state.limit >= state.total;
   }
   function setMode(mode) {
     if (state.busy || state.uncertain || !state.config || (mode === 'continue' && state.selected?.state !== 'accepted')) return;
+    ++state.draftRevision;
     state.mode = mode;
     $('prompt').value = mode === 'continue' ? state.config.continuation_prompt : state.config.default_prompt;
     controls();
+  }
+  function editorDraft() {
+    return {revision: state.draftRevision, mode: state.mode, selected: state.selected?.id ?? null, prompt: $('prompt').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
+  }
+  async function loadEditor() {
+    try {
+      const config = editorPayload(await client.get('/grok/editor'));
+      $('grok-system').value = config.system_prompt; $('grok-model').value = config.model;
+      state.editorReady = true;
+      message('grok-config-status', 'Configuração local carregada. Nenhuma chamada ao Grok foi feita.');
+    } catch (error) { message('grok-config-status', `Configuração Grok indisponível: ${error.message}. A geração de vídeo continua separada.`, true); }
+    controls();
+  }
+  async function saveEditor() {
+    if (!state.editorReady || state.editorSaving) return;
+    let config;
+    try { config = editorPayload(editorDraft()); } catch (error) { message('grok-config-status', error.message, true); return; }
+    state.editorSaving = true; controls();
+    try {
+      await client.saveEditor(config);
+      message('grok-config-status', 'Configuração salva em .data/grok/editor.json no PC. Autenticação não foi alterada.');
+    } catch (error) { message('grok-config-status', `Configuração não confirmada: ${error.message}. Nenhuma repetição automática.`, true); }
+    finally { state.editorSaving = false; controls(); }
+  }
+  async function detailScene() {
+    if (!state.editorReady || state.grokBusy || state.grokUncertain) return;
+    const before = editorDraft();
+    try { grokPayload(before); } catch (error) { message('grok-status', error.message, true); return; }
+    state.grokBusy = true; $('grok-proposal').hidden = true; controls();
+    message('grok-status', 'Enviando só a ideia e o system prompt ao Grok. Pode levar até 120 s; nenhum vídeo será gerado.');
+    try {
+      const result = await client.detail(before);
+      if (stopped) return;
+      if (draftMatches(before, editorDraft()) && !state.busy && !state.uncertain) {
+        $('prompt').value = result; ++state.draftRevision;
+        message('grok-status', 'Texto detalhado. Confira, edite se quiser e clique Gerar para enviar o vídeo.');
+      } else {
+        $('grok-result').value = result; $('grok-proposal').hidden = false;
+        message('grok-status', 'O rascunho ou bloco mudou. A proposta ficou separada; use somente se ainda fizer sentido.');
+      }
+    } catch (error) {
+      state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500;
+      message('grok-status', `Grok não confirmou uma cena: ${error.message}. ${state.grokUncertain ? 'Resultado incerto; não repita esta ideia às cegas nesta sessão.' : 'O rascunho foi mantido; corrija a configuração ou verifique a conexão.'}`, true);
+    } finally { state.grokBusy = false; controls(); }
+  }
+  function useProposal() {
+    if (state.busy || state.uncertain) return;
+    try { $('prompt').value = sceneText($('grok-result').value); ++state.draftRevision; $('grok-proposal').hidden = true; message('grok-status', 'Proposta usada. Confira e clique Gerar; nenhum vídeo foi enviado.'); }
+    catch (error) { message('grok-status', error.message, true); }
   }
   function renderLibrary() {
     const list = $('library'); list.replaceChildren();
@@ -235,6 +316,7 @@ export function startUI(document, client = createClient()) {
   }
   async function select(id, knownRun) {
     if (state.busy && !knownRun) return;
+    if (id !== state.selected?.id) ++state.draftRevision;
     const epoch = ++state.epoch;
     text('sequence-message', 'Carregando cadeia…');
     try {
@@ -343,6 +425,10 @@ export function startUI(document, client = createClient()) {
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
     } finally { state.busy = false; state.waitController = null; controls(); drainChanges(); }
   }
+  for (const id of ['prompt', 'grok-system', 'grok-model']) $(id).addEventListener('input', () => { ++state.draftRevision; });
+  $('grok-detail').addEventListener('click', detailScene);
+  $('grok-save').addEventListener('click', saveEditor);
+  $('grok-use').addEventListener('click', useProposal);
   $('reference').addEventListener('change', () => { if (state.mode === 'continue' || state.busy) return; const value = $('reference').value; state.reference = value === 'dance_reference.png' ? null : state.references[Number(value)] || state.reference; showReference(); controls(); });
   $('upload').addEventListener('click', upload);
   $('refresh').addEventListener('click', () => refresh());
@@ -357,6 +443,7 @@ export function startUI(document, client = createClient()) {
   document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; events?.close(); state.waitController?.abort(); });
   refreshActive = true;
   const ready = loadConfig().then(() => Promise.allSettled([
+    loadEditor(),
     loadReferences(),
     loadLibrary().then(() => state.items.length ? select(state.items[0].id) : undefined),
   ]), error => [{status: 'rejected', reason: error}]).then(results => {

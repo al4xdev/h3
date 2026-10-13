@@ -65,13 +65,30 @@
             </div>
             <label for="prompt">Instrução da cena</label>
             <textarea id="prompt" name="prompt" rows="9" maxlength="12000" required aria-describedby="prompt-hint"></textarea>
-            <p id="prompt-hint" class="caption">Descreva a ação e o que deve permanecer entre blocos.</p>
+            <p id="prompt-hint" class="caption">Pode escrever do seu jeito: “ela dá um salto e o vestido fica vermelho”.</p>
+            <button id="grok-detail" type="button" disabled>Detalhar com Grok</button>
+            <p id="grok-status" class="operation" role="status" aria-live="polite">Grok edita só o texto. Gerar vídeo é outro clique.</p>
+            <div id="grok-proposal" hidden>
+              <label for="grok-result">Proposta para conferir</label>
+              <textarea id="grok-result" rows="5" maxlength="12000"></textarea>
+              <button id="grok-use" type="button">Usar esta proposta</button>
+            </div>
             <div class="field-pair"><div><label for="seed">Seed</label><input id="seed" name="seed" type="text" inputmode="numeric" pattern="[0-9]+" value="2026101205" required aria-describedby="seed-hint"></div><div><label for="duration">Duração (s)</label><input id="duration" value="2.3" readonly aria-readonly="true"></div></div>
             <p id="seed-hint" class="caption">Inteiro de 0 a 9007199254740991. Não muda automaticamente.</p>
             <p id="continuation-note" class="caption" hidden>Continuidade: últimos 3 s e áudio do pai aceito. A identidade original do pai é herdada; outra imagem só se aplica a uma nova cena.</p>
             <button id="generate" class="primary" type="submit">Gerar novo bloco</button>
           </fieldset>
         </form>
+        <details class="grok-settings">
+          <summary>Configurar Grok</summary>
+          <label for="grok-system">System prompt · como detalhar a cena</label>
+          <textarea id="grok-system" rows="5" maxlength="100000" disabled></textarea>
+          <label for="grok-model">ID do modelo</label>
+          <input id="grok-model" type="text" maxlength="256" placeholder="Vazio usa H3_GROK_MODEL" disabled>
+          <p class="caption">Use um ID real do catálogo. Autenticação é separada; não informe senhas ou tokens aqui. Login não garante cota ou ausência de cobrança.</p>
+          <button id="grok-save" type="button" disabled>Salvar configuração no PC</button>
+          <p id="grok-config-status" class="operation" role="status" aria-live="polite"></p>
+        </details>
         <p class="operation-note">Gerar envia uma única solicitação. Fechar esta página não cancela o trabalho. Não há repetição automática.</p>
         <p id="operation" class="operation" role="status" aria-live="polite"></p>
       </aside>
