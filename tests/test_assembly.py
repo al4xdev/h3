@@ -271,36 +271,83 @@ async def test_native_job_prevents_cpu_assembly_admission(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("available", [0, 1536 * 1024**2 - 1])
-async def test_cpu_slot_same_ram_floor_no_disk_or_external_call(tmp_path, available):
-    service = make_service(tmp_path)
-    service.memory_available = lambda: available
-    with pytest.raises(Conflict, match="RAM"):
+@pytest.mark.parametrize("available", [0, 1536 * 1024**2 - 1, None])
+async def test_cpu_slot_ignores_ram_but_preserves_missing_input_guard(tmp_path, available):
+    consulted = []
+
+    def sensor():
+        consulted.append(True)
+        if available is None:
+            raise RuntimeError("Host RAM sensor unavailable")
+        return available
+
+    service = make_service(tmp_path, memory_available=sensor)
+    async with service.cpu_slot("fake-assembly"):
+        assert service._cpu_active == "fake-assembly"
+    with pytest.raises(FileNotFoundError):
         await pipe(service, str(uuid4())).arun()
+    assert consulted == [] and service._cpu_active is None
     assert not (tmp_path / ".data/assemblies").exists() and not service.comfy.submitted
     await service.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_ram_drop_interrupts_cpu_only_while_render_is_owned(tmp_path, source_clips):
-    service, runs = chain(tmp_path, source_clips)
+@pytest.mark.parametrize("finish", ["complete", "cancel", "shutdown"])
+async def test_ram_drop_does_not_interrupt_owned_cpu_render(tmp_path, finish):
+    source = tmp_path / "fake-source.mp4"
+    source.write_bytes(b"fake encoded clip")
+    service, runs = chain(tmp_path, [source] * 3)
+
+    async def probe(path):
+        frames = 15 if path.name == "video.mp4" else 5
+        return {"streams": [{
+            "codec_type": "video", "width": 48, "height": 64,
+            "avg_frame_rate": "24/1", "duration": str(frames / 24),
+            "nb_frames": str(frames), "codec_name": "h264", "pix_fmt": "yuv420p",
+        }]}
+
+    service.media.probe = probe
     service.settings = replace(service.settings, memory_check_interval=0.001)
-    entered = asyncio.Event()
+    entered, release = asyncio.Event(), asyncio.Event()
+    available = [8 * 1024**3]
+    consulted = []
+
+    def sensor():
+        consulted.append(True)
+        return available[0]
+
+    service.memory_available = sensor
 
     async def blocked(chunks, destination):
-        destination.write_bytes(b"partial own evidence")
         entered.set()
-        await asyncio.Event().wait()
+        await release.wait()
+        assert len(chunks) == 3
+        destination.write_bytes(b"fake assembled clip")
+        return {"assembly": assembly.MECHANISM}
 
     service.media.concatenate = blocked
     operation = pipe(service, runs[-1].id)
     task = asyncio.create_task(operation.arun())
     await entered.wait()
-    service.memory_available = lambda: 0
-    with pytest.raises(asyncio.CancelledError, match="RAM"):
+    available[0] = 0
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(release.wait(), timeout=0.02)
+    assert not task.done() and service._cpu_task is task
+    if finish == "complete":
+        release.set()
         await task
-    record = get_assembly(tmp_path, operation.state.id)
-    assert record["state"] == "interrupted" and "RAM" in record["error"]
+        record = get_assembly(tmp_path, operation.state.id)
+        assert record["state"] == "completed" and record["error"] is None
+    else:
+        if finish == "shutdown":
+            await service.shutdown()
+        else:
+            task.cancel("Explicit own cancellation")
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        record = get_assembly(tmp_path, operation.state.id)
+        assert record["state"] == "interrupted" and record["video_url"] is None
+    assert consulted == []
     assert not service.comfy.submitted and service._cpu_task is None
     await service.shutdown()
 

@@ -256,19 +256,18 @@ async def test_tail_configuration_cannot_silently_override_request(tmp_path, ove
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["i2v", "v2v"])
-async def test_memory_guard_can_stop_preparation_before_prompt_submission(tmp_path, kind):
+async def test_low_memory_does_not_stop_preparation_before_prompt_submission(tmp_path, kind):
     service = make_service(tmp_path)
     parent = await accepted_parent(service) if kind == "v2v" else None
     submitted = len(service.comfy.submitted)
     pipe = i2v(service) if kind == "i2v" else v2v(service, parent.id)
     run = await service.submit(pipe)
     service.memory_available = lambda: 0
-    with pytest.raises(asyncio.CancelledError):
-        await service._task
+    await service._task
     final = service.store.get(run.id)
-    assert final.state == "interrupted" and final.prompt_id is None
-    assert "RAM dropped" in final.error
-    assert len(service.comfy.submitted) == submitted
+    assert final.state == "ready_for_review" and final.prompt_id is not None
+    assert final.error is None
+    assert len(service.comfy.submitted) == submitted + 1
     assert service._active is None
     await service.shutdown()
 

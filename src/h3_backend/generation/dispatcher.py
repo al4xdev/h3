@@ -121,11 +121,8 @@ class RunService:
         self.media = media
         self.frames_for_duration = frames_for_duration
         self.telemetry = telemetry
-        if memory_available is None:
-            import psutil
-
-            memory_available = lambda: psutil.virtual_memory().available
-        self.memory_available = memory_available
+        # Legacy memory_available/settings are accepted but ignored: the external
+        # owner manages Comfy's RAM/lifecycle; telemetry remains observational.
         self._lock = asyncio.Lock()
         self._active: str | None = None
         self._task: asyncio.Task | None = None
@@ -241,27 +238,10 @@ class RunService:
         async with self._lock:
             if self._closing or self._active is not None or self._cpu_active is not None:
                 raise Conflict("Only one backend job may be active")
-            if self.memory_available() < self.settings.minimum_available_bytes:
-                raise Conflict("Available host RAM is below 1.5 GiB; no assembly was admitted")
             self._cpu_active, self._cpu_task = operation_id, owner
-        stop = asyncio.Event()
-
-        async def guard_ram():
-            while not stop.is_set():
-                if self.memory_available() < self.settings.minimum_available_bytes:
-                    owner.cancel("Available host RAM fell below 1.5 GiB during CPU assembly")
-                    return
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=self.settings.memory_check_interval)
-                except TimeoutError:
-                    pass
-
-        guard = asyncio.create_task(guard_ram(), name=f"h3-cpu-ram-{operation_id}")
         try:
             yield
         finally:
-            stop.set()
-            await asyncio.gather(guard, return_exceptions=True)
             async with self._lock:
                 if self._cpu_task is owner:
                     self._cpu_active = self._cpu_task = None
@@ -307,8 +287,6 @@ class RunService:
                 raise Conflict("Pipeline may only be submitted once")
             if self._closing or self._active is not None or self._cpu_active is not None:
                 raise Conflict("Only one backend job may be active")
-            if self.memory_available() < self.settings.minimum_available_bytes:
-                raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
             pipe._submitting = True
             try:
                 run = await pipe._admit()
@@ -369,8 +347,6 @@ class RunService:
         self._hydrate(run)
         if self._closing or self._active is not None or self._cpu_active is not None:
             raise Conflict("Only one backend job may be active; request was not queued for replay")
-        if self.memory_available() < self.settings.minimum_available_bytes:
-            raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
         self._active = run_id
         # Registration BEFORE 202 closes the one-GET-wait race. RAM caller pipes are not captured.
         self._task = asyncio.create_task(self._worker(run_id), name=f"h3-{run_id}")
@@ -380,21 +356,20 @@ class RunService:
         start = monotonic()
         stop = asyncio.Event()
         telemetry_task = None
-        guard_task = None
-        interruption = {"reason": "Backend shutdown; own prompt cancellation requested"}
-        owner = asyncio.current_task()
         try:
             # Re-read after scheduling too: no mutable admission object is execution authority.
             run = self.store.request(run_id)
             pipe = self._hydrate(run)
             self.store.update(run_id, state="running")
             telemetry_task = asyncio.create_task(self._record_telemetry(run.id, stop))
-            guard_task = asyncio.create_task(self._memory_guard(stop, owner, interruption))
             # Recheck the external global slot for disk-originated admission as well.
             await self.comfy.ensure_idle()
             await pipe.arun()
         except asyncio.CancelledError:
-            self.store.update(run_id, state="interrupted", error=interruption["reason"])
+            self.store.update(
+                run_id, state="interrupted",
+                error="Backend shutdown; own prompt cancellation requested",
+            )
             raise
         except Exception as exc:  # noqa: BLE001 - persist all worker/plugin failures at this boundary.
             self.store.update(
@@ -405,9 +380,6 @@ class RunService:
             )
         finally:
             stop.set()
-            if guard_task:
-                guard_task.cancel()
-                await asyncio.gather(guard_task, return_exceptions=True)
             if telemetry_task:
                 # The recorder receives stop; bounded cleanup also tolerates a broken stats endpoint.
                 try:
@@ -420,20 +392,6 @@ class RunService:
                     await asyncio.gather(telemetry_task, return_exceptions=True)
             if self._active == run_id:
                 self._active = None
-
-    async def _memory_guard(self, stop, owner, interruption):
-        while not stop.is_set():
-            if self.memory_available() < self.settings.minimum_available_bytes:
-                interruption["reason"] = (
-                    "Available host RAM dropped below 1.5 GiB; own prompt cancellation requested"
-                )
-                # Cancelling execute invokes only /api/jobs/<our UUID>/cancel, never /interrupt.
-                owner.cancel()
-                return
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self.settings.memory_check_interval)
-            except TimeoutError:
-                pass
 
     async def _record_telemetry(self, run_id, stop):
         try:

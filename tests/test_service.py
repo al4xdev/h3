@@ -137,7 +137,11 @@ def frames(seconds):
     return frames_for_duration(seconds)
 
 
-def make_service(tmp_path):
+def make_service(tmp_path, *, memory_available=None):
+    if memory_available is None:
+        def memory_available():
+            pytest.fail("Dispatcher must not consult a host RAM policy sensor")
+
     assets = tmp_path / "assets"
     assets.mkdir()
     (assets / "dance_reference.png").write_bytes(b"fake-image")
@@ -151,7 +155,7 @@ def make_service(tmp_path):
         builder=Builder(),
         frames_for_duration=frames,
         telemetry=telemetry,
-        memory_available=lambda: 8 * 1024**3,
+        memory_available=memory_available,
     )
 
 
@@ -299,8 +303,18 @@ def test_output_source_and_ffprobe_constraints(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["i2v", "v2v"])
-async def test_low_memory_preflight_and_running_guard(tmp_path, operation):
-    service = make_service(tmp_path)
+@pytest.mark.parametrize("sensor_raises", [False, True])
+async def test_ram_sensor_ignored_at_admission_and_during_owned_job(tmp_path, operation, sensor_raises):
+    available = [0]
+    consulted = []
+
+    def sensor():
+        consulted.append(True)
+        if sensor_raises:
+            raise RuntimeError("Host RAM sensor unavailable")
+        return available[0]
+
+    service = make_service(tmp_path, memory_available=sensor)
     parent = None
     if operation == "v2v":
         parent = await service.create(RunRequest(seed=1))
@@ -313,24 +327,24 @@ async def test_low_memory_preflight_and_running_guard(tmp_path, operation):
         return await service.create(RunRequest(seed=2))
 
     submitted = len(service.comfy.submitted)
-    available = [0]
-    service.memory_available = lambda: available[0]
-    with pytest.raises(Conflict, match="RAM"):
-        await create()
-    assert len(service.comfy.submitted) == submitted
-    available[0] = 8 * 1024**3
-    service.settings = replace(service.settings, memory_check_interval=0.01)
+    service.settings = replace(service.settings, memory_check_interval=0.001)
     service.comfy.gate = asyncio.Event()
     service.comfy.submitted_event = asyncio.Event()
     run = await create()
-    # Test the running-inference guard separately from the earlier preparation guard.
     await asyncio.wait_for(service.comfy.submitted_event.wait(), timeout=2)
+    available[0] = 8 * 1024**3
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(service.comfy.gate.wait(), timeout=0.02)
     available[0] = 0
-    with pytest.raises(asyncio.CancelledError):
-        await service._task
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(service.comfy.gate.wait(), timeout=0.02)
+    assert not service._task.done() and service._active == run.id
+    assert consulted == []
+    service.comfy.gate.set()
+    await service._task
     final = service.store.get(run.id)
-    assert final.state == "interrupted" and final.prompt_id is not None
-    assert "RAM dropped" in final.error
+    assert final.state == "ready_for_review" and final.prompt_id is not None
+    assert final.error is None and consulted == []
     assert len(service.comfy.submitted) == submitted + 1
     await service.shutdown()
 
@@ -418,16 +432,12 @@ async def test_i2v_never_prepares_parent_media(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v2v_low_memory_and_shutdown_are_shared_guards(tmp_path):
+async def test_v2v_ignores_low_memory_but_preserves_shutdown_guard(tmp_path):
     service = make_service(tmp_path)
     parent = await service.create(RunRequest(seed=1))
     await service._task
     await service.decide(parent.id, True)
     service.memory_available = lambda: 0
-    with pytest.raises(Conflict, match="RAM"):
-        await service.continue_run(parent.id, ContinueRequest(seed=2))
-    assert len(service.comfy.submitted) == 1
-    service.memory_available = lambda: 8 * 1024**3
     child = await service.continue_run(parent.id, ContinueRequest(seed=2))
     await service.shutdown()
     assert service.store.get(child.id).state == "interrupted"

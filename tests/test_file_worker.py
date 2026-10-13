@@ -374,7 +374,7 @@ async def test_busy_events_fail_even_if_slot_frees_before_consumer(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_external_request_low_ram_rejected_without_hidden_queue(tmp_path):
+async def test_external_request_ignores_low_ram_without_replay(tmp_path):
     service = make_service(tmp_path)
     await service.startup()
     service.memory_available = lambda: 0
@@ -383,11 +383,12 @@ async def test_external_request_low_ram_rejected_without_hidden_queue(tmp_path):
     run = admitted(service)
     service.store.create(run, materialize_request=True)
     await inode_barrier(service, stream, run.id)
-    assert service.store.get(run.id).state == "failed"
+    await service._task
+    assert service.store.get(run.id).state == "ready_for_review"
     service.memory_available = lambda: 8 * 1024**3
     service._request_hint(run.id)
     await service._candidates.join()
-    assert service._task is None and not service.comfy.submitted
+    assert service._task.done() and len(service.comfy.submitted) == 1
     await stream.aclose()
     await service.shutdown()
 
