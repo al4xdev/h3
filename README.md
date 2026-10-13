@@ -18,8 +18,10 @@ env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host
 Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, na porta8888:
 
 ```fish
-uv run --no-sync uvicorn h3_backend.api:app --host 0.0.0.0 --port 8888
+./start.sh
 ```
+
+O script inicia a ponte em `0.0.0.0:8888`, sem instalar dependências automaticamente; execute `uv sync` na preparação inicial. Também funciona quando chamado pelo caminho absoluto fora da raiz do projeto. No PC, abra `http://127.0.0.1:8888`.
 
 No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC. Fechar a ponte não libera os modelos do ComfyUI; são processos distintos.
 
