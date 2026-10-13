@@ -1,10 +1,28 @@
 # H3 — app local de vídeo
 
-Geração por blocos e revisão humana sobre os grafos nativos validados do ComfyUI. `.data` no PC é a autoridade; Python faz a ponte local e coordena ferramentas externas, sem carregar modelos ou pixels. A integração do frontend com observação de paths está em andamento; o contrato escolhido está em [arquitetura local](docs/local_architecture.md).
+Geração por blocos e revisão humana sobre os grafos nativos validados do ComfyUI. `.data` no PC é a autoridade; Python serve o front JS, catálogos, upload e mídia própria, observa paths por inotify/SSE e coordena ferramentas externas, sem carregar modelos ou pixels. Ponte/worker, editor Grok isolado e montagem FFmpeg estão integrados e verificados no navegador real. A revisão continua explícita; a montagem de um fim ainda pronto para revisão é uma prévia. Consulte [arquitetura local](docs/local_architecture.md).
 
 As decisões permanentes de autonomia, arquitetura vertical, benchmark, MCP, dados e frontend estão em [`AGENTS.md`](AGENTS.md). A meta é um aplicativo local leve de vídeos encadeados, não apenas um teste de geração.
 
 O Store grava estados/JSONs/mídia persistente em `.data/runs/<UUID>/`. `runs/` permanece como âncora legada intacta: projetos com esse legado exigem [migração offline verificada](docs/data_storage.md), sem reescrever manifests ou apagar vídeos. O runtime só usa a autoridade canônica após recibo válido. `.dumps/` continua como scratch/evidência; recursos `workflows/`, `prompts/` e `assets/` permanecem na raiz do projeto.
+
+## Abrir o estúdio local
+
+Na raiz do projeto, com FFmpeg/ffprobe e o ComfyUI já disponíveis:
+
+```fish
+uv sync
+env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
+```
+
+Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, substitua o host por `0.0.0.0` e abra `http://IP-DO-PC:8010` no celular. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC.
+
+- Selecione uma referência da biblioteca ou **Envie imagem ao PC**; upload não gera vídeo. Imagens próprias ficam em `.data/inputs/`, com bytes originais preservados.
+- Descreva a cena e clique **Gerar** explicitamente. Assista ao bloco antes de aceitar/rejeitar; apenas um pai aceito permite continuar.
+- **Detalhar com Grok** é um editor de texto apartado: transforma sua ideia em uma instrução editável, sem gerar vídeo ou alterar imagens. System prompt/modelo são configuráveis no front; **Salvar configuração** grava somente `.data/grok/editor.json`. Credenciais OAuth ficam separadas. Veja [Grok](docs/grok.md) para modelo/autorização; nenhuma chamada ao provider ocorre ao abrir/reconectar a página.
+- Atualização de arquivos chega por SSE; reconectar ou atualizar a biblioteca só relê metadados, nunca repete geração. Resultado incerto exige consulta do ID conhecido, não novo POST cego.
+
+**Montar sequência** concatena a cadeia selecionada, sem gerar novos blocos: todos os pais devem estar aceitos e o fim pode estar aceito ou pronto para revisão. Assista/baixe o resultado no painel próprio. Montar não aceita o fim: a prévia mantém a revisão pendente. Após aceitar o fim, um novo clique explícito pode publicar uma montagem da sequência aceita. Se a resposta for perdida, use **Reler montagem** no ID conhecido; não reenvie às cegas.
 
 ## Organização
 
@@ -45,7 +63,7 @@ Cada operação concentra sua composição fluente, estado, router e etapas sequ
 
 `POST /runs/i2v` e `POST /runs/{parent_id}/v2v` retornam **202**. A continuação exige parent aceito e usa seu último frame, a identidade original e a cauda recente. Os aliases `/runs` e `/runs/{parent_id}/continue` continuam válidos. Aceitar um run não gera automaticamente o próximo.
 
-`GET /runs/{id}/sequence` lista somente a cadeia de manifests até esse run; não lê vídeos nem concatena. Importação de mídia externa e concatenação dos chunks completos ficam fora da API; a extração do último frame e da cauda do parent pertence ao `V2VPipe`.
+`GET /runs/{id}/sequence` lista somente a cadeia de manifests até esse run; não lê vídeos nem concatena. `POST /assemblies/{UUID}` com `{end_run_id}` aguarda a montagem CPU e devolve200; ela vive em `.data/assemblies/<UUID>/` separada dos runs. GET do mesmo ID e vídeo próprio/Range permitem redescobrir o resultado sem executar novamente. A reserva CPU compartilha slot/RAM/leases com geração; não altera decisões dos runs. O helper FFmpeg mantém ordem/contagem e áudio preenchido, sem trim/crossfade; CRF18 não promete pixels RGB ou MP4 byte-exact. A extração do último frame e da cauda do parent pertence ao `V2VPipe`; geração continua restrita ao pedido explícito.
 
 ## O que preservar
 
