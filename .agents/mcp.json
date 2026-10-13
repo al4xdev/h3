@@ -5,6 +5,12 @@
       "toolsDir": ".agents/tools",
       "timeoutMs": 30000,
       "failOnStartupError": true
+    },
+    "gen": {
+      "builtin": true,
+      "toolsDir": ".agents/gen-tools",
+      "timeoutMs": 30000,
+      "failOnStartupError": true
     }
   }
 }

@@ -168,7 +168,8 @@ test('SDK native project registration, initialize/list/info/invalid-start remain
   const bridge = await import('/home/alex/git/my/dsh-customs/plugins/project-mcp/index.mjs');
   const { nativeMcp, hostRequire } = await import('/home/alex/git/my/dsh-customs/plugins/project-mcp/host.mjs');
   const configs = await bridge.loadProject(ROOT, await nativeMcp());
-  assert.equal(configs.length, 1); const config = configs[0];
+  const config = configs.find(item => item.serverName === 'h3_benchmark');
+  assert.ok(config);
   assert.equal(config.serverName, 'h3_benchmark'); assert.equal(config.transport, 'stdio');
   assert.equal(config.cwd, ROOT); assert.equal(config.reconnect.enabled, false);
   const require = createRequire(hostRequire().resolve('@deepseek-ai/dsh-mcp-client'));
