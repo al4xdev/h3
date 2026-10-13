@@ -322,9 +322,10 @@ async def owned_image(root: Path, reference: EditorReference):
 
 
 def image_json_body(model: str, system: str, prompt: str, snapshot, mime: str, *,
-                    output_text: dict | None = None):
+                    output_text: dict | None = None, max_output_tokens: int = 12_000):
     """Compatibility wrapper: preserve the original single-image wire/chunk shape."""
-    return images_json_body(model, system, prompt, [(snapshot, mime)], output_text=output_text)
+    return images_json_body(model, system, prompt, [(snapshot, mime)], output_text=output_text,
+                            max_output_tokens=max_output_tokens)
 
 
 VIDEO_MAX_BYTES = 256 * 1024**2
@@ -499,7 +500,7 @@ async def encoded_chunks(snapshot):
 
 
 def images_json_body(model: str, system: str, prompt: str, images, *,
-                     output_text: dict | None = None):
+                     output_text: dict | None = None, max_output_tokens: int = 12_000):
     """One or two flat Responses images, no media-sized Python allocation."""
     if len(images) not in (1, 2):
         raise ValueError("Editor requires one image or both continuation contexts")
@@ -516,7 +517,8 @@ def images_json_body(model: str, system: str, prompt: str, images, *,
     heads = [b'{"type":"input_image","image_url":"data:' + mime.encode("ascii") + b";base64,"
              for _, mime in images]
     suffix = (b',{"type":"input_text","text":' + json.dumps(prompt, ensure_ascii=False).encode()
-              + b'}]}],"max_output_tokens":8192,"stream":false,"store":false}')
+              + b'}]}],"max_output_tokens":' + str(max_output_tokens).encode("ascii")
+              + b',"stream":false,"store":false}')
     if output_text is not None:
         suffix = suffix[:-1] + b',"text":' + json.dumps(output_text, ensure_ascii=False).encode() + b'}'
 

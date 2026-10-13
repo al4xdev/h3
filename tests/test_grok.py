@@ -37,7 +37,7 @@ async def test_payload_and_persistence(tmp_path):
         assert json.loads(request.content) == {
             "model": "grok-test", "input": [{"role": "system", "content": "instruction"},
                                              {"role": "user", "content": "question"}],
-            "max_output_tokens": 8192, "stream": False, "store": False,
+            "max_output_tokens": 12000, "stream": False, "store": False,
         }
         return httpx.Response(200, json=finished())
 

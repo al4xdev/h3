@@ -67,6 +67,8 @@ DEFAULT_EDITOR_SYSTEM = (
     "using at most 12000 characters. You edit text: you do not edit images or generate videos."
 )
 EDITOR_MAX_BYTES = 1024 * 1024
+EDITOR_OUTPUT_TOKENS = 12_000
+SCRIPT_OUTPUT_TOKENS = 20_000
 FIXED_EDITOR_MODEL = "grok-4.20-0309-non-reasoning"
 
 
@@ -259,6 +261,7 @@ class Grok:
 
     async def complete(self, payload: PromptRequest, *, output_schema: dict | None = None,
                        schema_name: str = "h3_roteiro") -> dict:
+        output_tokens = SCRIPT_OUTPUT_TOKENS if output_schema is not None else EDITOR_OUTPUT_TOKENS
         output_text = ({"format": {"type": "json_schema", "name": schema_name,
                                   "strict": True, "schema": output_schema}}
                        if output_schema is not None else None)
@@ -297,10 +300,12 @@ class Grok:
                                          "unsafe or unsupported, or identity does not match.", 400) from None
                     body, length = images_json_body(model, payload.system_prompt, payload.prompt,
                                                     [(snapshot, mime), (frame, "image/png")],
-                                                    output_text=output_text)
+                                                    output_text=output_text,
+                                                    max_output_tokens=output_tokens)
                 else:
                     body, length = image_json_body(model, payload.system_prompt, payload.prompt,
-                                                   snapshot, mime, output_text=output_text)
+                                                   snapshot, mime, output_text=output_text,
+                                                   max_output_tokens=output_tokens)
                 # Provider/auth failures are not image-validation errors.
                 return await self._submit(model, {"content": body}, length=length)
         messages = []
@@ -308,7 +313,7 @@ class Grok:
             messages.append({"role": "system", "content": payload.system_prompt})
         messages.append({"role": "user", "content": payload.prompt})
         body = {
-            "model": model, "input": messages, "max_output_tokens": 8192,
+            "model": model, "input": messages, "max_output_tokens": output_tokens,
             "stream": False, "store": False,
         }
         if output_text is not None:

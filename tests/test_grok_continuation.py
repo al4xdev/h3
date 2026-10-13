@@ -110,7 +110,7 @@ async def test_two_flat_images_order_labels_literal_prompt_and_content_length(tm
         assert frame != original
         assert body["model"] == FIXED_EDITOR_MODEL
         assert body["store"] is False and body["stream"] is False
-        assert body["max_output_tokens"] == 8192
+        assert body["max_output_tokens"] == 12000
         return httpx.Response(200, json=response())
     manager = FakeManager(handler)
     result = await Grok(manager, FIXED_EDITOR_MODEL, root=tmp_path).complete(PromptRequest(

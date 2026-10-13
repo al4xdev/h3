@@ -193,7 +193,7 @@ Somente a ação explícita de editar usa `https://api.x.ai/v1/responses`, após
 modelo no catálogo do grant pelo adaptador OAuth existente (cache curto pode evitar
 GET remoto; renovação pode acontecer nesse clique). Não há atividade remota em
 import/startup/GET/config save/upload/SSE/reload. Mantém `store=false`, `stream=false`,
-8192 tokens de saída, timeout de 120 s e resposta limitada a 2 MiB. Sem retry de
+12000 tokens de saída no editor de blocos e 20000 no roteiro completo, timeout de 120 s e resposta limitada a 2 MiB. Sem retry de
 inferência, fallback de endpoint/API key, histórico ou parâmetros de reasoning.
 Erro é sanitizado e mantém rascunho; não repetir resultado incerto às cegas.
 As rotas retornam `Cache-Control: no-store`.

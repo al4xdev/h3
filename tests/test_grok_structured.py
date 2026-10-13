@@ -36,6 +36,7 @@ async def test_internal_structured_request_keeps_model_and_reference(tmp_path, w
     assert result == {"text": '{"name":"Scene"}', "model": FIXED_EDITOR_MODEL}
     assert len(seen) == 1
     assert seen[0]["text"] == FORMAT
+    assert seen[0]["max_output_tokens"] == 20000
     assert seen[0]["model"] == FIXED_EDITOR_MODEL
     assert seen[0]["input"][0] == {"role": "system", "content": "script editor"}
     assert seen[0]["store"] is False
@@ -58,12 +59,13 @@ async def test_structured_images_preserve_bounded_chunks_and_length(image_count)
         second.seek(0)
         images = [(first, "image/png"), (second, "image/png")][:image_count]
         body, length = images_json_body("pin", "system", "idea", images,
-                                       output_text=output_text)
+                                       output_text=output_text, max_output_tokens=20000)
         chunks = [chunk async for chunk in body]
         assert max(map(len, chunks)) <= 65536
         assert sum(map(len, chunks)) == length
         value = json.loads(b"".join(chunks))
         assert value["text"] == output_text
+        assert value["max_output_tokens"] == 20000
         assert sum(part["type"] == "input_image"
                    for part in value["input"][1]["content"]) == image_count
 
@@ -80,6 +82,7 @@ async def test_structured_provider_rejection_does_not_retry_or_fallback():
             PromptRequest(prompt="idea"), output_schema=SCHEMA)
     assert len(seen) == 1
     assert seen[0]["text"] == FORMAT
+    assert seen[0]["max_output_tokens"] == 20000
 
 
 def test_public_editor_cannot_supply_internal_schema():

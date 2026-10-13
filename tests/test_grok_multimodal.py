@@ -223,7 +223,7 @@ async def test_owned_image_responses_wire(tmp_path, kind):
         ]}
         assert body["input"][0] == {"role": "system", "content": 'system "ação"\n'}
         assert body["store"] is False and body["stream"] is False
-        assert body["max_output_tokens"] == 8192
+        assert body["max_output_tokens"] == 12000
         return httpx.Response(200, json=response())
     manager = FakeManager(handler)
     grok = Grok(manager, FIXED_EDITOR_MODEL, root=tmp_path)
