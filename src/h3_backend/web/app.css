@@ -57,3 +57,19 @@ html{scroll-padding-top:100px}button{min-width:44px;min-height:44px}.topbar{posi
 .studio-home{min-height:44px;min-width:44px;padding:0 8px;background:transparent;border-color:transparent;text-align:left;color:var(--muted)}.studio-home:hover:not(:disabled){color:var(--copper);background:transparent;border-color:transparent}
 
 .pending-card{min-width:0;min-height:64px;margin:12px 0;border:1px solid var(--line);border-left:3px solid var(--copper);padding:12px;background:var(--black);overflow-wrap:anywhere}.pending-card .pending-tile{border:0;margin:0;padding:8px;background:transparent}.pending-card .operation{margin:0 0 8px}.pending-card[hidden]{display:none}
+
+@media(max-width:799px){.studio{view-transition-name:studio-screen}input,textarea,select{font-size:max(16px,1em)}.topbar{padding-top:max(10px,env(safe-area-inset-top))}}
+::view-transition{pointer-events:none}
+::view-transition-group(root),::view-transition-old(root),::view-transition-new(root){animation:none}
+::view-transition-group(studio-screen){animation:none}
+::view-transition-image-pair(studio-screen){isolation:isolate;overflow:clip}
+::view-transition-old(studio-screen),::view-transition-new(studio-screen){mix-blend-mode:normal;animation-duration:300ms;animation-timing-function:cubic-bezier(.22,.7,.2,1);animation-fill-mode:both;background:var(--graphite)}
+::view-transition-old(studio-screen){animation-name:screen-leave;z-index:1}
+::view-transition-new(studio-screen){animation-name:screen-enter;z-index:2}
+html[data-slide-direction=back]::view-transition-old(studio-screen){animation-name:screen-back-leave;z-index:2}
+html[data-slide-direction=back]::view-transition-new(studio-screen){animation-name:screen-back-enter;z-index:1}
+@keyframes screen-enter{from{transform:translateX(100%)}to{transform:translateX(0)}}
+@keyframes screen-leave{from{transform:translateX(0)}to{transform:translateX(-28%)}}
+@keyframes screen-back-enter{from{transform:translateX(-28%)}to{transform:translateX(0)}}
+@keyframes screen-back-leave{from{transform:translateX(0)}to{transform:translateX(100%)}}
+@media(prefers-reduced-motion:reduce){::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}}

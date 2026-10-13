@@ -2,8 +2,53 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration, motionSpec, createPresentationMotion, lastFrameURL, referencePreviewURL, draftSettingsAllowed, nativeExecutionBlocked} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration, motionSpec, createScreenTransitions, createPresentationMotion, lastFrameURL, referencePreviewURL, draftSettingsAllowed, nativeExecutionBlocked} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
+
+function screenTransitionFixture() {
+  const reduced = new EventTarget(), mobile = new EventTarget();
+  reduced.matches = false; mobile.matches = true;
+  const document = new EventTarget(), transitions = [], paints = [];
+  document.documentElement = {dataset: {}};
+  document.defaultView = {matchMedia: query => query.includes('reduced') ? reduced : mobile};
+  document.startViewTransition = callback => {
+    const transition = {callback, skipped: false, skipTransition() { this.skipped = true; }, finished: new Promise(() => {}), updateCallbackDone: new Promise(() => {})};
+    transitions.push(transition); return transition;
+  };
+  const controller = createScreenTransitions(document);
+  return {document, reduced, mobile, transitions, paints, controller, paint: (key, direction = 1) => controller.paint(key, () => paints.push(key), direction)};
+}
+test('screen snapshots slide forward/back and superseded painting executes only once', () => {
+  const f = screenTransitionFixture();
+  f.paint('library'); assert.deepEqual(f.paints, ['library']);
+  f.paint('story'); assert.equal(f.document.documentElement.dataset.slideDirection, 'forward');
+  f.paint('library', -1);
+  assert.equal(f.transitions[0].skipped, true);
+  assert.deepEqual(f.paints, ['library', 'story']);
+  f.transitions[0].callback(); assert.deepEqual(f.paints, ['library', 'story']);
+  assert.equal(f.document.documentElement.dataset.slideDirection, 'back');
+  f.transitions[1].callback(); assert.deepEqual(f.paints, ['library', 'story', 'library']);
+  f.controller.destroy();
+});
+test('screen motion respects reduced preference, background, desktop and unsupported browsers', () => {
+  const f = screenTransitionFixture(); f.paint('library'); f.paint('story');
+  f.reduced.matches = true; f.reduced.dispatchEvent(new Event('change'));
+  assert.equal(f.transitions[0].skipped, true); assert.deepEqual(f.paints, ['library', 'story']);
+  f.paint('generation'); assert.equal(f.transitions.length, 1);
+  f.reduced.matches = false; f.document.hidden = true; f.paint('review');
+  f.document.hidden = false; f.mobile.matches = false; f.paint('settings');
+  f.mobile.matches = true; delete f.document.startViewTransition; f.paint('library');
+  assert.equal(f.transitions.length, 1);
+  assert.deepEqual(f.paints, ['library', 'story', 'generation', 'review', 'settings', 'library']);
+  f.controller.destroy();
+});
+test('failed transition capture and teardown retain the requested screen without replay', () => {
+  const f = screenTransitionFixture(); f.paint('library');
+  f.document.startViewTransition = () => { throw new Error('unsupported capture'); };
+  f.paint('story'); assert.deepEqual(f.paints, ['library', 'story']);
+  f.controller.destroy(); f.paint('review');
+  assert.deepEqual(f.paints, ['library', 'story', 'review']);
+});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
   assert.equal(parseSeed('0'), 0);

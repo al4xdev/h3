@@ -452,6 +452,44 @@ export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 160, easing}};
 }
 // Presentation owns no timers, requests or completion callbacks into business state.
+export function createScreenTransitions(document) {
+  const view = document.defaultView;
+  const reduced = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const mobile = view?.matchMedia?.('(max-width: 799px)');
+  let previous = null, active = null, pending = null, disposed = false;
+  function finish() {
+    pending?.();
+    active?.skipTransition();
+    active = null;
+  }
+  function paint(key, update, direction = 1) {
+    const changed = previous !== null && previous !== key;
+    previous = key;
+    finish();
+    if (!changed || disposed || document.hidden || reduced?.matches || !mobile?.matches || typeof document.startViewTransition !== 'function') { update(); return; }
+    let painted = false;
+    const once = () => { if (painted) return; painted = true; pending = null; update(); };
+    pending = once;
+    document.documentElement.dataset.slideDirection = direction < 0 ? 'back' : 'forward';
+    try {
+      const transition = document.startViewTransition(once);
+      active = transition;
+      Promise.resolve(transition.ready).catch(() => {});
+      Promise.resolve(transition.finished).catch(() => {}).finally(() => { if (active === transition) active = null; });
+      Promise.resolve(transition.updateCallbackDone).catch(() => { once(); });
+    } catch { once(); }
+  }
+  function destroy() {
+    disposed = true; finish();
+    reduced?.removeEventListener?.('change', finish);
+    mobile?.removeEventListener?.('change', finish);
+    document.removeEventListener?.('visibilitychange', finish);
+  }
+  reduced?.addEventListener?.('change', finish);
+  mobile?.addEventListener?.('change', finish);
+  document.addEventListener?.('visibilitychange', finish);
+  return {paint, destroy};
+}
 export function createPresentationMotion(document) {
   const view = document.defaultView, preference = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
   const active = new Map(), signatures = new Map();
@@ -506,6 +544,7 @@ export function createPresentationMotion(document) {
 export function startUI(document, client = createClient(), stories = createStoryClient()) {
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
+  const screenTransitions = createScreenTransitions(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
   const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
   let stopFactory = null;
@@ -570,6 +609,9 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { message('duration-preview', error.message, true); message('block-summary', error.message, true); }
   }
   function paintScreen({focus = false, direction = 1} = {}) {
+    screenTransitions.paint(state.screen, () => paintScreenNow({focus, direction}), direction);
+  }
+  function paintScreenNow({focus = false, direction = 1} = {}) {
     for (const panel of document.querySelectorAll('[data-screen]')) {
       const active = panel.dataset.screen === state.screen;
       panel.hidden = !active; panel.inert = !active;
@@ -1682,7 +1724,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   const swipeBack = createBackSwipe(document, {back, canGoBack: () => state.trail.length > 0, navigationEpoch: () => state.navigationEpoch});
-  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
