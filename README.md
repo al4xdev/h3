@@ -25,10 +25,11 @@ O script inicia a ponte em `0.0.0.0:8888`, sem instalar dependências automatica
 
 No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC. Fechar a ponte não libera os modelos do ComfyUI; são processos distintos.
 
+- **Novo roteiro** planeja o conjunto em `/roteiro`: ideia + referência →proposta de blocos preenchidos →edição/adoção explícita →preparar um bloco por vez. **Novo bloco** mantém o modo avulso atual; geração, status, revisão, retry e montagem são compartilhados, não outro motor. Plano/intenções vivem no PC; adotar não gera e aceitar não gera o próximo. Veja [roteiro e recuperação](docs/roteiro.md).
 - Selecione uma referência da biblioteca ou **Envie imagem ao PC**; upload não gera vídeo. Imagens próprias ficam em `.data/inputs/`, com bytes originais preservados.
 - Descreva a cena e clique **Gerar** explicitamente. Assista ao bloco antes de aceitar/rejeitar; apenas um pai aceito permite continuar.
 - **Detalhar ideia e imagem** envia explicitamente sua ideia e a referência selecionada ao Grok. Na continuação, você vê e envia **identidade original + último frame do pai aceito**, para distinguir identidade de pose/roupa atual. O preview do frame é CPU, não geração. **Usar esta proposta** e **Gerar** são ações separadas. System prompt é editável nos Ajustes, mas o modelo continua fixo: `grok-4.20-0309-non-reasoning`. Credenciais ficam separadas; uma chamada real autorizada com duas imagens respondeu200, mas limites/cota e obediência integral da proposta não estão certificados. Veja [Grok](docs/grok.md); abrir/reconectar não chama o provider.
-- A engrenagem abre **Ajustes**: seed/duração pertencem ao rascunho do bloco ainda não enviado, não alteram resultados nem viram preset global. Duração solicitada até10s, default2.3; alinhamento nativo24fps/5+17k:3s→73frames/3.042s,5s→124frames/5.167s,10s→243frames/10.125s.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga.
+- A engrenagem abre **Ajustes**: seed/duração pertencem ao rascunho do bloco ainda não enviado, não alteram resultados nem viram preset global. Duração solicitada até10s, default8s para novos blocos; alinhamento nativo24fps/5+17k:8s→192frames/8s,3s→73frames/3.042s,5s→124frames/5.167s,10s→243frames/10.125s. Benchmark2.3s e durações históricas de retry permanecem explícitos.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga.
 - Blocos **recusados/interrompidos** conservam seu **prompt final enviado**, inclusive o melhorado pelo Grok se usado. **Preparar nova tentativa** abre geração já preenchida, sem voltar ao começo ou chamar Grok de novo. Só Gerar cria outro pedido; a tentativa antiga não é reaberta e a nova exige revisão. Continuação usa o mesmo pai original aceito. Sem metadados seguros, a cópia é bloqueada com motivo, não substituída por defaults.
 - Atualização de arquivos chega por SSE; reconectar ou atualizar a biblioteca só relê metadados, nunca repete geração. Resultado incerto exige consulta do ID conhecido, não novo POST cego.
 
@@ -44,6 +45,7 @@ O fluxo tem microanimações curtas de entrada, toque, seleção e confirmação
 src/h3_backend/
 ├── __init__.py
 ├── api.py                 # HTTP, consulta e revisão
+├── roteiro.py             # planos, propostas, configuração e correlação de intenções
 ├── generation/            # fatia vertical de geração
 │   ├── __init__.py
 │   ├── i2v.py             # I2VPipe: fluxo completo de imagem → chunk
@@ -66,6 +68,7 @@ tools/
 └── benchmark_h3.py         # benchmark externo: três chunks + montagem
 pyproject.toml, uv.lock    # dependências e configuração reproduzíveis
 .data/runs/<id>/           # local: manifest, inputs e chunk.mp4 persistentes
+.data/roteiros/<id>/       # local: plano, candidatos e histórico de intenções
 runs/<id>/                 # legado preservado, nunca fallback gravável
 .dumps/                    # local: scratch e evidências temporárias
 ├── tests/requests/        # requests experimentais
@@ -73,7 +76,7 @@ runs/<id>/                 # legado preservado, nunca fallback gravável
 └── references/            # cópia privada original apontada pelo manifest de referência
 ```
 
-Cada operação concentra sua composição fluente, estado, router e etapas sequenciais no próprio arquivo de `generation/`. Os setters não fazem I/O; `generation/dispatcher.py` admite um único job e seu worker executa o pipe. `generation/workflow.py` usa `continuation_api.json` como template canônico e configura i2v/v2v sem modificar os exports validados. `infrastructure/` reúne somente adaptadores existentes, não novos serviços de negócio. O entrypoint continua `h3_backend.api:app`.
+Cada operação concentra sua composição, estado, router e etapas no próprio arquivo vertical: os pipes em `generation/` e os planos em `roteiro.py`. Setters fluentes não fazem I/O; `generation/dispatcher.py` admite um único job e seu worker executa o pipe nativo. `generation/workflow.py` usa `continuation_api.json` como template canônico e configura i2v/v2v sem modificar os exports validados. `infrastructure/` reúne somente adaptadores existentes, não novos serviços de negócio. O entrypoint continua `h3_backend.api:app`.
 
 `POST /runs/i2v` e `POST /runs/{parent_id}/v2v` retornam **202**. A continuação exige parent aceito e usa seu último frame, a identidade original e a cauda recente. Os aliases `/runs` e `/runs/{parent_id}/continue` continuam válidos. Aceitar um run não gera automaticamente o próximo.
 
@@ -97,9 +100,10 @@ Para validar o projeto, na raiz:
 uv sync
 env PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider
 uv run ruff check --no-cache src tests
+node --test tests/frontend_ui.test.mjs tests/frontend_retry.test.mjs tests/frontend_roteiro.test.mjs
 ```
 
-A suíte usa transporte Comfy simulado e fixtures sintéticas de mídia: não submete jobs GPU nem precisa gerar novos chunks reais.
+A suíte usa transporte Comfy simulado e fixtures sintéticas de mídia: não submete jobs GPU nem precisa gerar novos chunks reais. A integração de roteiro passou859 testes Python e171 Node; [evidência mobile e limites](docs/roteiro.md#validação-e-evidência) distinguem dados mockados de geração real.
 
 ## Perfil de saída (opt-in)
 
