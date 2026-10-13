@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "python": ">=3.12",
+  "wheels": [
+    {
+      "filename": "rich-15.0.0-py3-none-any.whl",
+      "name": "rich",
+      "version": "15.0.0",
+      "sha256": "33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb",
+      "size": 310654,
+      "source": "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl",
+      "metadata_source": "https://pypi.org/pypi/rich/15.0.0/json",
+      "requires_python": ">=3.9.0",
+      "runtime_requires": ["markdown-it-py>=2.2.0", "pygments>=2.13.0,<3.0.0"],
+      "license": {
+        "expression": "MIT",
+        "files": ["rich-15.0.0.dist-info/licenses/LICENSE"]
+      }
+    },
+    {
+      "filename": "markdown_it_py-4.2.0-py3-none-any.whl",
+      "name": "markdown-it-py",
+      "version": "4.2.0",
+      "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a",
+      "size": 91687,
+      "source": "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl",
+      "metadata_source": "https://pypi.org/pypi/markdown-it-py/4.2.0/json",
+      "requires_python": ">=3.10",
+      "runtime_requires": ["mdurl~=0.1"],
+      "license": {
+        "expression": "MIT",
+        "files": [
+          "markdown_it_py-4.2.0.dist-info/licenses/LICENSE",
+          "markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it"
+        ]
+      }
+    },
+    {
+      "filename": "mdurl-0.1.2-py3-none-any.whl",
+      "name": "mdurl",
+      "version": "0.1.2",
+      "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8",
+      "size": 9979,
+      "source": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
+      "metadata_source": "https://pypi.org/pypi/mdurl/0.1.2/json",
+      "requires_python": ">=3.7",
+      "runtime_requires": [],
+      "license": {
+        "expression": "MIT",
+        "files": ["mdurl-0.1.2.dist-info/LICENSE"]
+      }
+    },
+    {
+      "filename": "pygments-2.21.0-py3-none-any.whl",
+      "name": "Pygments",
+      "version": "2.21.0",
+      "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9",
+      "size": 1250147,
+      "source": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
+      "metadata_source": "https://pypi.org/pypi/pygments/2.21.0/json",
+      "requires_python": ">=3.9",
+      "runtime_requires": [],
+      "license": {
+        "expression": "BSD-2-Clause",
+        "files": [
+          "pygments-2.21.0.dist-info/licenses/AUTHORS",
+          "pygments-2.21.0.dist-info/licenses/LICENSE"
+        ]
+      }
+    }
+  ]
+}

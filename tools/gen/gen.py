@@ -144,10 +144,16 @@ class Controller:
     def owned(self, unit, run):
         if not run or unit.get("Transient") != "yes" or unit.get("Description") != f"gen-controller:{run['id']}":
             return False
-        invocation = f"{self.runner} _run {self.state / run['id'] / 'launch.json'}"
-        # systemctl's ExecStart serialization is not an argv list, but matching
-        # the complete ordered invocation with boundaries excludes path prefixes.
-        return bool(re.search(r"(?:^|\s)" + re.escape(invocation) + r"(?:\s|;|$)", unit.get("ExecStart", "")))
+        # Accept only the exact former runner as well: relocation must not
+        # orphan a service we already own or require restarting its model.
+        runners = (self.runner, Path("/home/alex/git/my/h3/tools/gen/gen.py"))
+        for runner in runners:
+            invocation = f"{runner} _run {self.state / run['id'] / 'launch.json'}"
+            # systemctl serializes ExecStart, not argv; ordered invocation and
+            # boundaries exclude path prefixes and arbitrary lookalike scripts.
+            if re.search(r"(?:^|\s)" + re.escape(invocation) + r"(?:\s|;|$)", unit.get("ExecStart", "")):
+                return True
+        return False
 
     def external(self):
         found = []
@@ -334,76 +340,172 @@ def follow_logs(controller, start=None, end=None, run_id=None):
                 child.wait()
 
 
-# Presentation consumes only public controller results, never launcher arguments.
-PUBLIC_ERRORS = {
-    "state directory is not privately owned": "A pasta de estado não pertence exclusivamente ao usuário.",
-    "state directory is not private": "A pasta de estado não é privada.",
-    "state file is not private": "O arquivo de estado não é privado.",
-    "lock file is not private": "O arquivo de bloqueio não é privado.",
-    "another gen start/stop is in progress": "Outra operação gen está em andamento.",
-    "service command failed; result may be uncertain; no retry performed": "Falha no comando de serviço; resultado incerto. Nenhuma repetição realizada.",
-    "cannot determine gen.service state": "Não foi possível determinar o estado de gen.service.",
-    "invalid run ID": "Identificador de execução inválido.",
-    "invalid run metadata": "Metadados de execução inválidos.",
-    "cannot exclude external model processes": "Não foi possível excluir a presença de modelos externos.",
-    "only text profiles accept extra arguments": "Somente perfis de texto aceitam argumentos adicionais.",
-    "gen.service name collision: not owned by this controller": "gen.service pertence a outro controlador; nenhuma alteração realizada.",
-    "gen.service name collision: refusing to stop an unowned unit": "gen.service pertence a outro controlador; parada recusada.",
-    "gen.service still exists or is busy; wait for collection or explicitly stop": "gen.service ainda existe ou está ocupado. Aguarde a coleta ou solicite uma parada explícita.",
-    "previous start is uncertain; inspect status/logs and explicitly stop before a new start": "Início anterior incerto. Consulte status/logs e solicite uma parada explícita antes de iniciar novamente.",
-    "external ComfyUI/llama-server detected; no process was stopped": "ComfyUI/llama-server externo detectado. Nenhum processo foi parado.",
-    "original launcher is missing or not executable": "Lançador original ausente ou sem permissão de execução.",
-    "start failed or is uncertain; no retry performed; inspect status/logs then explicitly stop": "Início falhou ou está incerto. Nenhuma repetição realizada; consulte status/logs antes de uma parada explícita.",
-    "stop failed or uncertain; no retry performed": "Parada falhou ou está incerta. Nenhuma repetição realizada.",
-    "stop completion not confirmed": "Conclusão da parada não confirmada.",
-    "line range must be positive and increasing": "O intervalo de linhas deve ser positivo e crescente.",
-    "at most 500 lines may be requested": "Solicite no máximo 500 linhas.",
-    "follow does not accept an end line": "O acompanhamento contínuo não aceita uma linha final.",
-    "log observer failed; no retry performed": "O observador de logs falhou. Nenhuma repetição realizada.",
-}
+# Only deliberately public diagnostics leave the CLI boundary in either mode.
+PUBLIC_ERRORS = frozenset((
+    "state directory is not privately owned",
+    "state directory is not private",
+    "state file is not private",
+    "lock file is not private",
+    "another gen start/stop is in progress",
+    "service command failed; result may be uncertain; no retry performed",
+    "cannot determine gen.service state",
+    "invalid run ID",
+    "invalid run metadata",
+    "cannot exclude external model processes",
+    "only text profiles accept extra arguments",
+    "gen.service name collision: not owned by this controller",
+    "gen.service name collision: refusing to stop an unowned unit",
+    "gen.service still exists or is busy; wait for collection or explicitly stop",
+    "previous start is uncertain; inspect status/logs and explicitly stop before a new start",
+    "external ComfyUI/llama-server detected; no process was stopped",
+    "original launcher is missing or not executable",
+    "start failed or is uncertain; no retry performed; inspect status/logs then explicitly stop",
+    "stop failed or uncertain; no retry performed",
+    "stop completion not confirmed",
+    "line range must be positive and increasing",
+    "at most 500 lines may be requested",
+    "follow does not accept an end line",
+    "log observer failed; no retry performed",
+    "headless logs require a finite read; --follow is human-only",
+))
 
 
-def accent(text, stream):
-    if stream.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb":
-        return f"\033[38;2;196;133;91m{text}\033[0m"
-    return text
+def emit_json(value):
+    print(json.dumps(value, sort_keys=True))
+
+
+def emit_error(code, message):
+    emit_json({"error": {"code": code, "message": message}})
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, machine=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.machine = machine
+
+    def print_help(self, file=None):
+        if self.machine:
+            emit_json({"help": self.format_help()})
+        else:
+            super().print_help(file)
+
+    def error(self, message):
+        # argparse's original diagnostic may echo private positional arguments.
+        public = "invalid command or arguments; use gen --help"
+        if self.machine:
+            emit_error("invalid-arguments", public)
+            raise SystemExit(2)
+        super().error(public)
+
+
+def rich_console(stream):
+    """Load bundled wheels only for human presentation, never for jobs/tools."""
+    try:
+        import hashlib
+
+        vendor = Path(__file__).resolve().parent / "vendor"
+        manifest = json.loads((vendor / "manifest.json").read_text())
+        paths = []
+        for wheel in manifest["wheels"]:
+            filename = wheel["filename"]
+            if Path(filename).name != filename or not filename.endswith(".whl"):
+                return None
+            path = vendor / filename
+            if hashlib.sha256(path.read_bytes()).hexdigest() != wheel["sha256"]:
+                return None
+            paths.append(str(path))
+        for path in reversed(paths):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        from rich.console import Console
+
+        color = stream.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+        return Console(file=stream, force_terminal=color, color_system="truecolor" if color else None,
+                       markup=False, highlight=False)
+    except (ImportError, OSError, ValueError, KeyError, TypeError):
+        # Missing presentation assets must not turn a successful start into a
+        # reported failure that could tempt a caller to repeat the operation.
+        return None
+
+
+def present_rows(title, rows, stream):
+    console = rich_console(stream)
+    if console is None:
+        print(f"◆ gen · {title}", file=stream)
+        for label, value in rows:
+            print(f"  {label}: {value}", file=stream)
+        return
+    try:
+        from rich.table import Table
+        from rich.text import Text
+
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="dim", no_wrap=True)
+        table.add_column(overflow="fold")
+        for label, value in rows:
+            # Values are literal: profiles/diagnostics are not Rich markup.
+            table.add_row(Text(label), Text(str(value)))
+        # Render before writing anything: a presentation failure after admission
+        # must neither report a failed start nor leave half a decorative result.
+        with console.capture() as capture:
+            console.print(Text(f"◆ gen · {title}", style="#c4855b"))
+            console.print(table)
+        rendered = capture.get()
+    except Exception:
+        print(f"◆ gen · {title}", file=stream)
+        for label, value in rows:
+            print(f"  {label}: {value}", file=stream)
+        return
+    stream.write(rendered)
 
 
 def present_result(action, result):
     titles = {
-        "started": "Início solicitado", "already-running": "Perfil já em execução",
-        "stopped": "Parada concluída", "not-running": "Nenhum serviço em execução",
+        "started": "Start requested", "already-running": "Profile already running",
+        "stopped": "Stop completed", "not-running": "No service running",
     }
-    states = {"active": "ativo", "activating": "ativando", "deactivating": "desativando",
-              "inactive": "inativo", "failed": "falhou", "absent": "ausente"}
-    title = "Estado do serviço" if action == "status" else titles[result["result"]]
-    print(accent(f"◆ gen · {title}", sys.stdout))
+    title = "Service status" if action == "status" else titles[result["result"]]
+    rows = []
     if action == "status":
-        print(f"  Estado  {states.get(result['state'], result['state'])} · {result['unit']}")
+        rows.append(("State", f"{result['state']} · {result['unit']}"))
         if result.get("substate"):
-            print(f"  Fase    {result['substate']}")
-        print(f"  Gestão  {'própria' if result['owned'] else 'não atribuída a este controlador'}")
+            rows.append(("Phase", result["substate"]))
+        rows.append(("Ownership", "this controller" if result["owned"] else "not owned by this controller"))
         if result["uncertain"]:
-            print("  Atenção Resultado de início incerto; não repetir automaticamente.")
+            rows.append(("Warning", "Start result uncertain; do not retry automatically."))
     if result.get("profile"):
-        print(f"  Perfil  {result['profile']}")
+        rows.append(("Profile", result["profile"]))
     if result.get("run"):
-        print(f"  Run     {result['run']}")
-    print("  Prontidão não verificada — estado do serviço não confirma disponibilidade do modelo.")
-    # Status/stop are suggestions only; presentation must never inspect again.
-    if action == "stop":
-        next_command = "gen status"
-    elif action == "status" and not result.get("run"):
-        next_command = "gen --help"
-    else:
-        next_command = "gen logs"
-    print(f"  Próximo → {next_command}")
+        rows.append(("Run", result["run"]))
+    rows.append(("Readiness", "Not verified — service state does not confirm model availability."))
+    # Suggestions only: presentation must never perform another lifecycle read.
+    next_command = "gen status" if action == "stop" else "gen --help" if action == "status" and not result.get("run") else "gen logs"
+    rows.append(("Next", next_command))
+    present_rows(title, rows, sys.stdout)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="gen · modelos locais, uma execução por vez. Prontidão não verificada.", epilog="Logs: gen logs (últimas 50), gen logs 1 100, gen logs 100 (até 500 linhas). Leituras estáticas truncam linhas em 4096 caracteres. gen logs --follow acompanha mensagens cruas; gen logs 1 --follow acompanha desde a linha 1. Ctrl+C encerra só o observador. --run ID fixa uma execução anterior. --headless deve vir antes do comando.")
-    parser.add_argument("--headless", action="store_true", help="saída estável para ferramentas (antes do comando)")
-    sub = parser.add_subparsers(dest="action", required=True, metavar="{" + ",".join((*PROFILE_COMMANDS, "stop", "status", "logs")) + "}")
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # Everything after a profile is launcher input, not a controller flag.
+    prefix = 0
+    while prefix < len(arguments) and arguments[prefix] == "--headless":
+        prefix += 1
+    profile_call = prefix < len(arguments) and arguments[prefix] in PROFILE_COMMANDS
+    machine = bool(prefix) or (not profile_call and arguments[:1] == ["status"] and "--json" in arguments)
+    parser = ArgumentParser(
+        prog="gen", machine=machine,
+        description="gen · local models, one run at a time. Readiness is not verified.",
+        epilog="Logs: gen logs (last 50), gen logs 1 100, gen logs 100 (up to 500 lines). "
+               "Finite reads truncate lines at 4096 characters. gen logs --follow streams raw messages; "
+               "Ctrl+C stops only the observer. --run ID pins a previous run. "
+               "--headless must precede the command and returns pure JSON; --follow is human-only.",
+    )
+    parser.add_argument("--headless", action="store_true", help="pure JSON for tools (before the command)")
+    sub = parser.add_subparsers(
+        dest="action", required=True,
+        metavar="{" + ",".join((*PROFILE_COMMANDS, "stop", "status", "logs")) + "}",
+        parser_class=lambda **kwargs: ArgumentParser(machine=machine, **kwargs),
+    )
     for profile in PROFILE_COMMANDS:
         child = sub.add_parser(profile)
         child.add_argument("args", nargs=argparse.REMAINDER)
@@ -414,29 +516,29 @@ def main(argv=None):
     logs.add_argument("start", nargs="?", type=int)
     logs.add_argument("end", nargs="?", type=int)
     logs.add_argument("--run")
-    logs.add_argument("--follow", action="store_true", help="acompanhar mensagens reais; Ctrl+C encerra só o observador")
+    logs.add_argument("--follow", action="store_true", help="stream raw messages; Ctrl+C stops only the observer")
     runner = sub.add_parser("_run")
     runner.add_argument("path")
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    # Consume root flags only before a profile: every subsequent token belongs
-    # to the launcher, including --help, --headless, -- and empty strings.
-    prefix = 0
-    while prefix < len(arguments) and arguments[prefix] == "--headless":
-        prefix += 1
-    if prefix < len(arguments) and arguments[prefix] in PROFILE_COMMANDS:
+    if profile_call:
         options = argparse.Namespace(action=arguments[prefix], args=arguments[prefix + 1:], headless=bool(prefix))
     else:
         options = parser.parse_args(arguments)
-    controller = Controller()
     try:
+        if machine and options.action == "logs" and options.follow:
+            raise Refused("headless logs require a finite read; --follow is human-only")
+        controller = Controller()
         if options.action == "_run":
             run_launch(options.path)
             return 0
         if options.action == "logs":
             if options.follow:
                 return follow_logs(controller, options.start, options.end, options.run)
-            for number, line in controller.logs(options.start, options.end, options.run):
-                print(f"{number}: {line}", end="" if line.endswith("\n") else "\n")
+            lines = controller.logs(options.start, options.end, options.run)
+            if machine:
+                emit_json({"lines": [{"number": number, "text": line} for number, line in lines]})
+            else:
+                for number, line in lines:
+                    print(f"{number}: {line}", end="" if line.endswith("\n") else "\n")
             return 0
         if options.action == "status":
             result = controller.status()
@@ -444,21 +546,23 @@ def main(argv=None):
             result = controller.stop()
         else:
             result = controller.start(options.action, options.args)
-        if options.headless or (options.action == "status" and options.json):
-            print(json.dumps(result, sort_keys=True))
+        if machine:
+            emit_json(result)
         else:
             present_result(options.action, result)
         return 0
-    except (Refused, OSError, ValueError, KeyError):
+    except (Refused, OSError, ValueError, KeyError, TypeError, AttributeError):
         # Only deliberately public diagnostics leave this boundary. Exec/chdir
         # errors may contain private arguments/paths, so they get a generic error.
         error = sys.exc_info()[1]
-        if options.headless or options.action == "_run":
-            print(f"gen: {error if isinstance(error, Refused) else 'operation failed; no retry performed'}", file=sys.stderr)
+        public = isinstance(error, Refused) and str(error) in PUBLIC_ERRORS
+        message = str(error) if public else "operation failed; no retry performed"
+        if machine:
+            emit_error("refused" if public else "operation-failed", message)
+        elif options.action == "_run":
+            print(f"gen: {message}", file=sys.stderr)
         else:
-            message = PUBLIC_ERRORS.get(str(error), "Operação falhou. Nenhuma repetição realizada.") if isinstance(error, Refused) else "Operação falhou. Nenhuma repetição realizada."
-            print(accent("◆ gen · Operação recusada", sys.stderr), file=sys.stderr)
-            print(f"  {message}", file=sys.stderr)
+            present_rows("Operation refused", [("Reason", message)], sys.stderr)
         return 1
 
 

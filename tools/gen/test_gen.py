@@ -378,6 +378,19 @@ class ControllerTests(unittest.TestCase):
         self.manager.unit["ExecStart"] = "{ path=/usr/bin/python3 ; argv[]=" + original + " ; ignore_errors=no ; }"
         self.assertTrue(self.controller.status()["owned"])
 
+    def test_relocation_preserves_exact_legacy_service_ownership(self):
+        self.controller.start("image")
+        old = self.manager.unit["ExecStart"]
+        legacy = "/home/alex/git/my/h3/tools/gen/gen.py"
+        self.controller.runner = Path("/home/alex/.config/my_scripts/gen/gen.py")
+        self.manager.unit["ExecStart"] = old.replace(str(gen.Path(gen.__file__).resolve()), legacy)
+        self.assertTrue(self.controller.status()["owned"])
+        for invalid in (legacy + "-foreign", "/home/alex/other/gen.py"):
+            self.manager.unit["ExecStart"] = old.replace(str(gen.Path(gen.__file__).resolve()), invalid)
+            self.assertFalse(self.controller.status()["owned"])
+        self.manager.unit["ExecStart"] = old.replace(str(gen.Path(gen.__file__).resolve()), legacy)
+        self.assertEqual(self.controller.stop()["result"], "stopped")
+
     def test_runner_exec_error_is_generic_and_not_retried(self):
         launch = self.root / "launch.json"
         gen.write_private(launch, {"script": "/SECRET/missing", "args": ["SECRET"], "cwd": str(self.root), "env": {}, "umask": 0o027})

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -37,15 +38,19 @@ class PresentationTests(unittest.TestCase):
 
     def invoke(self, args, tty=False, env=None):
         stdout, stderr = Terminal(tty), Terminal(tty)
-        with patch.object(gen, "Controller", return_value=self.controller), patch.dict(os.environ, {"TERM": "xterm-kitty", **(env or {})}, clear=True), redirect_stdout(stdout), redirect_stderr(stderr):
-            code = gen.main(args)
+        with patch.object(gen, "Controller", return_value=self.controller) as factory, patch.dict(os.environ, {"TERM": "xterm-kitty", **(env or {})}, clear=True), redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                code = gen.main(args)
+            except SystemExit as error:
+                code = error.code
+            self.factory_calls = factory.call_count
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_headless_json_exact_old_schemas_and_only_expected_calls(self):
+    def test_headless_exact_success_schemas_without_rich(self):
         for args, result, expected in ((["--headless", "qw"], START, call.start("qw", [])),
                                        (["--headless", "stop"], STOP, call.stop()),
                                        (["--headless", "status"], STATUS, call.status())):
-            with self.subTest(args=args):
+            with self.subTest(args=args), patch.object(gen, "rich_console", side_effect=AssertionError("Rich forbidden")):
                 self.controller.reset_mock()
                 code, stdout, stderr = self.invoke(args, tty=True)
                 self.assertEqual((code, stderr), (0, ""))
@@ -84,9 +89,9 @@ class PresentationTests(unittest.TestCase):
                 code, stdout, stderr = self.invoke(["status"], tty, env)
                 self.assertEqual((code, stderr), (0, ""))
                 self.assertEqual("\033[" in stdout, color)
-                for text in ("Estado do serviço", "ativo", "video", RUN, "Prontidão não verificada", "gen logs"):
+                for text in ("Service status", "active", "video", RUN, "Not verified", "gen logs"):
                     self.assertIn(text, stdout)
-                self.assertNotIn("modelo pronto", stdout)
+                self.assertNotIn("model ready", stdout)
 
     def test_status_state_variants_and_uncertainty_remain_honest(self):
         for state in ("absent", "activating", "deactivating", "inactive", "failed"):
@@ -94,26 +99,26 @@ class PresentationTests(unittest.TestCase):
                 self.controller.status.return_value = {**STATUS, "state": state, "owned": False, "uncertain": True}
                 code, stdout, _ = self.invoke(["status"])
                 self.assertEqual(code, 0)
-                self.assertIn("não atribuída", stdout)
-                self.assertIn("incerto", stdout)
-                self.assertIn("Prontidão não verificada", stdout)
+                self.assertIn("not owned", stdout)
+                self.assertIn("uncertain", stdout)
+                self.assertIn("Not verified", stdout)
                 self.assertEqual(self.controller.mock_calls[-1], call.status())
         self.controller.status.return_value = {**STATUS, "state": "absent", "substate": None, "run": None, "profile": None, "owned": False}
         _, stdout, _ = self.invoke(["status"])
         self.assertIn("gen --help", stdout)
-        self.assertNotIn("Perfil", stdout)
+        self.assertNotIn("Profile", stdout)
         self.assertNotIn("Run", stdout)
 
-    def test_start_stop_result_headings_and_no_extra_io(self):
-        for result, heading in (("started", "Início solicitado"), ("already-running", "Perfil já em execução")):
+    def test_start_stop_headings_and_no_extra_io(self):
+        for result, heading in (("started", "Start requested"), ("already-running", "Profile already running")):
             self.controller.reset_mock()
             self.controller.start.return_value = {**START, "result": result}
             _, stdout, _ = self.invoke(["qw"])
             self.assertIn(heading, stdout)
             self.assertIn("gen logs", stdout)
-            self.assertIn("Prontidão não verificada", stdout)
+            self.assertIn("Not verified", stdout)
             self.assertEqual(self.controller.mock_calls, [call.start("qw", [])])
-        for result, heading in (("stopped", "Parada concluída"), ("not-running", "Nenhum serviço em execução")):
+        for result, heading in (("stopped", "Stop completed"), ("not-running", "No service running")):
             self.controller.reset_mock()
             self.controller.stop.return_value = {**STOP, "result": result}
             _, stdout, _ = self.invoke(["stop"])
@@ -121,61 +126,120 @@ class PresentationTests(unittest.TestCase):
             self.assertIn("gen status", stdout)
             self.assertEqual(self.controller.mock_calls, [call.stop()])
 
-    def test_logs_verbatim_all_modes_no_metadata_io(self):
+    def test_logs_human_verbatim_headless_json(self):
         lines = [(3, "\033[31moriginal ANSI\033[0m\n"), (4, ""), (5, "x" * 4096 + " [line truncated]\n"), (6, "partial")]
         self.controller.logs.return_value = lines
-        expected = "".join(f"{number}: {line}" + ("" if line.endswith("\n") else "\n") for number, line in lines)
+        raw = "".join(f"{number}: {line}" + ("" if line.endswith("\n") else "\n") for number, line in lines)
+        machine = json.dumps({"lines": [{"number": n, "text": line} for n, line in lines]}, sort_keys=True) + "\n"
         for prefix in ([], ["--headless"]):
             for tty, env in ((True, {}), (False, {}), (True, {"NO_COLOR": ""}), (True, {"TERM": "dumb"})):
                 self.controller.reset_mock()
-                code, stdout, stderr = self.invoke([*prefix, "logs", "3", "6", "--run", RUN], tty, env)
-                self.assertEqual((code, stdout, stderr), (0, expected, ""))
+                with patch.object(gen, "rich_console", side_effect=AssertionError("Rich forbidden")):
+                    code, stdout, stderr = self.invoke([*prefix, "logs", "3", "6", "--run", RUN], tty, env)
+                self.assertEqual((code, stdout, stderr), (0, machine if prefix else raw, ""))
                 self.assertEqual(self.controller.mock_calls, [call.logs(3, 6, RUN)])
 
-    def test_default_logs_empty_and_single_start_preserve_calls(self):
-        for args, expected in ((["logs"], call.logs(None, None, None)), (["logs", "100"], call.logs(100, None, None))):
-            self.controller.reset_mock()
-            self.controller.logs.return_value = []
-            self.assertEqual(self.invoke(args), (0, "", ""))
-            self.assertEqual(self.controller.mock_calls, [expected])
+    def test_logs_empty_preserve_calls(self):
+        self.controller.logs.return_value = []
+        for prefix in ([], ["--headless"]):
+            for args, expected in ((["logs"], call.logs(None, None, None)), (["logs", "100"], call.logs(100, None, None))):
+                self.controller.reset_mock()
+                self.assertEqual(self.invoke([*prefix, *args]), (0, '{"lines": []}\n' if prefix else "", ""))
+                self.assertEqual(self.controller.mock_calls, [expected])
 
-    def test_headless_public_errors_unchanged_and_generic_errors_private(self):
-        for error in (gen.Refused("line range must be positive and increasing"), OSError("SECRET"), ValueError("SECRET"), KeyError("SECRET")):
+    def test_headless_errors_json_and_private_errors_sanitized(self):
+        for error in (gen.Refused("line range must be positive and increasing"), gen.Refused("SECRET"), OSError("SECRET"), ValueError("SECRET"), KeyError("SECRET"), TypeError("SECRET"), AttributeError("SECRET")):
             self.controller.logs.side_effect = error
-            code, stdout, stderr = self.invoke(["--headless", "logs", "0"], tty=True)
-            expected = str(error) if isinstance(error, gen.Refused) else "operation failed; no retry performed"
-            self.assertEqual((code, stdout, stderr), (1, "", f"gen: {expected}\n"))
+            with patch.object(gen, "rich_console", side_effect=AssertionError("Rich forbidden")):
+                code, stdout, stderr = self.invoke(["--headless", "logs", "0"], tty=True)
+            public = isinstance(error, gen.Refused) and str(error) in gen.PUBLIC_ERRORS
+            expected = {"error": {"code": "refused" if public else "operation-failed", "message": str(error) if public else "operation failed; no retry performed"}}
+            self.assertEqual((code, stderr), (1, ""))
+            self.assertEqual(json.loads(stdout), expected)
+            self.assertNotIn("SECRET", stdout)
 
-    def test_human_safe_error_mapping_no_private_echo(self):
+    def test_status_json_alias_errors_are_json(self):
+        self.controller.status.side_effect = OSError("SECRET")
+        code, stdout, stderr = self.invoke(["status", "--json"])
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertEqual(json.loads(stdout)["error"]["code"], "operation-failed")
+        self.assertNotIn("SECRET", stdout)
+
+    def test_human_errors_literal_and_private_safe(self):
         for error in (gen.Refused("only text profiles accept extra arguments"), gen.Refused("PRIVATE arbitrary diagnostic"), OSError("PRIVATE"), ValueError("PRIVATE"), KeyError("PRIVATE")):
             for tty, env, color in ((True, {}, True), (False, {}, False), (True, {"NO_COLOR": ""}, False), (True, {"TERM": "dumb"}, False)):
                 self.controller.start.side_effect = error
                 code, stdout, stderr = self.invoke(["video", "PRIVATE"], tty, env)
                 self.assertEqual((code, stdout), (1, ""))
-                self.assertIn("Operação recusada", stderr)
+                self.assertIn("Operation refused", stderr)
                 self.assertNotIn("PRIVATE", stderr)
                 self.assertEqual("\033[" in stderr, color)
 
-    def test_help_never_constructs_controller(self):
-        for args in (["--help"], ["--headless", "--help"], ["status", "--help"], ["logs", "--help"]):
-            with patch.object(gen, "Controller") as factory, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as caught:
-                gen.main(args)
-            self.assertEqual(caught.exception.code, 0)
-            factory.assert_not_called()
+    def test_help_never_constructs_controller_and_headless_help_is_json(self):
+        for prefix in ([], ["--headless"]):
+            for action in ([], ["status"], ["logs"]):
+                self.controller.reset_mock()
+                code, stdout, stderr = self.invoke([*prefix, *action, "--help"])
+                self.assertEqual(self.factory_calls, 0)
+                self.assertEqual(self.controller.mock_calls, [])
+                self.assertEqual((code, stderr), (0, ""))
+                help_text = json.loads(stdout)["help"] if prefix else stdout
+                self.assertIn("usage: gen", help_text)
+                self.assertNotIn("saída", help_text)
 
-    def test_late_root_flag_rejected_on_nonmodel_without_io(self):
+    def test_invalid_headless_arguments_json_no_io_or_private_echo(self):
+        for args in (["--headless"], ["--headless", "SECRET"], ["--headless", "status", "SECRET"], ["--headless", "logs", "SECRET"], ["status", "--json", "SECRET"]):
+            self.controller.reset_mock()
+            code, stdout, stderr = self.invoke(args)
+            self.assertEqual((code, stderr), (2, ""))
+            self.assertEqual(json.loads(stdout)["error"]["code"], "invalid-arguments")
+            self.assertNotIn("SECRET", stdout)
+            self.assertEqual(self.factory_calls, 0)
+            self.assertEqual(self.controller.mock_calls, [])
+
+    def test_late_root_flag_rejected_without_io(self):
         for args in (["status", "--headless"], ["stop", "--headless"], ["logs", "--headless"]):
-            with patch.object(gen, "Controller") as factory, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
-                gen.main(args)
-            self.assertEqual(caught.exception.code, 2)
-            factory.assert_not_called()
+            code, stdout, stderr = self.invoke(args)
+            self.assertEqual((code, stdout), (2, ""))
+            self.assertIn("invalid command", stderr)
+            self.assertEqual(self.controller.mock_calls, [])
 
-    def test_import_is_inert(self):
+    def test_headless_follow_refused_before_controller_construction(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(gen, "Controller") as factory, redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(gen.main(["--headless", "logs", "--follow"]), 1)
+        factory.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("human-only", json.loads(stdout.getvalue())["error"]["message"])
+
+    def test_rich_literal_markup_and_plain_fallback(self):
+        self.controller.status.return_value = {**STATUS, "substate": "[red]literal[/red]"}
+        _, stdout, _ = self.invoke(["status"])
+        self.assertIn("[red]literal[/red]", stdout)
+        with patch.object(gen, "rich_console", return_value=None):
+            code, stdout, stderr = self.invoke(["qw"])
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("Start requested", stdout)
+        self.assertIn("Not verified", stdout)
+
+    def test_render_failure_after_start_is_plain_success(self):
+        gen.rich_console(io.StringIO())
+        with patch("rich.table.Table.grid", side_effect=RuntimeError("PRIVATE renderer failure")):
+            code, stdout, stderr = self.invoke(["qw"])
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("Start requested", stdout)
+        self.assertEqual(stdout.count("◆ gen"), 1)
+        self.assertNotIn("PRIVATE", stdout)
+        self.controller.start.assert_called_once_with("qw", [])
+
+    def test_import_is_inert_and_does_not_load_rich(self):
+        before = set(sys.modules)
         with patch("subprocess.run") as execute, patch("os.execve") as execve:
             module = importlib.util.module_from_spec(SPEC)
             SPEC.loader.exec_module(module)
         execute.assert_not_called()
         execve.assert_not_called()
+        self.assertFalse(any(name == "rich" or name.startswith("rich.") for name in set(sys.modules) - before))
 
 
 if __name__ == "__main__":

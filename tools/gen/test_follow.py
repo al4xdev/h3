@@ -168,7 +168,7 @@ class FollowTests(unittest.TestCase):
         self.child.terminate.assert_not_called()
 
     def test_cli_follow_dispatch_raw_no_decoration(self):
-        for prefix in ([], ["--headless"]):
+        for prefix in ([],):
             for args, expected in ((["logs", "--follow"], (None, None, None)),
                                    (["logs", "1", "--follow", "--run", RUN], (1, None, RUN))):
                 stdout, stderr = io.StringIO(), io.StringIO()
@@ -184,8 +184,13 @@ class FollowTests(unittest.TestCase):
             stdout, stderr = io.StringIO(), io.StringIO()
             with patch.object(gen, "Controller", return_value=self.controller), patch.object(gen.subprocess, "Popen") as popen, redirect_stdout(stdout), redirect_stderr(stderr):
                 self.assertEqual(gen.main([*prefix, "logs", "1", "20", "--follow"]), 1)
-            self.assertEqual(stdout.getvalue(), "")
-            self.assertIn("follow does not accept an end line" if prefix else "não aceita uma linha final", stderr.getvalue())
+            if prefix:
+                import json
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertIn("human-only", json.loads(stdout.getvalue())["error"]["message"])
+            else:
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("follow does not accept an end line", " ".join(stderr.getvalue().split()))
             popen.assert_not_called()
 
     def test_real_tail_append_is_pinned_to_original_private_file(self):
