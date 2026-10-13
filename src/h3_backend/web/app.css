@@ -39,4 +39,13 @@ body{padding-bottom:90px}main{max-width:1200px;margin:auto}
 /* Keep one visible stage title and a stable action row above the phone Back bar. */
 .task-panel>h2,.viewer>.section-head>h2{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.viewer>.section-head{justify-content:flex-end;margin-bottom:12px}
 @media(max-width:640px){body{padding-bottom:210px}.masthead{padding:14px 16px;gap:12px}.wordmark{font-size:34px}.wordmark small{font-size:8px;letter-spacing:1px;margin-left:8px;max-width:80px}.masthead button{font-size:11px;padding:8px;max-width:125px}.studio-nav{margin-bottom:10px}.stage-heading{padding:10px 0 14px;margin-bottom:14px}.stage-heading h1{font-size:30px;margin-top:8px}.screen-actions{position:fixed;left:max(16px,env(safe-area-inset-left));right:max(16px,env(safe-area-inset-right));bottom:calc(69px + env(safe-area-inset-bottom));z-index:2;flex-wrap:wrap;margin:0;padding:12px 0}.screen-actions button{flex:1 1 135px}.notice{font-size:11px;min-height:30px;padding:6px 0}.task-panel .reference-preview{height:140px}.task-panel .caption{font-size:12px}.context-proof{font-size:11px}.task-panel label{margin-top:12px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+/* Motion stays on leaves: never transform a fixed action's ancestor or media. */
+:root{--motion-press:90ms;--motion-feedback:160ms;--motion-enter:180ms;--motion-confirm:240ms;--motion-ease:cubic-bezier(.2,.8,.2,1)}
+button{position:relative}button::before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--copper);opacity:0;pointer-events:none;transition:opacity var(--motion-press) ease-out}button:active:not(:disabled)::before{opacity:.14}
+@media(hover:hover) and (pointer:fine){button:hover:not(:disabled)::before{opacity:.06}button:active:not(:disabled)::before{opacity:.14}}
+.stage-heading{position:relative}.stage-heading::after{content:"";position:absolute;bottom:-1px;left:0;width:36px;height:2px;background:var(--copper);pointer-events:none}
+button::after,#generation-status::before{content:"";position:absolute;right:7px;top:7px;width:5px;height:5px;border-radius:50%;background:var(--copper);opacity:0;pointer-events:none}#generation-status{position:relative}
+button[data-busy=true]::after,#generation-status[data-busy=true]::before{opacity:.75;animation:decision-busy var(--motion-feedback) ease-in-out 2}
+@keyframes decision-busy{0%,100%{opacity:.75;transform:scale(.85)}50%{opacity:1;transform:scale(1)}}
+.motion-paused *,.motion-paused *::before,.motion-paused *::after{animation:none!important;transition:none!important}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

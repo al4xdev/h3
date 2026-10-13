@@ -1,6 +1,6 @@
 # H3 · Bancada de filme
 
-## Mobile por telas — planos 23, 24 e 25
+## Mobile por telas e movimento — planos 23, 24, 25 e 26
 
 HTML/CSS/JavaScript same-origin, sem framework, build, CDN ou fontes remotas. A identidade grafite/cobre e a **linha ancestral real** permanecem; a bancada de três colunas foi substituída por uma decisão de cada vez. No telefone, exatamente um painel principal está visível e focável. Desktop tem uma navegação lateral compacta, não sete formulários simultâneos.
 
@@ -60,6 +60,25 @@ Grok devolve texto literal até 12000 caracteres, via `.value`/`textContent`, se
 
 Montagem mantém UUID criptográfico registrado na query **antes** do POST `/assemblies/{UUID}` com `{end_run_id}`; aguarda 200/arquivo publicado. Em resultado incerto, **Reler montagem**/reload/SSE consultam o mesmo ID; 404 não autoriza outro UUID/POST. Preview tem fim pronto ainda pendente; accepted sequence tem fim aceito. Aceitar fim não monta; uma nova revisão aceita exige novo clique explícito Montar. URL/download somente próprios, com completed + hashes + output verificados. Ordem/count não certificam equivalência perceptual ou bytes/pixels lossless.
 
+### Movimento intencional — plano26
+
+Movimento é só apresentação, não parte da execução: nenhuma operação espera `animationend`/`finished`, cria UUID/POST, altera payload/rascunho/revisão, reenvia intenção ou dá autoplay. Graphite/copper e a filmstrip ancestral real continuam sendo a identidade. Um painel fica ativo imediatamente; o antigo já está hidden/inert quando o novo começa a aparecer. Foco e clique não esperam efeitos.
+
+| Interação | Feedback de uso |
+| --- | --- |
+| Trocar tela / Voltar / abrir bloco | Heading e folhas estáticas entram 12 px em 180 ms; direção inversa ao Voltar, sem painel fantasma. |
+| Biblioteca / página nova | Até seis cards reais, stagger de 16 ms (máximo80 ms); snapshot idêntico/SSE não reaplica entrada em cards recriados. |
+| Press / teclado | Tinta cobre em90 ms por pseudo-elemento sem capturar ponteiro ou encolher o botão. Hit target continua >=44 px. |
+| Referência / upload publicado | Fade160 ms somente após load da URL atual; nem fallback de imagem, nem upload/geração automáticos. |
+| Grok / salvar editor / upload / gerar / montar / reler | Ponto discreto corresponde à flag real; dois pulsos de160 ms, depois estático. Sem percentual, progresso inventado ou loop interminável. |
+| Decisão em revisão | Só a ação clicada/ID atual mostra ocupado; geração pendente não faz Aceitar/Rejeitar pulsarem. Badge/frame recebe confirmação240 ms só após estado confirmado. |
+| Ideia / prompt / seed / duração | Caret e inputs permanecem estáticos; readout/provas alterados têm cue160 ms, sem debounce de negócio. |
+| Proposta / resposta tardia | Provas/caption recebem cue160 ms no contexto ativo. Candidato de outro pai permanece no rascunho de origem, fechado; não rouba foco, abre tela ou escolhe proposta. |
+| Disclosure / erro / incerto / preview→aceito | Summary/caption têm cue160 ms localizado; mensagem permanece legível. Sem shake/confetti, retry ou arquivo prévio apresentado como aceito. |
+| Vídeo / fullscreen / download / picker / filmstrip scroll | Controles e gestos nativos, sem animação sobre o vídeo nem swipeBack/pullrefresh global. |
+
+WAAPI usa apenas opacity/transform, sem blur/layout por frame, framework, dependência ou `will-change` permanente. Nunca transforma `.task-panel`, `.stage`, `.studio`, `body`, forms/fieldsets, ancestrais das CTAs `position:fixed`, vídeos ou inputs. Assinaturas são limitadas a canais conhecidos de apresentação, não um Map crescente por UUID; substituir DOM não basta para dedupe. Sem WAAPI, o aplicativo continua estático e funcional. Preferência reduzida tem zero WAAPI/CSS animation/transition; alteração dinâmica cancela efeitos. Resize e nova navegação cancelam WAAPI; preferência reduzida, página oculta e pagehide também interrompem CSS motion sem disparar negócio; promises canceladas são consumidas e só limpam a apresentação.
+
 ### Validação sem API/provider/GPU
 
 Comandos fish, Playwright/Chromium existentes (sem instalar dependências):
@@ -70,8 +89,10 @@ node --test tests/frontend_ui.test.mjs
 env H3_UI_TEST_CLIP=runs/02cf408f-c985-47a2-887d-731569d7827a/chunk.mp4 H3_UI_TEST_ASSEMBLY=.dumps/benchmarks/baseline-three-chunks/benchmark.mp4 node tests/frontend_browser_mock.mjs
 ```
 
-50 testes Node passam: 31 puros de frontend e 19 do adapter MCP com worker inerte. Frontend cobre contratos anteriores, duração/capabilities/half-even/locale/payloads root+continue, imagem própria e snapshots atrasados. Browser intercepta **toda** request em `http://h3.mock.invalid`, bloqueia origem externa, simula SSE e POSTs separados; não abre servidor nem faz inferência/provider real. Execução final: 248 requests interceptadas, 21 POSTs fake explícitos, 43 auditorias de bounds/foco, zero exceções JavaScript ou requests inesperadas. Phone 393 × 852 / DPR2 / touch, 320/640/1440 e contexto desktop separado auditam um painel ativo, hidden/inert/foco, >=44 px, overflow e cards sem compressão. CTAs inteiras cabem no visual viewport, não intersectam o footer e passam hit-test no próprio botão. Após tap/scrollIntoView, ideia/proposta/duração focadas ficam acima dos controles fixos. Fixtures já existentes são só bytes prerecorded; um vídeo antigo usado pelo mock não é prova de geração de 5/10 s.
+56 testes Node passam: 37 puros de frontend (seis políticas motion novas) e 19 do adapter MCP com worker inerte. Frontend cobre contratos anteriores, duração/capabilities/half-even/locale/payloads root+continue, imagem própria e snapshots atrasados. Browser intercepta **toda** request em `http://h3.mock.invalid`, bloqueia origem externa, simula SSE e POSTs separados; não abre servidor nem faz inferência/provider real. Execução final: 289 requests interceptadas, 25 POSTs fake explícitos, 50 auditorias de bounds/foco, zero exceções JavaScript ou requests inesperadas. Phone 393 × 852 / DPR2 / touch, 320/640/1440 e contexto desktop separado auditam um painel ativo, hidden/inert/foco, >=44 px, overflow e cards sem compressão. CTAs inteiras cabem no visual viewport, não intersectam o footer e passam hit-test no próprio botão. Após tap/scrollIntoView, ideia/proposta/duração focadas ficam acima dos controles fixos. Fixtures já existentes são só bytes prerecorded; um vídeo antigo usado pelo mock não é prova de geração de 5/10 s.
 
 Capturas somente após estado/console/rede/bounds auditados, em `.dumps/tests/ui-progressive/`, com `report.json`. Fixtures de falhas HTTP/rede têm erros esperados registrados, sem exceções JavaScript. Os cinco PNGs benignos `owner-library/context/proposal/generation-5s/review` são evidência visual separada dos fixtures XSS. Capturas nativas DPR2 (786 × 1704) usam clip explícito na origem do documento, foco/blur/frames renderizados e rede/media estabilizados para evitar scroll pendente do compositor mobile. Hashes de 205 recursos, prompts, assets, runs/inputs/assemblies reais antes/depois protegem originais; `.data/grok`/OAuth nunca são lidos ou hashed pelo harness. Nada de picker físico, elegibilidade de provider ou qualidade/RAM GPU longa é certificado pela emulação.
+
+O segundo contexto touch usa motion normal, não só screenshots com animações desativadas. `motionEvidence` no report registra keyframes/targets, heading pausado no meio da entrada (90 ms), confirmação240 ms, preferência alterada em runtime, ocultação, Voltar rápido/rascunho preservado e fallback sem WAAPI. Durante admissão nativa pendente, voltar a outra revisão não sinaliza decisões ocupadas; durante Aceitar, só Aceitar fica busy. Toque em **Usar proposta** durante entrada continua imediatamente; double clicks não duplicam provider/native, eventos `animationend` e SSE não geram operações. Os artefatos `.dumps/tests/ui-motion/context-mid.png` e `assembly-settled.png` foram inspecionados em resolução nativa, com header/CTAs/footer inteiros; `motion-filmstrip.png` contém frames reais extraídos pelo FFmpeg. O WebM final, apontado no report, tem3.28 s,299846 bytes,392×852/VP9 e25 fps de **gravação**: não é promessa60fps da UI nem vídeo novo gerado. A mídia exibida dentro da página é fixture prerecorded, não certificação GPU/qualidade.
 
 Evidências históricas anteriores permanecem em `.dumps/tests/ui-paths/`, `ui-grok/`, `ui-assembly/` e seus relatórios. Suas descrições de painéis empilhados, texto-only e duração fixa são históricas, não o contrato atual.

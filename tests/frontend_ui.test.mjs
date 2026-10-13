@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration, motionSpec, createPresentationMotion} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
@@ -230,4 +230,72 @@ test('assets do not contain unsafe bindings, persistence, autoplay or polling', 
   assert.doesNotMatch(html, /autoplay|https?:\/\//);
   assert.match(html, /lang="pt-BR"/);
   assert.match(html, /preload="metadata"/);
+});
+
+function motionFixture() {
+  const listeners = new Map(), preferenceListeners = new Map(), viewListeners = new Map(), classes = new Set();
+  const preference = {matches: false, addEventListener: (name, fn) => preferenceListeners.set(name, fn), removeEventListener: name => preferenceListeners.delete(name)};
+  const document = {hidden: false, activeElement: null, documentElement: {classList: {toggle: (name, value) => value ? classes.add(name) : classes.delete(name)}}, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name), defaultView: {matchMedia: () => preference, addEventListener: (name, fn) => viewListeners.set(name, fn), removeEventListener: name => viewListeners.delete(name)}};
+  const calls = [];
+  function node() {
+    return {isConnected: true, dataset: {}, attrs: {}, setAttribute(name, value) { this.attrs[name] = value; }, closest: () => null, matches: () => false, querySelector: () => null, contains: () => false, animate(frames, options) { let reject; const finished = new Promise((_, fail) => { reject = fail; }); const animation = {finished, cancelled: 0, cancel() { this.cancelled++; reject(new Error('cancelled')); }}; calls.push({frames, options, animation}); return animation; }};
+  }
+  return {document, preference, classes, listeners, preferenceListeners, viewListeners, calls, node};
+}
+test('motion tokens are bounded, directional and compositor-only, with six-card stagger', () => {
+  assert.equal(motionSpec('enter').options.duration, 180);
+  assert.match(motionSpec('enter', {direction: -1}).frames[0].transform, /-12px/);
+  assert.equal(motionSpec('enter', {index: 5}).options.delay, 80);
+  assert.equal(motionSpec('enter', {index: 6}).options.delay, 0);
+  assert.equal(motionSpec('confirm').options.duration, 240);
+  assert.equal(motionSpec('cue').options.duration, 160);
+  for (const kind of ['enter', 'confirm', 'cue']) for (const frame of motionSpec(kind).frames) assert.ok(Object.keys(frame).every(key => ['transform', 'opacity'].includes(key)));
+});
+test('motion signatures survive recreated cards and cannot grow from arbitrary identifiers', () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document);
+  assert.equal(motion.changed('library', 'snapshot-one', [f.node()], 'enter'), true);
+  assert.equal(motion.changed('library', 'snapshot-one', [f.node()], 'enter'), false);
+  for (let id = 0; id < 1000; ++id) assert.equal(motion.changed(`untrusted-${id}`, id, [f.node()]), false);
+  assert.equal(motion.channelCount, 1); assert.equal(f.calls.length, 1);
+  motion.destroy();
+});
+test('reduce preference is immediate and a dynamic change cancels running animations', () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document);
+  assert.equal(motion.play(f.node(), 'enter'), true); assert.equal(motion.activeCount, 1);
+  f.preference.matches = true; f.preferenceListeners.get('change')();
+  assert.equal(motion.activeCount, 0); assert.equal(f.calls[0].animation.cancelled, 1);
+  assert.equal(motion.play(f.node()), false); assert.ok(f.classes.has('motion-paused'));
+  f.preference.matches = false; f.preferenceListeners.get('change')();
+  assert.equal(f.calls.length, 1); assert.equal(f.classes.has('motion-paused'), false);
+  motion.destroy();
+});
+test('hidden, unsupported, fixed-action ancestors, media and editable targets remain static', () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document);
+  const fixedAncestor = f.node(); fixedAncestor.querySelector = () => ({});
+  const nativeControl = f.node(); nativeControl.matches = () => true;
+  const hidden = f.node(); hidden.closest = () => ({});
+  const unsupported = f.node(); delete unsupported.animate;
+  for (const target of [fixedAncestor, nativeControl, hidden, unsupported]) assert.equal(motion.play(target, 'enter'), false);
+  const focusedAncestor = f.node(); focusedAncestor.contains = () => true;
+  f.document.activeElement = {matches: () => true}; assert.equal(motion.play(focusedAncestor), false);
+  f.document.activeElement = null; f.document.hidden = true; assert.equal(motion.play(f.node()), false);
+  assert.equal(f.calls.length, 0); motion.destroy();
+});
+test('rapid replacement and hidden/page destruction reap animations without rejected promises leaking', async () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document), target = f.node();
+  motion.play(target); motion.play(target, 'enter');
+  assert.equal(f.calls[0].animation.cancelled, 1); assert.equal(motion.activeCount, 1);
+  await Promise.resolve(); await Promise.resolve(); assert.equal(motion.activeCount, 1);
+  f.document.hidden = true; f.listeners.get('visibilitychange')();
+  assert.equal(motion.activeCount, 0); assert.ok(f.classes.has('motion-paused'));
+  f.document.hidden = false; f.listeners.get('visibilitychange')();
+  motion.play(target); motion.destroy(); assert.equal(motion.play(target), false);
+  assert.equal(motion.activeCount, 0); assert.equal(f.preferenceListeners.size + f.listeners.size + f.viewListeners.size, 0);
+  await Promise.resolve(); await Promise.resolve();
+});
+test('busy is a real-state presentation attribute, not a progress value or action', () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document), target = f.node();
+  motion.busy(target, true); assert.equal(target.dataset.busy, 'true'); assert.equal(target.attrs['aria-busy'], 'true');
+  motion.busy(target, false); assert.equal(target.dataset.busy, 'false'); assert.equal(f.calls.length, 0);
+  motion.destroy();
 });

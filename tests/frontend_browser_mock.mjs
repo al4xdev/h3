@@ -8,7 +8,10 @@ import {createHash} from 'node:crypto';
 const {chromium} = createRequire(import.meta.url)('playwright');
 const root = resolve(new URL('..', import.meta.url).pathname);
 const artifacts = resolve(root, '.dumps/tests/ui-progressive');
+const motionArtifacts = resolve(root, '.dumps/tests/ui-motion');
 await mkdir(artifacts, {recursive: true});
+await mkdir(motionArtifacts, {recursive: true});
+const motionEvidence = {};
 const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
 const {alignedFrames} = await import(`data:text/javascript;base64,${Buffer.from(assets['app.js']).toString('base64')}`);
 // No traversal into .data/grok, OAuth, or private credentials, even for hashes.
@@ -49,6 +52,7 @@ let editor = {system_prompt: 'Preserve ação, roupa, pose e ordem. Responda só
 const mkRun = (id, state, parent_id = null, duration = 2.3, prompt = malicious) => ({id, state, parent_id, prompt, seed: 2026101205, duration_seconds: duration, created_at: '2026-10-12T20:00:00Z', updated_at: '2026-10-12T20:00:01Z', references: [{type: 'image', role: 'identity', source_root: 'assets', source: 'dance_reference.png'}], output: {path: `.data/runs/${id}/chunk.mp4`, probe: {streams: [{codec_type: 'video', duration: String(alignedFrames(duration) / 24)}]}}, error: null});
 let runs, assemblies = [], mode = 'normal', grokMode = 'normal', assemblyMode = 'normal', generated = 0;
 let grokGate = null, releaseGrok, waitGate = null, releaseWait, detailGate = null, releaseDetail;
+let admissionGate = null, releaseAdmission, decisionGate = null, releaseDecision;
 const resetRuns = () => { runs = [mkRun(endID, 'ready_for_review', rootID), mkRun(rootID, 'accepted'), {...mkRun(failedID, 'failed'), error: 'Falha histórica preservada', output: {}}]; };
 resetRuns();
 const requests = [], exceptions = [], violations = [], consoleMessages = [], failedRequests = [], audits = [], captures = [];
@@ -88,6 +92,7 @@ async function routeRequest(route) {
   if (method === 'POST' && (path === '/runs/i2v' || path.endsWith('/v2v'))) {
     if (mode === 'ambiguous') return route.abort('connectionfailed');
     if (mode === 'conflict') return json({detail: 'Slot ocupado'}, 409);
+    if (admissionGate) await admissionGate;
     const body = request.postDataJSON(), id = `00000000-0000-4000-8000-${String(++generated).padStart(12, '0')}`;
     const run = {...mkRun(id, 'queued', path.endsWith('/v2v') ? path.split('/')[2] : null, body.duration_seconds, body.prompt), seed: body.seed, output: {}};
     run.references = run.parent_id ? structuredClone(runs.find(item => item.id === run.parent_id).references) : (body.references || [original]).map(ref => ({type: 'image', role: 'identity', source_root: ref.source_root, source: ref.path}));
@@ -113,7 +118,7 @@ async function routeRequest(route) {
     const run = runs.find(item => item.id === path.split('/')[2]); if (!run) return json({detail: 'Run not found'}, 404);
     if (path === `/runs/${rootID}` && detailGate) await detailGate;
     if (path.endsWith('/video')) return route.fulfill(media ? {contentType: 'video/mp4', body: media} : {status: 204});
-    if (method === 'POST' && /\/(accept|reject)$/.test(path)) { assert.equal(run.state, 'ready_for_review'); if (mode === 'decision-error') return json({detail: 'Decisão recusada'}, 409); run.state = path.endsWith('/accept') ? 'accepted' : 'rejected'; return json(run); }
+    if (method === 'POST' && /\/(accept|reject)$/.test(path)) { assert.equal(run.state, 'ready_for_review'); if (mode === 'decision-error') return json({detail: 'Decisão recusada'}, 409); if (decisionGate) await decisionGate; run.state = path.endsWith('/accept') ? 'accepted' : 'rejected'; return json(run); }
     if (path.endsWith('/sequence')) {
       const chain = []; let current = run; while (current) { chain.unshift(current); current = runs.find(item => item.id === current.parent_id); }
       return json({root_id: chain[0].id, end_run_id: run.id, blocks: chain.map(item => ({id: item.id, parent_id: item.parent_id, state: item.state, duration_seconds: alignedFrames(item.duration_seconds) / 24, video_url: item.output.path && ['ready_for_review', 'accepted', 'rejected'].includes(item.state) ? `/runs/${item.id}/video` : null}))});
@@ -160,15 +165,15 @@ async function focusedAudit(id) {
   const result = await page.evaluate(id => { const box = document.getElementById(id).getBoundingClientRect(); const blockers = [...document.querySelectorAll('.studio-footer,[data-screen]:not([hidden]) .screen-actions')].filter(node => node.getClientRects().length && ['fixed', 'sticky'].includes(getComputedStyle(node).position)).map(node => node.getBoundingClientRect().top); return {id, focused: document.activeElement.id, box: box.toJSON(), safeBottom: Math.min(visualViewport.offsetTop + visualViewport.height, ...blockers), viewportTop: visualViewport.offsetTop}; }, id);
   assert.equal(result.focused, id); assert.ok(result.box.top >= result.viewportTop && result.box.bottom <= result.safeBottom, `${id}: focused field covered by fixed controls`); audits.push({name: `focused-${id}`, ...result});
 }
-async function capture(name) {
-  await page.evaluate(async () => { await document.fonts.ready; for (const image of document.images) if (image.getClientRects().length && !image.complete) await new Promise(resolve => { image.addEventListener('load', resolve, {once: true}); image.addEventListener('error', resolve, {once: true}); }); document.getElementById('screen-title').focus({preventScroll: true}); document.activeElement?.blur(); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(resolve)); });
-  await page.mouse.move(2, 2);
-  await page.waitForLoadState('networkidle');
-  if (media || assemblyMedia) await page.waitForFunction(() => [...document.querySelectorAll('video')].filter(video => !video.hidden && video.getClientRects().length && video.getAttribute('src')).every(video => video.readyState >= 2 || video.error));
-  await audit(name); assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
-  const path = resolve(artifacts, `${name}.png`), size = page.viewportSize();
+async function capture(name, target = page, {directory = artifacts, animations = 'disabled'} = {}) {
+  await target.evaluate(async () => { await document.fonts.ready; for (const image of document.images) if (image.getClientRects().length && !image.complete) await new Promise(resolve => { image.addEventListener('load', resolve, {once: true}); image.addEventListener('error', resolve, {once: true}); }); document.getElementById('screen-title').focus({preventScroll: true}); document.activeElement?.blur(); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(resolve)); });
+  await target.mouse.move(2, 2);
+  await target.waitForLoadState('networkidle');
+  if (media || assemblyMedia) await target.waitForFunction(() => [...document.querySelectorAll('video')].filter(video => !video.hidden && video.getClientRects().length && video.getAttribute('src')).every(video => video.readyState >= 2 || video.error));
+  await audit(name, target); assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
+  const path = resolve(directory, `${name}.png`), size = target.viewportSize();
   // An explicit document-origin clip avoids mobile IME/compositor scroll races.
-  await page.screenshot({path, animations: 'disabled', clip: {x: 0, y: 0, width: size.width, height: size.height}}); captures.push(path);
+  await target.screenshot({path, animations, clip: {x: 0, y: 0, width: size.width, height: size.height}}); captures.push(path);
 }
 async function openRun(id) { await page.locator('#nav-library').click(); await page.getByRole('button', {name: new RegExp(id)}).click(); await active('review'); }
 async function newIdea(text = 'Uma ideia simples') { await page.locator('#nav-new').click(); await active('context'); await page.locator('#idea').fill(text); }
@@ -284,11 +289,76 @@ try {
   await page.locator('#grok-detail').click(); await active('proposal'); await focusedAudit('grok-result'); await capture('owner-proposal');
   await page.locator('#grok-use').click(); await page.locator('#duration').fill('5'); await focusedAudit('duration'); await capture('owner-generation-5s');
   await openRun(endID); await capture('owner-review');
+  assert.equal(await page.evaluate(() => document.getAnimations().length), 0, 'reduce context has no CSS or WAAPI motion');
+  // The regression context intentionally reduces motion. A separate normal-touch
+  // context observes real keyframes, interruption and input while motion is running.
+  resetRuns(); assemblies = []; mode = grokMode = assemblyMode = 'normal';
+  const liveMotion = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'no-preference', serviceWorkers: 'block', recordVideo: {dir: motionArtifacts, size: {width: 393, height: 852}}});
+  await liveMotion.route('**/*', routeRequest); await liveMotion.addInitScript(mockStartup);
+  await liveMotion.addInitScript(() => {
+    window.motionLog = [];
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function(frames, options) {
+      motionLog.push({id: this.id, tag: this.tagName, classes: this.className, frames, options, unsafe: this.matches('video,input,textarea,select,form,fieldset,.task-panel,.stage,.studio,body,.screen-actions') || Boolean(this.querySelector('video,.screen-actions'))});
+      return animate.call(this, frames, options);
+    };
+  });
+  const moving = await liveMotion.newPage(); watch(moving);
+  await moving.goto('http://h3.mock.invalid/?other=keep#viewer'); await moving.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  await moving.waitForFunction(() => motionLog.length > 0);
+  await moving.getByRole('button', {name: new RegExp(endID)}).tap(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'});
+  const beforeMotion = posts().length;
+  const mid = await moving.locator('#nav-new').evaluate(button => {
+    button.click(); const animations = document.getAnimations().filter(animation => animation.effect?.target?.matches('[data-motion="heading"]'));
+    for (const animation of animations) { animation.pause(); animation.currentTime = 90; }
+    const heading = document.querySelector('[data-motion="heading"]'), style = getComputedStyle(heading);
+    return {running: animations.length, transform: style.transform, opacity: Number(style.opacity), panel: document.querySelector('[data-screen]:not([hidden])').dataset.screen, focus: document.activeElement.id};
+  });
+  assert.equal(mid.running, 1); assert.equal(mid.panel, 'context'); assert.equal(mid.focus, 'screen-title'); assert.ok(mid.opacity > .65 && mid.opacity < 1); assert.notEqual(mid.transform, 'none');
+  await capture('context-mid', moving, {directory: motionArtifacts, animations: 'allow'}); assert.equal(posts().length, beforeMotion);
+  await moving.locator('#idea').fill('Uma cena viva, sem mudar os parâmetros.');
+  await moving.locator('#back').evaluate(button => button.click()); await moving.locator('#nav-new').evaluate(button => button.click());
+  assert.equal(await moving.locator('#idea').inputValue(), 'Uma cena viva, sem mudar os parâmetros.'); assert.equal(posts().length, beforeMotion);
+  grokGate = new Promise(resolve => { releaseGrok = resolve; }); const beforeBusy = grokPosts().length;
+  await moving.locator('#grok-detail').evaluate(button => { button.click(); button.click(); }); await moving.waitForFunction(() => document.getElementById('grok-detail').dataset.busy === 'true');
+  await moving.waitForFunction(() => !document.getAnimations().some(animation => animation.animationName === 'decision-busy'));
+  assert.equal(grokPosts().length, beforeBusy + 1); assert.equal(await moving.locator('[role="progressbar"]').count(), 0); await audit('motion-busy-static', moving);
+  await moving.evaluate(() => document.getElementById('grok-detail').dispatchEvent(new Event('animationend', {bubbles: true}))); assert.equal(grokPosts().length, beforeBusy + 1);
+  await moving.emulateMedia({reducedMotion: 'reduce'}); await moving.waitForFunction(() => document.getAnimations().length === 0 && document.documentElement.classList.contains('motion-paused'));
+  assert.equal(await moving.locator('#idea').inputValue(), 'Uma cena viva, sem mudar os parâmetros.');
+  await moving.emulateMedia({reducedMotion: 'no-preference'}); releaseGrok(); grokGate = null;
+  await moving.locator('[data-screen="proposal"]').waitFor({state: 'visible'}); await moving.locator('#grok-use').tap();
+  await moving.locator('#duration').fill('5'); await audit('motion-generation-touch', moving);
+  waitGate = new Promise(resolve => { releaseWait = resolve; }); admissionGate = new Promise(resolve => { releaseAdmission = resolve; }); const beforeNative = inference().length;
+  await moving.locator('#generate').evaluate(button => { button.click(); button.click(); });
+  for (let back = 0; back < 3; ++back) await moving.locator('#back').evaluate(button => button.click());
+  await moving.locator('[data-screen="review"]').waitFor({state: 'visible'}); assert.equal(await moving.locator('#run-state').textContent(), 'Pronto para revisão');
+  assert.equal(await moving.locator('#accept').getAttribute('aria-busy'), 'false'); assert.equal(await moving.locator('#reject').getAttribute('aria-busy'), 'false'); await audit('native-pending-not-review-busy', moving);
+  releaseAdmission(); admissionGate = null; await moving.locator('#nav-status').waitFor({state: 'visible'}); await moving.locator('#nav-status').tap(); await moving.locator('#operation').filter({hasText: 'Admitido:'}).waitFor();
+  const motionRun = runs[0].id; assert.equal(inference().length, beforeNative + 1); assert.equal(inference().at(-1).body.duration_seconds, 5); assert.equal(requests.filter(item => item.path === `/runs/${motionRun}?wait=true`).length, 1);
+  await moving.evaluate(() => { Object.defineProperty(document, 'hidden', {configurable: true, get: () => true}); document.dispatchEvent(new Event('visibilitychange')); });
+  assert.equal(await moving.evaluate(() => document.getAnimations().length), 0); assert.equal(inference().length, beforeNative + 1);
+  await moving.evaluate(() => { Object.defineProperty(document, 'hidden', {configurable: true, get: () => false}); document.dispatchEvent(new Event('visibilitychange')); mockEvents[0].emit('change', {path: '.data/runs/own/manifest.json', invalidation: true}); });
+  releaseWait(); waitGate = null; await moving.locator('#operation').filter({hasText: 'Pronto para revisão'}).waitFor(); await moving.locator('#status-review').tap();
+  decisionGate = new Promise(resolve => { releaseDecision = resolve; }); await moving.locator('#accept').tap();
+  assert.equal(await moving.locator('#accept').getAttribute('aria-busy'), 'true'); assert.equal(await moving.locator('#reject').getAttribute('aria-busy'), 'false'); await audit('only-actual-review-action-busy', moving);
+  releaseDecision(); decisionGate = null; await moving.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); assert.equal(inference().length, beforeNative + 1);
+  await moving.locator('#open-assembly').tap(); await moving.locator('#assemble').tap(); await moving.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
+  const assembledCount = assemblyPosts().length; await moving.evaluate(() => window.dispatchEvent(new Event('animationend'))); assert.equal(assemblyPosts().length, assembledCount);
+  await moving.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+  await capture('assembly-settled', moving, {directory: motionArtifacts, animations: 'allow'});
+  const log = await moving.evaluate(() => motionLog); assert.ok(log.every(entry => !entry.unsafe)); assert.ok(log.some(entry => entry.options.duration === 240 && entry.id === 'run-state')); assert.ok(log.some(entry => entry.options.duration === 180)); assert.ok(log.every(entry => (entry.options.delay || 0) <= 80));
+  const video = moving.video(); await moving.evaluate(() => window.dispatchEvent(new Event('pagehide'))); assert.equal(await moving.evaluate(() => document.getAnimations().length), 0);
+  await liveMotion.close(); Object.assign(motionEvidence, {normal: true, reduced: true, dynamicPreference: true, hiddenCancellation: true, rapidBackDraftPreserved: true, compositorOnlyTargets: true, observed: log, mid, video: await video.path()});
+  const fallback = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, serviceWorkers: 'block'});
+  await fallback.route('**/*', routeRequest); await fallback.addInitScript(mockStartup); await fallback.addInitScript(() => { Element.prototype.animate = undefined; });
+  const staticPage = await fallback.newPage(); watch(staticPage); await staticPage.goto('http://h3.mock.invalid/'); await staticPage.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); const fallbackCount = posts().length;
+  await staticPage.locator('#nav-new').tap(); await staticPage.locator('#idea').fill('Fallback continua editável'); await staticPage.locator('#use-idea').tap(); assert.equal(await staticPage.locator('#prompt').inputValue(), 'Fallback continua editável'); assert.equal(posts().length, fallbackCount); await audit('motion-unsupported-fallback', staticPage); await fallback.close();
   await page.evaluate(() => window.dispatchEvent(new Event('pagehide'))); assert.equal(await page.evaluate(() => mockEvents.every(event => event.closed)), true);
   assert.deepEqual(exceptions, []); assert.deepEqual(violations, []); assert.deepEqual(await protectedHashes(), beforeHashes);
   if (assemblyMedia) assert.equal(createHash('sha256').update(await readFile(resolve(root, process.env.H3_UI_TEST_ASSEMBLY))).digest('hex'), assemblyHash);
   console.log(`PASS progressive browser: ${requests.length} intercepted requests, ${posts().length} explicit fake POSTs, ${audits.length} bounds audits, zero API/provider/GPU`);
 } finally {
-  await writeFile(resolve(artifacts, 'report.json'), JSON.stringify({requests, exceptions, violations, consoleMessages, failedRequests, audits, captures, phone: {width: 393, height: 852, touch: true, scale: 2}, originalFilesProtected: Object.keys(beforeHashes).length, mediaFixture: Boolean(media), assemblyFixture: Boolean(assemblyMedia), assemblyHash, liveAPI: 0, provider: 0, GPU: 0}, null, 2));
+  await writeFile(resolve(artifacts, 'report.json'), JSON.stringify({requests, exceptions, violations, consoleMessages, failedRequests, audits, captures, motionEvidence, phone: {width: 393, height: 852, touch: true, scale: 2}, originalFilesProtected: Object.keys(beforeHashes).length, mediaFixture: Boolean(media), assemblyFixture: Boolean(assemblyMedia), assemblyHash, liveAPI: 0, provider: 0, GPU: 0}, null, 2));
   await browser.close();
 }

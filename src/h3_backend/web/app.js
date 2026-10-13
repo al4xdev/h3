@@ -212,8 +212,69 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
   };
 }
 
+export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
+  const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 16 : 0;
+  const easing = 'cubic-bezier(.2,.8,.2,1)';
+  if (kind === 'enter') return {frames: [{opacity: .65, transform: `translateX(${direction < 0 ? -12 : 12}px)`}, {opacity: 1, transform: 'translateX(0)'}], options: {duration: 180, delay, easing}};
+  if (kind === 'confirm') return {frames: [{opacity: .75, transform: 'scale(.985)'}, {opacity: 1, transform: 'scale(1)'}], options: {duration: 240, easing}};
+  return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 160, easing}};
+}
+// Presentation owns no timers, requests or completion callbacks into business state.
+export function createPresentationMotion(document) {
+  const view = document.defaultView, preference = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const active = new Map(), signatures = new Map();
+  let disposed = false;
+  const allowed = new Set(['library', 'reference', 'review', 'sequence', 'assembly', 'duration-preview', 'notice', 'operation', 'upload-status', 'grok-status', 'grok-config-status', 'proposal-error', 'proposal-context', 'proposal-hint', 'late-proposal-context', 'review-status', 'assembly-status', 'assembly-proof', 'status-state']);
+  function stop() { for (const animation of active.values()) animation.cancel(); active.clear(); }
+  function preferenceChanged() { stop(); document.documentElement?.classList.toggle('motion-paused', disposed || Boolean(preference?.matches) || Boolean(document.hidden)); }
+  function play(node, kind = 'cue', options = {}) {
+    if (disposed || preference?.matches || document.hidden || !node || node.isConnected === false || typeof node.animate !== 'function' || node.closest?.('[hidden], [inert]')) return false;
+    // Transforming a fixed action's ancestor changes its containing block. Native
+    // media and editable controls also keep their browser-owned interaction surface.
+    if (node.matches?.('video, input, textarea, select, form, fieldset, .task-panel, .stage, .studio, body, .screen-actions') || node.querySelector?.('video, .screen-actions')) return false;
+    const focused = document.activeElement;
+    if (focused?.matches?.('input, textarea, select') && node.contains?.(focused)) return false;
+    active.get(node)?.cancel();
+    const spec = motionSpec(kind, options);
+    try {
+      const animation = node.animate(spec.frames, spec.options);
+      active.set(node, animation);
+      // A superseded/cancelled Animation rejects finished; only local cleanup follows.
+      Promise.resolve(animation.finished).catch(() => {}).finally(() => { if (active.get(node) === animation) active.delete(node); });
+      return true;
+    } catch { return false; }
+  }
+  function changed(channel, key, nodes, kind = 'cue', options = {}) {
+    if (!allowed.has(channel) || signatures.get(channel) === key) return false;
+    signatures.set(channel, key);
+    nodes.slice(0, 6).forEach((node, index) => play(node, kind, {...options, index}));
+    return true;
+  }
+  function enter(panel, heading, direction = 1) {
+    stop(); play(heading, 'enter', {direction});
+    for (const node of panel?.children || []) {
+      if (node.matches('.caption, .parent-label, .context-proof, .section-head, .sequence, .operation-note, .duration-readout, #generation-status')) play(node, 'enter', {direction});
+    }
+    if (panel?.dataset.screen === 'library') [...(panel.querySelector('.clip-list')?.children || [])].slice(0, 6).forEach((node, index) => play(node, 'enter', {direction, index}));
+  }
+  function busy(node, value) { if (node) { node.dataset.busy = String(Boolean(value)); node.setAttribute('aria-busy', String(Boolean(value))); } }
+  function destroy() {
+    disposed = true; preferenceChanged();
+    preference?.removeEventListener?.('change', preferenceChanged);
+    document.removeEventListener?.('visibilitychange', preferenceChanged);
+    view?.removeEventListener?.('resize', stop);
+  }
+  preference?.addEventListener?.('change', preferenceChanged);
+  document.addEventListener?.('visibilitychange', preferenceChanged);
+  view?.addEventListener?.('resize', stop);
+  preferenceChanged();
+  return {play, changed, enter, busy, stop, destroy, get activeCount() { return active.size; }, get channelCount() { return signatures.size; }};
+}
+
 export function startUI(document, client = createClient()) {
   const $ = id => document.getElementById(id);
+  const motion = createPresentationMotion(document);
+  let paintedKey = '', pendingDecision = null;
   let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0, assemblyEpoch = 0;
   let pointer = null, pointerError = null;
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
@@ -221,7 +282,7 @@ export function startUI(document, client = createClient()) {
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false});
   const TITLES = {library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme'};
-  function text(id, value) { $(id).textContent = value; }
+  function text(id, value) { const node = $(id); node.textContent = value; motion.changed(id, String(value ?? ''), [node]); }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
   const label = run => STATE_LABELS[run?.state] || 'Estado desconhecido';
@@ -263,7 +324,7 @@ export function startUI(document, client = createClient()) {
       message('duration-preview', `Solicitada ${secondsLabel(seconds)} s → ${frames} frames → ${secondsLabel(frames / 24)} s efetivos a 24 fps.`);
     } catch (error) { message('duration-preview', error.message, true); }
   }
-  function paintScreen({focus = false} = {}) {
+  function paintScreen({focus = false, direction = 1} = {}) {
     for (const panel of document.querySelectorAll('[data-screen]')) {
       const active = panel.dataset.screen === state.screen;
       panel.hidden = !active; panel.inert = !active;
@@ -279,13 +340,18 @@ export function startUI(document, client = createClient()) {
     if (state.screen === 'review') renderRun();
     if (state.screen === 'assembly') renderAssembly();
     if (focus) { $('screen-title').focus({preventScroll: true}); document.defaultView?.scrollTo({top: 0, behavior: 'instant'}); }
+    const key = `${state.screen}:${state.statusOnly}:${state.draftKey}:${state.selected?.id || ''}`;
+    if (key !== paintedKey) {
+      paintedKey = key;
+      motion.enter(document.querySelector(`[data-screen="${state.screen}"]`), document.querySelector('[data-motion="heading"]'), direction);
+    }
   }
-  function navigate(screen, {remember = true, focus = true} = {}) {
+  function navigate(screen, {remember = true, focus = true, direction = 1} = {}) {
     if (!TITLES[screen] || (screen === 'assembly' && !state.config?.assembly_enabled)) return;
     saveDraft();
     if (remember && screen !== state.screen) state.trail.push(state.screen);
     state.screen = screen;
-    paintScreen({focus}); controls();
+    paintScreen({focus, direction}); controls();
     const view = document.defaultView;
     // A view pointer is never a persisted command. Preserve the assembly UUID and hash.
     if (view?.history) {
@@ -293,7 +359,7 @@ export function startUI(document, client = createClient()) {
       view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
     }
   }
-  function back() { const screen = state.trail.pop() || 'library'; navigate(screen, {remember: false}); }
+  function back() { const screen = state.trail.pop() || 'library'; navigate(screen, {remember: false, direction: -1}); }
   function controls() {
     const run = state.selected;
     // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
@@ -338,6 +404,7 @@ export function startUI(document, client = createClient()) {
     $('status-review').disabled = !state.pendingRun || state.busy;
     $('previous').disabled = state.offset === 0;
     $('next').disabled = state.offset + state.limit >= state.total;
+    for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
     if (state.busy || state.uploadBusy || !state.config || (mode === 'continue' && state.selected?.state !== 'accepted')) return;
@@ -513,6 +580,7 @@ export function startUI(document, client = createClient()) {
     }
     text('library-count', `${state.total} blocos`);
     text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
+    motion.changed('library', `${state.offset}:${state.items.map(run => `${run.id}:${run.state}`).join('|')}`, [...list.children], 'enter');
     controls();
   }
   function renderSequence() {
@@ -528,10 +596,12 @@ export function startUI(document, client = createClient()) {
       button.addEventListener('click', async () => { await select(block.id); if (state.selected?.id === block.id) navigate('review'); }); li.append(button); $('sequence').append(li); elapsed += seconds;
     }
     text('sequence-message', blocks.length ? `${blocks.length} bloco(s) nesta cadeia · tempos de cada bloco, sem montagem automática.` : 'A cadeia segue os pais do bloco, sem misturar ramificações.');
+    motion.changed('sequence', blocks.map(block => `${block.id}:${block.state}`).join('|'), [$('sequence').querySelector('[aria-current="true"] .shot-number')], 'confirm');
   }
   function renderRun() {
     const run = state.selected;
     text('run-state', label(run));
+    motion.changed('review', `${run?.id}:${run?.state}`, [$('run-state')], ['accepted', 'rejected'].includes(run?.state) ? 'confirm' : 'cue');
     const summary = state.items.find(item => item.id === run?.id);
     const block = state.sequence?.blocks?.find(item => item.id === run?.id);
     const url = playableURL(run, summary, block);
@@ -557,7 +627,7 @@ export function startUI(document, client = createClient()) {
     text('reference-path', selected ? `${selected.source_root} / ${selected.path}` : 'Identidade original indisponível');
     const url = imageURL(item?.image_url);
     $('reference-preview').hidden = !url;
-    if (url) $('reference-preview').src = url; else $('reference-preview').removeAttribute('src');
+    if (url) { if ($('reference-preview').getAttribute('src') !== url) $('reference-preview').src = url; } else $('reference-preview').removeAttribute('src');
   }
   async function loadReferences() {
     if (!state.config?.reference_library) return;
@@ -676,6 +746,7 @@ export function startUI(document, client = createClient()) {
   async function decide(action) {
     if (state.screen !== 'review' || state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
     ++state.epoch; ++libraryEpoch;
+    pendingDecision = {action, id: state.selected.id};
     state.busy = true; controls();
     const id = state.selected.id;
     try {
@@ -685,7 +756,7 @@ export function startUI(document, client = createClient()) {
     } catch (error) {
       if (!(error instanceof HTTPError) || error.status >= 500) state.uncertain = true;
       message('review-status', `Decisão não confirmada: ${error.message}. Atualize os metadados antes de agir; não repita uma decisão incerta.`, true);
-    } finally { state.busy = false; controls(); drainChanges(); }
+    } finally { pendingDecision = null; state.busy = false; controls(); drainChanges(); }
   }
   async function generate(event) {
     event.preventDefault();
@@ -741,6 +812,8 @@ export function startUI(document, client = createClient()) {
   $('assemble').addEventListener('click', assemble);
   $('assembly-refresh').addEventListener('click', () => readAssembly());
   $('assembly-result').addEventListener('toggle', renderAssembly);
+  $('reference-preview').addEventListener('load', () => { const image = $('reference-preview'); if (image.complete && image.naturalWidth && image.currentSrc === image.src) motion.changed('reference', image.currentSrc, [image]); });
+  for (const details of document.querySelectorAll('details')) details.addEventListener('toggle', () => { if (details.open) motion.play(details.querySelector('summary')); });
   $('assembly-player').addEventListener('error', () => message('assembly-status', 'O vídeo montado não carregou. Use Reler montagem para verificar a publicação, sem novo POST.', true));
   $('grok-detail').addEventListener('click', detailScene);
   $('grok-save').addEventListener('click', saveEditor);
@@ -756,7 +829,7 @@ export function startUI(document, client = createClient()) {
   $('reject').addEventListener('click', () => decide('reject'));
   $('create-form').addEventListener('submit', generate);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
-  document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('pagehide', () => { motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', () => {
     const screen = new URL(document.defaultView.location.href).searchParams.get('screen');
     if (TITLES[screen] && !(['review', 'assembly'].includes(screen) && !state.selected)) navigate(screen, {remember: false});
