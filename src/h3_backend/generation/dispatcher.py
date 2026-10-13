@@ -8,6 +8,7 @@ import math
 import os
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from fractions import Fraction
 from pathlib import Path
 from time import monotonic
@@ -121,6 +122,8 @@ class RunService:
         self._lock = asyncio.Lock()
         self._active: str | None = None
         self._task: asyncio.Task | None = None
+        self._cpu_active: str | None = None
+        self._cpu_task: asyncio.Task | None = None
         self._closing = False
         self.watcher = None
         self._candidates = asyncio.Queue(maxsize=64)
@@ -128,6 +131,7 @@ class RunService:
 
     async def startup(self) -> None:
         from ..infrastructure.watcher import FileWatcher
+        from .assembly import restore_interrupted
 
         self.store.hold_runtime()
         try:
@@ -135,6 +139,7 @@ class RunService:
             self.watcher.start()
             # Registration precedes restore. Initial scans never submit existing requests.
             self.store.restore()
+            restore_interrupted(self.settings.project_root)
             self._observer_task = asyncio.create_task(self._observe_requests(), name="h3-file-hints")
         except Exception:
             if self.watcher:
@@ -146,7 +151,7 @@ class RunService:
         if self._closing or self._active == run_id:
             return
         try:
-            self._candidates.put_nowait((run_id, self._active is not None or self._lock.locked()))
+            self._candidates.put_nowait((run_id, self._active is not None or self._cpu_active is not None or self._lock.locked()))
         except asyncio.QueueFull:
             self._reject_hint(run_id, "Request hint capacity exceeded; no automatic replay")
 
@@ -179,6 +184,9 @@ class RunService:
         if self._observer_task:
             self._observer_task.cancel()
             await asyncio.gather(self._observer_task, return_exceptions=True)
+        if self._cpu_task and not self._cpu_task.done():
+            self._cpu_task.cancel()
+            await asyncio.gather(self._cpu_task, return_exceptions=True)
         if self._task and not self._task.done():
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -219,8 +227,42 @@ class RunService:
             raise FileNotFoundError(path)
         return path
 
+    @asynccontextmanager
+    async def cpu_slot(self, operation_id: str):
+        """One assembly owns the same global budget; this is not another job dispatcher."""
+        owner = asyncio.current_task()
+        async with self._lock:
+            if self._closing or self._active is not None or self._cpu_active is not None:
+                raise Conflict("Only one backend job may be active")
+            if self.memory_available() < self.settings.minimum_available_bytes:
+                raise Conflict("Available host RAM is below 1.5 GiB; no assembly was admitted")
+            self._cpu_active, self._cpu_task = operation_id, owner
+        stop = asyncio.Event()
+
+        async def guard_ram():
+            while not stop.is_set():
+                if self.memory_available() < self.settings.minimum_available_bytes:
+                    owner.cancel("Available host RAM fell below 1.5 GiB during CPU assembly")
+                    return
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.settings.memory_check_interval)
+                except TimeoutError:
+                    pass
+
+        guard = asyncio.create_task(guard_ram(), name=f"h3-cpu-ram-{operation_id}")
+        try:
+            yield
+        finally:
+            stop.set()
+            await asyncio.gather(guard, return_exceptions=True)
+            async with self._lock:
+                if self._cpu_task is owner:
+                    self._cpu_active = self._cpu_task = None
+
     async def decide(self, run_id: str, accepted: bool) -> Run:
         async with self._lock:
+            if self._cpu_active is not None:
+                raise Conflict("Review is frozen while an assembly owns the global slot")
             run = self.store.get(run_id)
             if run.state != "ready_for_review":
                 raise Conflict(
@@ -256,7 +298,7 @@ class RunService:
                 raise ValueError("Pipeline belongs to another dispatcher")
             if pipe._sealed or pipe._submitting:
                 raise Conflict("Pipeline may only be submitted once")
-            if self._closing or self._active is not None:
+            if self._closing or self._active is not None or self._cpu_active is not None:
                 raise Conflict("Only one backend job may be active")
             if self.memory_available() < self.settings.minimum_available_bytes:
                 raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")
@@ -318,7 +360,7 @@ class RunService:
             raise Conflict("Queued manifest already contains execution evidence; no replay")
         run = self.store.request(run_id)
         self._hydrate(run)
-        if self._closing or self._active is not None:
+        if self._closing or self._active is not None or self._cpu_active is not None:
             raise Conflict("Only one backend job may be active; request was not queued for replay")
         if self.memory_available() < self.settings.minimum_available_bytes:
             raise Conflict("Available host RAM is below 1.5 GiB; no job was submitted")

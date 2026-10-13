@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from .generation.assembly import router as assembly_router
 from .generation.dispatcher import Conflict, RunService
 from .generation.i2v import router as i2v_router
 from .generation.models import CONTINUATION_PROMPT, DEFAULT_PROMPT, Run, Settings
@@ -55,6 +56,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
 
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
+    app.include_router(assembly_router)
     if service is not None:
         app.state.service = service
 
@@ -111,7 +113,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
             "reference_image": "dance_reference.png", "duration_seconds": 2.3,
             "workflow_output_profile": current.workflow_output_profile,
             "filesystem_events": getattr(backend(), "watcher", None) is not None,
-            "reference_library": True, "assembly_enabled": False,
+            "reference_library": True, "assembly_enabled": True,
         }
 
     @app.get("/runs")
