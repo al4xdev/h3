@@ -1,122 +1,135 @@
-# Grok: editor de texto independente
+# Grok: contexto visual, saída somente texto
 
-`src/h3_backend/grok.py` monta a operação independente na API H3. A UI permite
-descrever uma ideia simples e receber uma instrução editável. Não há conversa
-persistente nem ligação com geração de vídeo. O adaptador técnico OAuth
-foi portado de `alex-tavern-plugins/plugins/grok_supergrok/oauth.py`; não importa
-Tavern nem reutiliza suas credenciais.
+`src/h3_backend/grok.py` é uma operação independente da geração de vídeo.
+Recebe a ideia, o system prompt e uma referência opcional própria; devolve texto
+editável. Não gera/edita imagens, cria runs, aceita revisões, continua ou monta vídeos.
+Usar a proposta e **Gerar** continuam ações explícitas separadas. O frontend deve
+capturar a referência com o rascunho e separar respostas atrasadas, nunca sobrescrever
+uma ideia nova. Texto é não confiável: `.value`/`textContent`, não HTML.
 
-## Usar no front
+## Modelo fixo e configuração no PC
 
-Escreva na instrução da cena, por exemplo: **“ela dá um salto e o vestido fica
-vermelho”**, e clique **Detalhar com Grok**. O texto retornado permanece editável.
-Confira e só então clique **Gerar**: detalhar ou usar uma proposta nunca envia
-vídeo, revisão ou continuação. Grok não recebe imagens, paths de runs ou parâmetros
-nativos. Não edita imagens.
+Pin aprovado: **`grok-4.20-0309-non-reasoning`**, sem alias `latest`.
+O [card oficial](https://docs.x.ai/developers/models/grok-4.20-non-reasoning.md)
+publica text+image → text, sem reasoning, contexto de 1 milhão de tokens.
+Isso **não comprova elegibilidade, visão, cota ou cobrança do grant da conta**;
+nesta implementação não houve inferência/autenticação/catálogo real.
 
-Em **Configurar Grok**, altere o system prompt que explica a tarefa e, se necessário,
-informe um **ID real do modelo**. Vazio no pedido usa `H3_GROK_MODEL`; o app nunca
-seleciona automaticamente o primeiro catálogo. A autenticação continua separada,
-pelos comandos abaixo. Não cole tokens ou senhas nos campos do editor.
+- `.data/grok/editor.json`, sob `H3_PROJECT_ROOT`, guarda `{system_prompt,model}`.
+  É separado de `oauth.json`; não coloque segredos nesses campos.
+- `seed_editor(root)` é uma ação administrativa explícita, nunca import/startup/GET.
+  Cria somente se ausente, com system prompt padrão e o pin acima: temp exclusivo
+  0600 → fsync → link no-clobber → remover seu temp → fsync do diretório.
+  Configuração existente válida é retornada intacta, inclusive se seu modelo divergir;
+  o administrador deve conferir a divergência, não substituí-la silenciosamente.
+- `GET /grok/editor` é inerte. Sem arquivo, retorna o system padrão e
+  `H3_GROK_MODEL`, sem criar diretórios. Corrupção/links/inacessibilidade retornam 409.
+- `POST /grok` relê a configuração. Modelo persistido **não vazio** é autoridade;
+  request com outro modelo retorna `model_fixed`/409 antes de qualquer rede.
+  Sem pin persistido, mantém compatibilidade: request.model → ambiente capturado
+  no startup. Sem nenhum modelo retorna 400, nunca escolhe o primeiro catálogo.
+- `PUT /grok/editor` mantém o pin existente não vazio. Permite system prompt novo
+  com modelo omitido ou idêntico; modelo diferente ou vazio retorna 409 sem alteração.
+  Trocar um pin exige decisão administrativa explícita no JSON local, não o editor
+  público. Config legacy ausente/vazia ainda permite seu contrato antigo de gravação.
+- System prompt: 1..100000 caracteres, não vazio; modelo: até 256 caracteres.
+  JSON tem limite de 1 MiB e não aceita campos extras. Config inválida existente
+  nunca é apagada/substituída para esconder evidência. Diretórios/arquivo são no-follow,
+  arquivo regular, dono local e link único. Gravação normal é atômica/fsync.
 
-- `GET /grok/editor` retorna `{system_prompt,model}`. Sem arquivo, usa o system
-  padrão de cena e o modelo do ambiente, **sem rede, auth ou criação de arquivos**.
-- **Salvar configuração no PC** envia `PUT /grok/editor` com os mesmos dois campos.
-  Salva somente `.data/grok/editor.json`, sob `H3_PROJECT_ROOT`, independentemente
-  da configuração de vídeo. Não toca em `oauth.json`.
-- System prompt não vazio: até 100000 caracteres. Modelo: string até 256, vazio
-  permitido. Campos extras, JSON inválido e body acima de 1 MiB são rejeitados.
-  Arquivo inválido/inacessível retorna 409 e não é apagado/substituído para esconder
-  corrupção. Paths fixos usam diretórios/arquivo sem symlink e arquivo regular;
-  publicação é temp exclusivo → fsync → replace → fsync do diretório.
-- Padrão preserva ação, roupa, pose, ordem e idioma; pede somente a cena em até
-  12000 caracteres, sem inventar identidade nem ajustar seed/duração/resolução/nodes.
-  Templates/presets/benchmark nativos não são alterados.
-- Se o rascunho, modo, seleção ou system/model mudar enquanto a resposta vem,
-  a proposta fica separada para **Usar esta proposta**, sem sobrescrever o rascunho
-  novo. Texto recebido usa value/textContent, nunca HTML.
-- Resposta vazia/inválida/acima de 12000 não é truncada nem aplicada. Erro mantém
-  o rascunho. Duplo clique envia apenas um POST; resultado incerto bloqueia novo
-  pedido Grok nesta sessão, sem retry. Nunca contorne o bloqueio para repetir sem
-  verificar a chamada. Isso não limpa uma admissão nativa incerta.
+## HTTP: ideia e referência selecionada
 
-Os campos de configuração ficam fora do formulário de geração: Enter no ID do
-modelo não dispara vídeo. Abertura da página só lê a configuração local; não
-inicia inferência, autenticação, catálogo remoto ou renovação OAuth. SSE/reconexão
-não chama Grok.
+Exemplo de body de `POST /grok` (somente no clique explícito de detalhar):
 
-## Autenticar uma vez
+```json
+{
+  "system_prompt": "Detalhe a ideia sem inventar ações ou parâmetros.",
+  "prompt": "ela dá um salto e o vestido fica vermelho",
+  "reference": {"source_root": "assets", "path": "dance_reference.png"}
+}
+```
 
-Com a API ativa em `http://127.0.0.1:8010` (substitua a porta se necessário):
+`reference` é opcional para compatibilidade text-only. `model` é opcional e não
+pode divergir do pin persistido. Resposta: `{"text":"...","model":"..."}`.
+O endpoint recebe prompt até 100000 caracteres; o campo de cena/UI limita 12000 e
+rejeita saída maior sem truncar. O system prompt padrão pede somente a instrução da
+cena no idioma do usuário, sem inventar identidade ou alterar parâmetros nativos.
+
+O helper `infrastructure/grok_image.py` resolve somente bytes públicos próprios:
+
+- `assets`: path relativo público contido em `assets/`, sem segmentos privados.
+- `inputs`: `<UUID>/original.png|jpg|jpeg`, sob `.data/inputs`, com publicação
+  `metadata.json` própria e id/source_root/path/SHA concordantes; `.part` rejeitado.
+  Inputs colocados manualmente sem prova publicada não são enviados ao Grok.
+- `runs`: `.data/runs/<UUID>/initial_frame.png|last_frame.png`. Exige manifest com
+  id correto e referência explícita de imagem para esse path/SHA, ou inventário de
+  migração completo. Alias `runs/<UUID>/...` só com recibo e verified.json idênticos,
+  root/destination/run_ids/inventory_sha256 e SHA do frame comprovados. Não importa
+  Store/models/dispatcher/worker nem lê decisões para autorizar geração.
+  Frame sem prova explícita é rejeitado, mesmo se listado na biblioteca antiga.
+
+Todos os componentes de path são abertos por descriptors no-follow; não aceita
+URLs/absolutos/traversal/links/FIFO/arquivo estrangeiro/temporário. O arquivo final
+é regular, dono local, link único e até **20 MiB**. Cópia e SHA usam buffers de
+48 KiB; identidade/tamanho/mtime/ctime da fonte e prova são conferidos novamente.
+Um snapshot privado temporário no filesystem de `.dumps/grok-editor/` congela os
+bytes antes da validação/submissão e é fechado/removido em erro/cancelamento.
+Os bytes originais e metadados publicados não são escritos ou alterados.
+
+FFprobe/FFmpeg externos confirmam JPEG/PNG real e uma única imagem completa.
+Mantém guard operacional local de 16 megapixels; não é um máximo documentado do
+modelo. WebP, imagem maior que 20 MiB, corrupção/animação ou prova ausente retornam
+`invalid_reference`/400 **antes de auth/catálogo/inferência**. Não converte, redimensiona
+ou recomprime silenciosamente; o limite de 32 MiB da geração permanece intacto.
+Python não decodifica pixels nem guarda toda imagem/base64 no heap.
+
+A [documentação oficial de imagem](https://docs.x.ai/developers/model-capabilities/images/understanding.md)
+especifica JPEG/PNG, até 20 MiB e o contrato Responses:
+
+```json
+{"role":"user","content":[
+  {"type":"input_image","image_url":"data:image/png;base64,..."},
+  {"type":"input_text","text":"ideia"}
+]}
+```
+
+`image_url` é uma **string flat**, não o objeto `{url:...}` do Chat Completions.
+Não publica mídia na Internet nem pede que xAI acesse URL localhost.
+O body sai por `httpx content=`/async JSON stream, com prefixo/sufixo limitados e
+base64 incremental de blocos divisíveis por três. `Content-Length` inclui a expansão
+`4*ceil(bytes/3)`; uma imagem de 20 MiB ocupa 27.962.028 bytes base64 mais o envelope.
+Não usa `read_bytes`, base64 completa ou `json=` com mídia inteira.
+
+## Provider e autenticação permanecem separados
+
+Somente a ação explícita de editar usa `https://api.x.ai/v1/responses`, após validar
+modelo no catálogo do grant pelo adaptador OAuth existente (cache curto pode evitar
+GET remoto; renovação pode acontecer nesse clique). Não há atividade remota em
+import/startup/GET/config save/upload/SSE/reload. Mantém `store=false`, `stream=false`,
+8192 tokens de saída, timeout de 120 s e resposta limitada a 2 MiB. Sem retry de
+inferência, fallback de endpoint/API key, histórico ou parâmetros de reasoning.
+Erro é sanitizado e mantém rascunho; não repetir resultado incerto às cegas.
+As rotas retornam `Cache-Control: no-store`.
+
+O OAuth foi portado do Alex Tavern, independente do editor. Credenciais ficam em
+`.data/grok/oauth.json`, 0600/diretório 0700 e plaintext local: proteja computador e
+backups. Não use os dois projetos simultaneamente para renovar o mesmo grant rotativo.
+Não leia/exiba/copie credenciais para configurar o editor. Login não comprova direito
+à integração de terceiros nem que inferência esteja incluída na assinatura.
+
+Se o dono decidir autenticar, com a API **já ativa**, ação explícita em fish:
 
 ```fish
 curl -sS -X POST http://127.0.0.1:8010/grok/auth/start
 ```
 
-Abra `verification_uri` no navegador, entre **diretamente na xAI** e informe
-`user_code`. Não envie senha, cookies ou tokens ao H3. O backend acompanha o
-Device Flow nos intervalos exigidos pela xAI; o frontend H3 não participa.
-Consulte a conclusão usando o `flow_id` retornado:
+Abra `verification_uri` diretamente na xAI e informe `user_code`. Nunca envie senha,
+cookies ou tokens ao H3. POST `/grok/auth/flow` com `{"flow_id":"..."}` consulta o fluxo;
+`/grok/auth/cancel` cancela esse mesmo fluxo. `/grok/auth/status` e `/grok/auth/models`
+são operações explícitas, não descoberta automática de página.
 
-```fish
-curl -sS -X POST http://127.0.0.1:8010/grok/auth/flow \
-  -H 'Content-Type: application/json' -d '{"flow_id":"COLE_O_FLOW_ID"}'
-curl -sS -X POST http://127.0.0.1:8010/grok/auth/status
-curl -sS -X POST http://127.0.0.1:8010/grok/auth/models
-```
-
-As credenciais ficam em `.data/grok/oauth.json` no projeto (ou sob
-`H3_PROJECT_ROOT`): arquivo 0600, diretório 0700, escrita atômica e gitignored.
-São plaintext local: proteja o computador e seus backups. A pedido do dono,
-o grant existente do Alex Tavern foi importado sem alterar a fonte ou acessar a
-xAI. Não use os dois projetos simultaneamente para renovar esse mesmo grant:
-refresh rotativo em um pode exigir reautenticação no outro. Reiniciar preserva a
-conexão; a renovação ocorre quando necessário. Falha ambígua na renovação de um
-grant rotativo exige autenticar novamente, sem reutilizar o grant anterior.
-Para cancelar um login pendente, POST `/grok/auth/cancel` com o mesmo `flow_id`.
-
-## Enviar somente system_prompt e prompt
-
-Escolha um ID real do catálogo e configure o modelo ao iniciar a API:
-
-```fish
-env H3_GROK_MODEL=ID_DO_CATALOGO uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
-```
-
-```fish
-curl -sS -X POST http://127.0.0.1:8010/grok \
-  -H 'Content-Type: application/json' \
-  -d '{"system_prompt":"Responda em português, de forma objetiva.","prompt":"Olá!"}'
-```
-
-Resposta: `{"text":"...","model":"ID_DO_CATALOGO"}`. `system_prompt` é opcional.
-Se preferir não configurar ambiente, inclua `"model":"ID_DO_CATALOGO"` no JSON.
-Não selecionamos automaticamente o primeiro modelo ou um alias possivelmente
-incompatível. Campos extras são rejeitados.
-
-A chamada usa somente `https://api.x.ai/v1/responses`, com `store=false`,
-`stream=false` e limite de saída de 8192 tokens. Não há retry de inferência,
-fallback de endpoint/API key, histórico ou parâmetros de raciocínio adicionados.
-Timeout/erro retorna falha sanitizada; um resultado incerto não deve ser repetido
-cegamente. As rotas retornam `Cache-Control: no-store`.
-
-## Limites
-
-OAuth SuperGrok é experimental, usa o client público observado no plugin e não
-comprova direito a integração de terceiros. O consentimento pode exibir Grok
-Build. Verifique elegibilidade, cota e cobrança da conta: login não garante que
-inferência esteja incluída na assinatura ou livre de cobrança adicional.
-Mantenha a API local/rede confiável: ela não possui autenticação de acesso remoto.
-O bloqueio same-origin existente impede mutações de outras origens no navegador,
-mas não substitui autenticação para clientes HTTP diretos.
-
-Validação nesta implementação: testes offline com HTTP falso e configuração em
-raízes temporárias isoladas; nenhuma chamada real à xAI, autenticação da conta ou
-geração GPU realizada. A suíte focada config/provider/OAuth passa 56 testes, com
-22 novos casos de editor: default inerte, persistência/restart, limites Unicode,
-JSON/unknown keys, corrupção, symlinks e falha atômica preservando o arquivo antigo.
-A UI tem 18 contratos Node e browser com todas as requests interceptadas, incluindo
-Grok, PUT de configuração e geração fake; mobile touch 393×852/2x e regressão de
-12 cards longos em 1440/393/320. Evidências locais novas em `.dumps/tests/ui-grok/`
-e `.dumps/tests/reports/grok_editor.json`; integração real read-only é gate separado
-do principal, não prova de chamada ao provider ou de qualidade da geração.
+API local/rede confiável: same-origin não substitui autenticação para clientes HTTP
+diretos. Validação deste backend é fake/CPU em raízes temporárias: precedência do pin,
+seed no-clobber, shape Responses/base64/limites, ownership/hash/races/links/cancelamento,
+sem replay ou imports de geração. Integração UI e elegibilidade real são gates separados;
+não foram iniciados servidor de produção, provider ou GPU para validar este código.

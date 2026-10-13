@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 from stat import S_ISREG
 from uuid import uuid4
@@ -15,6 +15,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .infrastructure.grok_image import EditorReference, image_json_body, owned_image
 from .infrastructure.grok_oauth import BASE_URL, OAuthError, OAuthManager
 
 
@@ -23,6 +24,7 @@ class PromptRequest(BaseModel):
     system_prompt: str = Field(default="", max_length=100_000, strict=True)
     prompt: str = Field(min_length=1, max_length=100_000, strict=True)
     model: str | None = Field(default=None, min_length=1, max_length=256, strict=True)
+    reference: EditorReference | None = None
 
     @field_validator("prompt", "model")
     @classmethod
@@ -41,6 +43,7 @@ DEFAULT_EDITOR_SYSTEM = (
     "em até 12000 caracteres. Você edita texto: não edita imagens nem gera vídeos."
 )
 EDITOR_MAX_BYTES = 1024 * 1024
+FIXED_EDITOR_MODEL = "grok-4.20-0309-non-reasoning"
 
 
 class EditorConfig(BaseModel):
@@ -62,8 +65,15 @@ def editor_directory(root: Path, *, create: bool = False):
     # separate from credentials, even when an on-disk entry is replaced by a link.
     descriptors = []
     try:
-        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        absolute = root.absolute()
+        if ".." in absolute.parts:
+            raise ValueError("Project root must not contain traversal")
+        directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         descriptors.append(directory)
+        for name in absolute.parts[1:]:
+            directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=directory)
+            descriptors.append(directory)
         for name in (".data", "grok"):
             if create:
                 try:
@@ -95,7 +105,8 @@ def read_editor_file(directory: int | None) -> EditorConfig | None:
         return None
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > EDITOR_MAX_BYTES:
+        if (not S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_size > EDITOR_MAX_BYTES):
             raise ValueError("Invalid editor configuration file")
         raw = stream.read(EDITOR_MAX_BYTES + 1)
     if len(raw) > EDITOR_MAX_BYTES:
@@ -103,17 +114,28 @@ def read_editor_file(directory: int | None) -> EditorConfig | None:
     return EditorConfig.model_validate_json(raw)
 
 
-def read_editor(root: Path) -> EditorConfig:
+def persisted_editor(root: Path) -> EditorConfig | None:
     with editor_directory(root) as directory:
-        value = read_editor_file(directory)
-    return value or EditorConfig(system_prompt=DEFAULT_EDITOR_SYSTEM,
-                                 model=os.getenv("H3_GROK_MODEL", ""))
+        return read_editor_file(directory)
+
+
+def read_editor(root: Path) -> EditorConfig:
+    return persisted_editor(root) or EditorConfig(system_prompt=DEFAULT_EDITOR_SYSTEM,
+                                                  model=os.getenv("H3_GROK_MODEL", ""))
+
+
+class EditorModelConflict(ValueError):
+    """The public editor can change instructions, not a persisted model pin."""
 
 
 def save_editor(root: Path, payload: EditorConfig) -> EditorConfig:
     with editor_directory(root, create=True) as directory:
         # A corrupt existing configuration is evidence, not permission to erase it.
-        read_editor_file(directory)
+        existing = read_editor_file(directory)
+        if existing and existing.model:
+            if "model" in payload.model_fields_set and payload.model != existing.model:
+                raise EditorModelConflict("The persisted editor model is fixed")
+            payload = payload.model_copy(update={"model": existing.model})
         temporary = f".editor-{uuid4()}.part"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=directory)
@@ -126,6 +148,41 @@ def save_editor(root: Path, payload: EditorConfig) -> EditorConfig:
             os.fsync(directory)
         finally:
             # Only this invocation's verified directory-local temporary is removed.
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+    return payload
+
+
+def seed_editor(root: Path) -> EditorConfig:
+    """Explicit administrative action only: publish the approved pin without clobbering."""
+    payload = EditorConfig(system_prompt=DEFAULT_EDITOR_SYSTEM, model=FIXED_EDITOR_MODEL)
+    with editor_directory(root, create=True) as directory:
+        existing = read_editor_file(directory)
+        if existing is not None:
+            return existing
+        temporary = f".editor-{uuid4()}.part"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload.model_dump_json().encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, "editor.json", src_dir_fd=directory, dst_dir_fd=directory,
+                        follow_symlinks=False)
+            except FileExistsError:
+                # Another explicit writer won; preserve and validate their exact config.
+                os.unlink(temporary, dir_fd=directory)
+                value = read_editor_file(directory)
+                if value is None:
+                    raise ValueError("Editor configuration disappeared during publication")
+                return value
+            os.unlink(temporary, dir_fd=directory)
+            os.fsync(directory)
+        finally:
             try:
                 os.unlink(temporary, dir_fd=directory)
             except FileNotFoundError:
@@ -171,32 +228,64 @@ def extract_text(value: object) -> str:
 
 
 class Grok:
-    def __init__(self, manager: OAuthManager, model: str = ""):
+    def __init__(self, manager: OAuthManager, model: str = "", *, root: Path | None = None):
         self.manager = manager
         self.model = model
+        self.root = root
 
     async def complete(self, payload: PromptRequest) -> dict:
         model = payload.model or self.model
+        try:
+            config = await asyncio.to_thread(persisted_editor, self.root) if self.root else None
+        except (ValueError, OSError):
+            raise OAuthError("editor_storage_error", "Editor configuration is invalid or inaccessible.",
+                             409) from None
+        if config and config.model:
+            if payload.model is not None and payload.model != config.model:
+                raise OAuthError("model_fixed", "The persisted editor model cannot be overridden.",
+                                 409)
+            model = config.model
         if not model:
             raise OAuthError("model_required", "Set H3_GROK_MODEL or provide a catalog model.", 400)
+        if payload.reference is not None:
+            if self.root is None:
+                raise OAuthError("invalid_reference", "No owned image root is configured.", 400)
+            async with AsyncExitStack() as stack:
+                try:
+                    snapshot, mime = await stack.enter_async_context(
+                        owned_image(self.root, payload.reference))
+                except (ValueError, OSError, TimeoutError):
+                    raise OAuthError("invalid_reference", "Reference is unowned, changed, corrupt or "
+                                     "unsupported; use a published JPEG/PNG up to 20 MiB.", 400) from None
+                # Provider/auth failures are not image-validation errors.
+                body, length = image_json_body(model, payload.system_prompt, payload.prompt,
+                                               snapshot, mime)
+                return await self._submit(model, {"content": body}, length=length)
+        messages = []
+        if payload.system_prompt:
+            messages.append({"role": "system", "content": payload.system_prompt})
+        messages.append({"role": "user", "content": payload.prompt})
+        return await self._submit(model, {"json": {
+            "model": model, "input": messages, "max_output_tokens": 8192,
+            "stream": False, "store": False,
+        }})
+
+    async def _submit(self, model: str, body: dict, *, length: int | None = None) -> dict:
         async with self.manager.client_factory() as client:
             tokens, models = await self.manager.authorized_models(client, recover=False)
             if not any(row["id"] == model for row in models):
                 raise OAuthError("model_required", "Choose a model from /grok/auth/models.", 400)
-            messages = []
-            if payload.system_prompt:
-                messages.append({"role": "system", "content": payload.system_prompt})
-            messages.append({"role": "user", "content": payload.prompt})
+            headers = {"Authorization": f"Bearer {tokens.access}",
+                       "User-Agent": "H3-SuperGrok/0.1"}
+            if length is not None:
+                headers.update({"Content-Type": "application/json", "Content-Length": str(length)})
             # A rejected or uncertain inference is never replayed automatically.
             try:
                 async with (
                     asyncio.timeout(120),
                     client.stream(
                         "POST", f"{BASE_URL}/responses",
-                        headers={"Authorization": f"Bearer {tokens.access}",
-                                 "User-Agent": "H3-SuperGrok/0.1"},
-                        json={"model": model, "input": messages, "max_output_tokens": 8192,
-                              "stream": False, "store": False},
+                        headers=headers, **body,
                         timeout=120, follow_redirects=False,
                     ) as response,
                 ):
@@ -225,7 +314,7 @@ async def grok_lifespan(app: FastAPI):
     # No credential or network I/O at import. Storage is independent of video state.
     root = Path(os.getenv("H3_PROJECT_ROOT", str(Path(__file__).resolve().parents[2])))
     grok = Grok(OAuthManager(root / ".data" / "grok" / "oauth.json"),
-                os.getenv("H3_GROK_MODEL", ""))
+                os.getenv("H3_GROK_MODEL", ""), root=root)
     app.state.grok = grok
     app.state.grok_editor_root = root
     app.state.grok_editor_lock = asyncio.Lock()
@@ -272,6 +361,8 @@ async def update_editor_config(request: Request):
         async with request.app.state.grok_editor_lock:
             value = await asyncio.to_thread(save_editor, request.app.state.grok_editor_root, payload)
         return reply(value.model_dump())
+    except EditorModelConflict:
+        return reply({"error": "model_fixed", "detail": "The persisted editor model is fixed."}, 409)
     except (ValueError, OSError):
         return reply({"error": "editor_storage_error",
                       "detail": "Editor configuration could not be saved; inspect local configuration."}, 409)
