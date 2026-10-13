@@ -464,6 +464,62 @@ export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   if (kind === 'confirm') return {frames: [{opacity: .75, transform: 'scale(.985)'}, {opacity: 1, transform: 'scale(1)'}], options: {duration: 480, easing}};
   return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 320, easing}};
 }
+export function createLoadingScreen(document) {
+  const view = document.defaultView, reduced = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const panel = document.getElementById('loading-screen');
+  const title = document.getElementById('loading-title'), detail = document.getElementById('loading-detail'), close = document.getElementById('loading-back');
+  const background = [document.querySelector('main'), document.querySelector('.topbar'), document.querySelector('.skip')].filter(Boolean);
+  let active = null, animation = null, previousInert = [], disposed = false;
+  function stopMotion() { animation?.cancel(); animation = null; if (!active) panel.hidden = true; }
+  function animate(leaving = false) {
+    stopMotion();
+    if (disposed || reduced?.matches || document.hidden || typeof panel.animate !== 'function') { if (leaving) panel.hidden = true; return; }
+    panel.hidden = false;
+    let current;
+    try { current = panel.animate(leaving ? [{opacity: 1, transform: 'translateX(0)'}, {opacity: 0, transform: 'translateX(-12px)'}] : [{opacity: 0, transform: 'translateX(12px)'}, {opacity: 1, transform: 'translateX(0)'}], {duration: 400, easing: 'cubic-bezier(.2,.8,.2,1)'}); }
+    catch { if (leaving) panel.hidden = true; return; }
+    animation = current;
+    Promise.resolve(current.finished).catch(() => {}).finally(() => { if (animation === current) { animation = null; if (leaving && !active) panel.hidden = true; } });
+  }
+  function end(ticket, {cancel = false, motion = true} = {}) {
+    if (!active || active !== ticket) return;
+    const origin = active;
+    active = null;
+    for (const [node, inert] of previousInert) node.inert = inert;
+    previousInert = [];
+    panel.inert = true; panel.setAttribute('aria-busy', 'false'); panel.classList.add('loading-leaving');
+    if (cancel) origin.onCancel?.();
+    if (!disposed && !document.hidden) {
+      const focused = cancel && origin.focus?.isConnected && !origin.focus.closest?.('[hidden], [inert]') ? origin.focus : document.getElementById('screen-title');
+      focused?.focus?.({preventScroll: true});
+    }
+    if (motion) animate(true); else { stopMotion(); panel.hidden = true; }
+  }
+  function begin(label, description, {key = label, onCancel = null} = {}) {
+    if (disposed) return null;
+    if (active) end(active, {cancel: true, motion: false});
+    stopMotion();
+    const ticket = {key, onCancel, focus: document.activeElement};
+    active = ticket;
+    previousInert = background.map(node => [node, node.inert]);
+    for (const node of background) node.inert = true;
+    title.textContent = label; detail.textContent = description;
+    close.hidden = !onCancel;
+    panel.classList.remove('loading-leaving'); panel.inert = false; panel.hidden = false; panel.setAttribute('aria-busy', 'true');
+    title.focus({preventScroll: true}); animate();
+    return ticket;
+  }
+  const cancel = () => { if (active?.onCancel) end(active, {cancel: true}); };
+  const escape = event => { if (event.key === 'Escape' && active?.onCancel) { event.preventDefault(); cancel(); } };
+  close.addEventListener('click', cancel); panel.addEventListener('keydown', escape);
+  reduced?.addEventListener?.('change', stopMotion); document.addEventListener('visibilitychange', stopMotion);
+  function destroy() {
+    disposed = true; if (active) end(active, {motion: false}); stopMotion();
+    close.removeEventListener('click', cancel); panel.removeEventListener('keydown', escape);
+    reduced?.removeEventListener?.('change', stopMotion); document.removeEventListener('visibilitychange', stopMotion);
+  }
+  return {begin, end, destroy, get key() { return active?.key || null; }};
+}
 // Presentation owns no timers, requests or completion callbacks into business state.
 export function createScreenTransitions(document) {
   const view = document.defaultView;
@@ -479,7 +535,7 @@ export function createScreenTransitions(document) {
     const changed = previous !== null && previous !== key;
     previous = key;
     finish();
-    if (!changed || disposed || document.hidden || reduced?.matches || !mobile?.matches || typeof document.startViewTransition !== 'function') { update(); return; }
+    if (!changed || disposed || document.hidden || reduced?.matches || !mobile?.matches || document.getElementById?.('loading-screen')?.hidden === false || typeof document.startViewTransition !== 'function') { update(); return; }
     let painted = false;
     const once = () => { if (painted) return; painted = true; pending = null; update(); };
     pending = once;
@@ -575,6 +631,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
   const screenTransitions = createScreenTransitions(document);
+  const loadingScreen = createLoadingScreen(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
   const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
   let stopFactory = null;
@@ -1198,10 +1255,13 @@ export function startUI(document, client = createClient(), stories = createStory
     }
   }
   async function openStory(id) {
-    if (story.doc?.id === id && (story.editing || story.candidate)) { renderStory(); navigate('story'); return; }
+    if (story.doc?.id === id && (story.editing || story.candidate)) { renderStory(); navigate('story'); return true; }
+    if (loadingScreen.key === `story:${id}`) return false;
+    const ticket = loadingScreen.begin('Carregando roteiro…', 'Lendo os blocos e o histórico salvos no PC.', {key: `story:${id}`, onCancel: () => { ++state.navigationEpoch; }});
     const navigation = state.navigationEpoch;
-    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); if (navigation !== state.navigationEpoch || stopped) return; story.doc = doc; story.creating = false; story.candidate = null; story.block = null; storyURL(); renderStory(); navigate('story'); }
-    catch (error) { message('notice', `Não foi possível abrir o roteiro: ${error.message}`, true); }
+    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); if (navigation !== state.navigationEpoch || stopped) return false; story.doc = doc; story.creating = false; story.candidate = null; story.block = null; storyURL(); renderStory(); navigate('story'); return true; }
+    catch (error) { if (navigation === state.navigationEpoch && !stopped) message('notice', `Não foi possível abrir o roteiro: ${error.message}`, true); return false; }
+    finally { loadingScreen.end(ticket); }
   }
   function storyBlocks() { return story.candidate?.blocks || story.doc?.blocks || []; }
   function renderStory() {
@@ -1375,23 +1435,27 @@ export function startUI(document, client = createClient(), stories = createStory
     if (!state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading) return;
     const id = state.assemblyId || state.assembly?.id;
     if (!id) return;
+    const ticket = loadingScreen.begin('Carregando montagem…', 'Conferindo o resultado deste mesmo pedido no PC.', {key: `assembly:${id}`, onCancel: () => { ++state.navigationEpoch; ++state.epoch; }});
+    const navigation = state.navigationEpoch;
     state.assemblyReading = true; controls();
     const selectionEpoch = state.epoch;
     try {
       const record = assemblyRecord(await client.get(`/assemblies/${canonicalUUID(id)}`), id);
-      if (stopped) return;
+      if (stopped || navigation !== state.navigationEpoch) return;
       if (record.state === 'completed' && !assemblyURL(record, record.end_run_id)) throw new Error('Montagem declarada concluída sem prova completa de publicação do arquivo próprio.');
       rememberAssembly(record);
-      if (restoreSelection && selectionEpoch === state.epoch && state.selected?.id !== record.end_run_id) await select(record.end_run_id);
+      if (restoreSelection && selectionEpoch === state.epoch && state.selected?.id !== record.end_run_id) await select(record.end_run_id, undefined, {loading: false});
+      if (navigation !== state.navigationEpoch || stopped) return;
       if (state.selected?.id === record.end_run_id && (restoreSelection || selectionEpoch === state.epoch)) state.assembly = record;
       renderAssembly();
       message('assembly-status', `Montagem ${id}: ${record.state}. Apenas metadados relidos; nenhum POST.`, record.state === 'failed' || record.state === 'interrupted');
     } catch (error) {
+      if (navigation !== state.navigationEpoch || stopped) return;
       // A missing or unreadable known ID is not permission to create another intent.
       if (id === state.assemblyId) state.assemblyUncertain = true;
       message('assembly-status', `Montagem ${id} não confirmada: ${error.message}. Use Reler montagem; não repita o pedido.`, true);
       // Do not let a catalog fallback clear uncertainty from this failed own-ID read.
-    } finally { state.assemblyReading = false; controls(); }
+    } finally { state.assemblyReading = false; controls(); loadingScreen.end(ticket); }
   }
   async function assemble() {
     if (state.screen !== 'assembly' || $('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !canAssemble(state.selected, state.sequence)) return;
@@ -1648,8 +1712,9 @@ export function startUI(document, client = createClient(), stories = createStory
       renderLibrary();
     } finally { freestyleLoading = false; $('library').setAttribute('aria-busy', 'false'); $('load-more').disabled = false; release(); drainChanges(); }
   }
-  async function select(id, knownRun, {preserveBranch = false, branchEnd = null} = {}) {
+  async function select(id, knownRun, {preserveBranch = false, branchEnd = null, loading = true} = {}) {
     if (state.busy && !knownRun) return;
+    const ticket = loading && !knownRun ? loadingScreen.begin('Carregando bloco…', 'Lendo este bloco e a sequência do vídeo.', {key: `run:${id}`, onCancel: () => { ++state.epoch; ++state.navigationEpoch; }}) : null;
     if (id !== state.selected?.id) ++state.draftRevision;
     const end = branchEndForSelection(id, state.branchSequence, preserveBranch, branchEnd, state.openedBranchEnd);
     const epoch = ++state.epoch, navigation = state.navigationEpoch;
@@ -1675,7 +1740,7 @@ export function startUI(document, client = createClient(), stories = createStory
       await loadAssemblies();
     } catch (error) {
       if (epoch === state.epoch && navigation === state.navigationEpoch) { state.branchSequence = null; renderSequence(); message('notice', `Não foi possível abrir o bloco: ${error.message}`, true); text('sequence-message', `Cadeia indisponível: ${error.message}`); }
-    }
+    } finally { loadingScreen.end(ticket); }
   }
   async function loadConfig() {
     const config = await client.get('/app/config');
@@ -1734,7 +1799,7 @@ export function startUI(document, client = createClient(), stories = createStory
       await reconcilePendingNotice();
       if (story.doc && !story.busy && !story.editing && !story.candidate) { story.doc = await stories.read(story.doc.id); if (state.screen === 'story') renderStory(); }
       if (!state.busy && selectionEpoch === state.epoch) {
-        if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true});
+        if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true, loading: false});
       }
       message('notice', state.uncertain ? 'Resultado anterior incerto. Consulte os IDs e não duplique o envio.' : 'Biblioteca atualizada. Gerar e revisar exigem ação explícita.');
     } catch (error) { message('notice', `Biblioteca indisponível: ${error.message}. Use Atualizar para consultar novamente.`, true); }
@@ -1897,7 +1962,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   const swipeBack = createBackSwipe(document, {back, canGoBack: () => state.trail.length > 0, navigationEpoch: () => state.navigationEpoch});
-  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); loadingScreen.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
@@ -1908,6 +1973,7 @@ export function startUI(document, client = createClient(), stories = createStory
   if (document.defaultView?.history) document.defaultView.history.scrollRestoration = 'manual';
   recordView();
   refreshActive = true;
+  const startupLoading = loadingScreen.begin('Abrindo o estúdio…', 'Lendo a biblioteca e a configuração do PC.', {key: 'startup'});
   const ready = loadConfig().then(() => Promise.allSettled([
     loadEditor(),
     loadReferences(),
@@ -1922,10 +1988,14 @@ export function startUI(document, client = createClient(), stories = createStory
       await readAssembly({restoreSelection: true});
     }
     if (storyRecovery?.roteiro) {
-      await openStory(storyRecovery.roteiro);
-      story.block = storyRecovery.block; story.intent = storyRecovery.intent;
-      if (story.intent) story.intentOwner = {id: storyRecovery.roteiro, block: story.block, intent: story.intent};
-      if (story.intent) { if (!state.uncertain) story.uncertainIntent = story.intent; state.uncertain = true; state.statusOnly = true; navigate('generation', {focus: false}); await readStoryIntent(); }
+      const opened = await openStory(storyRecovery.roteiro);
+      if (opened) { story.block = storyRecovery.block; story.intent = storyRecovery.intent; }
+      if (storyRecovery.intent) {
+        story.intentOwner = {id: storyRecovery.roteiro, block: storyRecovery.block, intent: storyRecovery.intent};
+        if (!state.uncertain) story.uncertainIntent = storyRecovery.intent;
+        state.uncertain = true; state.statusOnly = true;
+        if (opened) { navigate('generation', {focus: false}); await readStoryIntent(); }
+      }
     } else if (document.defaultView?.location?.pathname === '/roteiro' && !pointer) { story.creating = true; $('story-duration').value = String(state.capabilities?.default_requested_seconds ?? ''); navigate('context', {focus: false}); }
     await loadStopViews().catch(error => message('notice', `Controle de parada indisponível: ${error.message}`, true));
     await readStopOwner();
@@ -1935,7 +2005,7 @@ export function startUI(document, client = createClient(), stories = createStory
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     paintScreen(); controls(); refreshActive = false; drainChanges();
-  });
+  }).finally(() => loadingScreen.end(startupLoading));
   return {state, ready};
 }
 if (typeof document !== 'undefined') startUI(document);

@@ -260,7 +260,7 @@ function selectionFixture() {
   const state = {epoch: 0, navigationEpoch: 0, draftRevision: 0, branchSequence: branchFixture(), openedBranchEnd: branchIds[11], selected: {id: branchIds[11]}};
   const calls = [], story = {doc: null}; let gate = Promise.resolve();
   const client = {get: async path => { calls.push(path); await gate; const selected = path.split('/')[2]; const count = branchIds.indexOf(selected) + 1; return path.endsWith('/sequence') ? branchFixture(count) : {id: selected}; }};
-  const deps = {state, story, client, stopped: false, canonicalUUID: value => value, branchEndForSelection, validateBranchSequence, text() {}, message() {}, renderRun() {}, renderSequence() {}, loadAssemblies: async () => {}};
+  const deps = {state, story, client, stopped: false, loadingScreen: {begin() {}, end() {}}, canonicalUUID: value => value, branchEndForSelection, validateBranchSequence, text() {}, message() {}, renderRun() {}, renderSequence() {}, loadAssemblies: async () => {}};
   return {state, calls, client, select: new Function(...Object.keys(deps), `${handler}; return select;`)(...Object.values(deps)), wait: value => { gate = value; }};
 }
 test('actual ancestor selection and refresh GET exact opened end without truncating display', async () => {
