@@ -33,6 +33,8 @@ No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não
 
 No celular, o estúdio mostra uma tela principal por vez: **Biblioteca → Referência e ideia → Proposta → Preparar geração → Revisão → Continuação → Montagem**. Grok é opcional; **Usar minha instrução** pula o editor. **Voltar** preserva o rascunho da cena/parent, imagem, seed e duração durante essa sessão. Recarregar a página relê os arquivos do PC e não repete operações; os rascunhos ainda não enviados não são persistidos no navegador.
 
+O fluxo tem microanimações curtas de entrada, toque, seleção e confirmação, principalmente no mobile. Elas não atrasam cliques nem movem os vídeos/controles fixos; respeitam a preferência **reduzir movimento** do aparelho. Loading é feedback do estado real, sem progresso inventado ou operações disparadas pela animação.
+
 ## Organização
 
 ```text
