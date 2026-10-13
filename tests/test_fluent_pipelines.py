@@ -11,18 +11,18 @@ from h3_backend.generation.workflow import I2V_CONFIG, V2V_CONFIG
 
 
 def i2v(service, request=None):
-    return (I2VPipe(service).have(request or RunRequest(seed=17))
+    return (I2VPipe(service).have(request or RunRequest(seed=17, duration_seconds=2.3))
             .with_workflow(I2V_CONFIG).save_chunk())
 
 
 def v2v(service, parent_id, request=None):
-    return (V2VPipe(service).have(request or ContinueRequest(seed=18))
+    return (V2VPipe(service).have(request or ContinueRequest(seed=18, duration_seconds=2.3))
             .from_parent(parent_id).with_last_frame().with_original_identity()
             .with_motion_tail().with_workflow(V2V_CONFIG).save_chunk())
 
 
 async def accepted_parent(service):
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service._task
     return await service.decide(run.id, True)
 
@@ -76,12 +76,12 @@ async def test_request_snapshot_and_post_admission_freeze(tmp_path, kind):
     service = make_service(tmp_path)
     markdown = "# Snapshot\n\n<Picture 1>  \n<Picture 2>\n<Video 1>\n"
     if kind == "i2v":
-        request = RunRequest(seed=17, prompt=markdown)
+        request = RunRequest(seed=17, duration_seconds=2.3, prompt=markdown)
         pipe = i2v(service, request)
         config = I2V_CONFIG
     else:
         parent = await accepted_parent(service)
-        request = ContinueRequest(seed=17, prompt=markdown)
+        request = ContinueRequest(seed=17, duration_seconds=2.3, prompt=markdown)
         pipe = v2v(service, parent.id, request)
         config = V2V_CONFIG
     request.seed = 999

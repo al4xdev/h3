@@ -10,7 +10,7 @@ const CHILD = '22222222-2222-4222-8222-222222222222';
 const OTHER = '33333333-3333-4333-8333-333333333333';
 const RAW_IDEA = 'ela dá um salto';
 const FINAL_PROMPT = '  Grok improved: preserve the original identity.\n\nJump, turn away; <img src=x onerror=evil()>\r\n  ';
-const CAPS = Object.freeze({default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125});
+const CAPS = Object.freeze({default_requested_seconds: 8, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125});
 function freeze(value) {
   if (value && typeof value === 'object') {
     for (const child of Object.values(value)) freeze(child);

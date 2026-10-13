@@ -163,7 +163,7 @@ def make_service(tmp_path, *, memory_available=None):
 async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     service = make_service(tmp_path)
     await service.startup()
-    run = await service.create(RunRequest(seed=7))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     await service._task
     ready = service.store.get(run.id)
     assert ready.state == "ready_for_review"
@@ -174,12 +174,12 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     assert (service.store.directory(run.id) / "workflow_api.json").is_file()
     assert service.video_path(run.id).read_bytes() == b"fake-video"
     with pytest.raises(Conflict):
-        await service.continue_run(run.id, ContinueRequest(seed=8))
+        await service.continue_run(run.id, ContinueRequest(seed=8, duration_seconds=2.3))
     await service.decide(run.id, True)
     assert len(service.comfy.submitted) == 1  # acceptance itself never submits
     with pytest.raises(Conflict):
         await service.decide(run.id, False)
-    child = await service.continue_run(run.id, ContinueRequest(seed=8, reference_tail_seconds=3))
+    child = await service.continue_run(run.id, ContinueRequest(seed=8, duration_seconds=2.3, reference_tail_seconds=3))
     await service._task
     final = service.store.get(child.id)
     assert final.state == "ready_for_review" and final.parent_id == run.id
@@ -201,7 +201,7 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
     assert tail["filename"].startswith("unique/") and tail["filename"].endswith(" [input]")
     assert len(service.builder.calls[1]["references"]) == 3
     await service.decide(child.id, True)
-    grandchild = await service.continue_run(child.id, ContinueRequest(seed=9))
+    grandchild = await service.continue_run(child.id, ContinueRequest(seed=9, duration_seconds=2.3))
     await service._task
     descendant = service.store.get(grandchild.id)
     assert descendant.state == "ready_for_review"
@@ -228,9 +228,9 @@ async def test_publish_acceptance_gate_and_explicit_continuation(tmp_path):
 async def test_rejected_parent_and_single_job(tmp_path):
     service = make_service(tmp_path)
     service.comfy.gate = asyncio.Event()
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     with pytest.raises(Conflict):
-        await service.create(RunRequest(seed=2))
+        await service.create(RunRequest(seed=2, duration_seconds=2.3))
     service.comfy.gate.set()
     await service._task
     await service.decide(run.id, False)
@@ -257,7 +257,7 @@ async def test_paths_and_duration_rejected_before_job(tmp_path):
 async def test_shutdown_and_failure_cannot_be_accepted(tmp_path):
     service = make_service(tmp_path)
     service.comfy.gate = asyncio.Event()
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     # Ensure execution started, then shut down without leaving pending work.
     await asyncio.sleep(0)
     await service.shutdown()
@@ -317,14 +317,14 @@ async def test_ram_sensor_ignored_at_admission_and_during_owned_job(tmp_path, op
     service = make_service(tmp_path, memory_available=sensor)
     parent = None
     if operation == "v2v":
-        parent = await service.create(RunRequest(seed=1))
+        parent = await service.create(RunRequest(seed=1, duration_seconds=2.3))
         await service._task
         await service.decide(parent.id, True)
 
     async def create():
         if operation == "v2v":
-            return await service.continue_run(parent.id, ContinueRequest(seed=2))
-        return await service.create(RunRequest(seed=2))
+            return await service.continue_run(parent.id, ContinueRequest(seed=2, duration_seconds=2.3))
+        return await service.create(RunRequest(seed=2, duration_seconds=2.3))
 
     submitted = len(service.comfy.submitted)
     service.settings = replace(service.settings, memory_check_interval=0.001)
@@ -357,7 +357,7 @@ async def test_telemetry_failure_is_recorded_not_silent(tmp_path):
         raise RuntimeError("fake recording failure")
 
     service.telemetry = broken_telemetry
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service._task
     assert (service.store.directory(run.id) / "telemetry_error.json").is_file()
     assert "fake recording failure" in service.store.get(run.id).input_info["telemetry_error"]
@@ -367,7 +367,7 @@ async def test_telemetry_failure_is_recorded_not_silent(tmp_path):
 @pytest.mark.asyncio
 async def test_shutdown_before_background_task_started(tmp_path):
     service = make_service(tmp_path)
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service.shutdown()
     assert service.store.get(run.id).state == "interrupted"
     assert not service.comfy.submitted
@@ -377,7 +377,7 @@ async def test_shutdown_before_background_task_started(tmp_path):
 async def test_canceled_http_wait_preserves_execution_task(tmp_path):
     service = make_service(tmp_path)
     service.comfy.gate = asyncio.Event()
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     waiter = asyncio.create_task(service.wait_run(run.id))
     await asyncio.sleep(0)
     waiter.cancel()
@@ -394,16 +394,16 @@ async def test_canceled_http_wait_preserves_execution_task(tmp_path):
 @pytest.mark.parametrize("operation", ["i2v", "v2v"])
 async def test_operations_share_global_slot(tmp_path, operation):
     service = make_service(tmp_path)
-    parent = await service.create(RunRequest(seed=1))
+    parent = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service._task
     await service.decide(parent.id, True)
     service.comfy.gate = asyncio.Event()
     if operation == "i2v":
-        active = await service.create(RunRequest(seed=2))
+        active = await service.create(RunRequest(seed=2, duration_seconds=2.3))
         with pytest.raises(Conflict, match="one backend job"):
             await service.continue_run(parent.id, ContinueRequest(seed=3))
     else:
-        active = await service.continue_run(parent.id, ContinueRequest(seed=2))
+        active = await service.continue_run(parent.id, ContinueRequest(seed=2, duration_seconds=2.3))
         with pytest.raises(Conflict, match="one backend job"):
             await service.create(RunRequest(seed=3))
     assert service._active == active.id
@@ -423,7 +423,7 @@ async def test_i2v_never_prepares_parent_media(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "video_path", forbidden)
     monkeypatch.setattr(service.media, "prepare_last_frame", forbidden)
     monkeypatch.setattr(service.media, "prepare_tail", forbidden)
-    run = await service.create(RunRequest(seed=1))
+    run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service._task
     assert service.store.get(run.id).state == "ready_for_review"
     assert service.builder.calls[0]["operation"] == "i2v"
@@ -434,11 +434,11 @@ async def test_i2v_never_prepares_parent_media(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_v2v_ignores_low_memory_but_preserves_shutdown_guard(tmp_path):
     service = make_service(tmp_path)
-    parent = await service.create(RunRequest(seed=1))
+    parent = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     await service._task
     await service.decide(parent.id, True)
     service.memory_available = lambda: 0
-    child = await service.continue_run(parent.id, ContinueRequest(seed=2))
+    child = await service.continue_run(parent.id, ContinueRequest(seed=2, duration_seconds=2.3))
     await service.shutdown()
     assert service.store.get(child.id).state == "interrupted"
     assert len(service.comfy.submitted) == 1
@@ -453,12 +453,12 @@ async def test_v2v_ignores_low_memory_but_preserves_shutdown_guard(tmp_path):
 async def test_identity_mutation_after_admission_fails_without_submission(tmp_path, operation):
     service = make_service(tmp_path)
     if operation == "v2v":
-        parent = await service.create(RunRequest(seed=1))
+        parent = await service.create(RunRequest(seed=1, duration_seconds=2.3))
         await service._task
         await service.decide(parent.id, True)
-        run = await service.continue_run(parent.id, ContinueRequest(seed=2))
+        run = await service.continue_run(parent.id, ContinueRequest(seed=2, duration_seconds=2.3))
     else:
-        run = await service.create(RunRequest(seed=1))
+        run = await service.create(RunRequest(seed=1, duration_seconds=2.3))
     submitted = len(service.comfy.submitted)
     (tmp_path / "assets" / "dance_reference.png").write_bytes(b"changed-image")
     await service._task

@@ -91,7 +91,9 @@ export function assemblyRecord(value, id = value?.id) {
 // malformed capabilities are not permission to guess an unlimited duration.
 export function durationCapabilities(value) {
   if (value === undefined) return null;
-  const expected = {default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
+  const defaultSeconds = value?.default_requested_seconds;
+  if (typeof defaultSeconds !== 'number' || !Number.isFinite(defaultSeconds) || defaultSeconds <= 0 || defaultSeconds > 10 || !/^(?:[0-9]+)(?:\.[0-9]{1,2})?$/.test(String(defaultSeconds))) throw new Error('Duração padrão incompatível. Nenhum envio permitido.');
+  const expected = {default_requested_seconds: defaultSeconds, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
   if (!value || Object.keys(value).length !== Object.keys(expected).length || Object.entries(expected).some(([key, item]) => value[key] !== item)) throw new Error('Capacidades de duração incompatíveis. Nenhum envio permitido.');
   return Object.freeze({...value});
 }
@@ -110,7 +112,7 @@ export function parseDuration(value, capabilities = null) {
   if (!Number.isFinite(seconds) || seconds <= 0 || (capabilities ? seconds > capabilities.max_requested_seconds || alignedFrames(seconds) > capabilities.max_frames : seconds !== 2.3)) throw new Error(capabilities ? 'Duração solicitada deve ser maior que 0 e até 10 s.' : 'Este backend permite somente a duração padrão de 2,3 s.');
   return seconds;
 }
-export function makePayload({seed, prompt, duration = '2.3', capabilities = null, image = 'dance_reference.png', reference = null, continuation = false}) {
+export function makePayload({seed, prompt, capabilities = null, duration = String(capabilities?.default_requested_seconds ?? 2.3), image = 'dance_reference.png', reference = null, continuation = false}) {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma instrução de 1 a 12000 caracteres.');
   const base = {seed: parseSeed(seed), prompt, duration_seconds: parseDuration(duration, capabilities)};
   if (continuation) return {...base, reference_tail_seconds: 3, include_audio: true};
@@ -357,7 +359,7 @@ export function startUI(document, client = createClient()) {
   function draft() {
     if (!state.drafts.has(state.draftKey)) {
       const idea = state.mode === 'continue' ? state.config?.continuation_prompt || '' : state.config?.default_prompt || '';
-      state.drafts.set(state.draftKey, {idea, proposal: '', chosenPrompt: idea, reference: state.reference, seed: '2026101205', duration: '2.3', revision: 0, proposalStale: false, proposalContext: '', lateProposal: null, submitted: false});
+      state.drafts.set(state.draftKey, {idea, proposal: '', chosenPrompt: idea, reference: state.reference, seed: '2026101205', duration: String(state.config?.duration_seconds ?? 8), revision: 0, proposalStale: false, proposalContext: '', lateProposal: null, submitted: false});
     }
     return state.drafts.get(state.draftKey);
   }
@@ -870,8 +872,9 @@ export function startUI(document, client = createClient()) {
   }
   async function loadConfig() {
     const config = await client.get('/app/config');
-    if (config.reference_image !== 'dance_reference.png' || config.duration_seconds !== 2.3 || typeof config.default_prompt !== 'string' || typeof config.continuation_prompt !== 'string') throw new Error('Configuração incompatível com os parâmetros preservados.');
+    if (config.reference_image !== 'dance_reference.png' || typeof config.default_prompt !== 'string' || typeof config.continuation_prompt !== 'string') throw new Error('Configuração incompatível com os parâmetros preservados.');
     state.capabilities = durationCapabilities(config.duration_capabilities);
+    if (typeof config.duration_seconds !== 'number' || (state.capabilities ? config.duration_seconds !== state.capabilities.default_requested_seconds : config.duration_seconds !== 2.3)) throw new Error('Duração padrão não corresponde às capacidades do backend.');
     state.config = config; restoreDraft();
     $('duration').readOnly = !state.capabilities; $('duration').setAttribute('aria-readonly', String(!state.capabilities));
     text('duration-policy', state.capabilities ? 'Por bloco: maior que 0 e até 10 s solicitados, com até duas casas decimais. Mais tempo exige mais recursos; não há garantia de RAM, qualidade ou prazo. Máximo alinhado: 243 frames / 10,125 s.' : 'Backend legado: duração padrão fixa de 2,3 s. Atualize o backend para editar por bloco.');

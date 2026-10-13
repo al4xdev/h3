@@ -55,11 +55,11 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
             assert (await http.get(path)).status_code == 404
         config = (await http.get("/app/config")).json()
         assert config == {"default_prompt": DEFAULT_PROMPT, "continuation_prompt": CONTINUATION_PROMPT,
-                          "reference_image": "dance_reference.png", "duration_seconds": 2.3,
+                          "reference_image": "dance_reference.png", "duration_seconds": 8,
                           "workflow_output_profile": "baseline", "filesystem_events": True,
                           "reference_library": True, "assembly_enabled": True,
                           "duration_capabilities": {
-                              "default_requested_seconds": 2.3, "min_requested_seconds": 0,
+                              "default_requested_seconds": 8, "min_requested_seconds": 0,
                               "min_exclusive": True, "max_requested_seconds": 10,
                               "input_step": 0.01, "fps": 24, "frame_base": 5,
                               "frame_stride": 17, "rounding": "half_even", "max_frames": 243,
@@ -275,7 +275,7 @@ async def test_browser_mutations_require_same_origin_but_cli_remains_compatible(
             response = await http.post(route, content=body, headers={"Origin": origin})
             assert response.status_code == 403
         assert (await http.get("/app/config", headers={"Origin": origin})).status_code == 200
-        assert (await http.post("/runs", json={"seed": 7}, headers={"Origin": "http://fake"})).status_code == 202
+        assert (await http.post("/runs", json={"seed": 7, "duration_seconds": 2.3}, headers={"Origin": "http://fake"})).status_code == 202
         await service._task
     assert len(service.comfy.submitted) == 1 and not (tmp_path / ".data/inputs").exists()
     await service.shutdown()
@@ -383,7 +383,7 @@ async def test_manual_or_owned_run_frame_can_be_explicit_new_identity(tmp_path, 
         path = service.store.relative_artifact(source.id, "last_frame.png")
         (service.store.directory(source.id) / "last_frame.png").write_bytes(data)
     service.media.verify_image = media.verify_image
-    run = await service.create(RunRequest(seed=7, references=[{"source_root": category, "path": path}]))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3, references=[{"source_root": category, "path": path}]))
     await service._task
     current = service.store.get(run.id)
     assert current.state == "ready_for_review"
@@ -442,7 +442,7 @@ async def test_mixed_categories_hydrate_without_io_and_distinct_identity_paths(t
     base = tmp_path / ".data/inputs"
     base.mkdir()
     (base / "dance_reference.png").write_bytes(b"different-original-identity")
-    request = RunRequest(seed=7, references=[{"source_root": "assets", "path": "dance_reference.png"},
+    request = RunRequest(seed=7, duration_seconds=2.3, references=[{"source_root": "assets", "path": "dance_reference.png"},
                                             {"source_root": "inputs", "path": "dance_reference.png"}])
     run = await service.create(request)
     snapshot = service.store.request(run.id)
@@ -483,7 +483,7 @@ async def test_input_mutation_after_admission_fails_before_comfy_upload(tmp_path
     base.mkdir()
     source = base / "photo.png"
     source.write_bytes(encoded_image())
-    run = await service.create(RunRequest(seed=7, references=[{"source_root": "inputs", "path": "photo.png"}]))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3, references=[{"source_root": "inputs", "path": "photo.png"}]))
     source.write_bytes(b"tampered after admission")
     await service._task
     assert service.store.get(run.id).state == "failed"

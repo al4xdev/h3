@@ -34,7 +34,7 @@ OutputProfile = Literal["baseline", "final_only"]
 PREVIEW_NODES = ("18", "176", "177")
 
 
-DEFAULT_DURATION_SECONDS = 2.3
+DEFAULT_DURATION_SECONDS = 8.0
 # Operational request budget, not a checkpoint maximum or proof of GPU/RAM safety.
 MAX_DURATION_SECONDS = 10.0
 DURATION_FPS = 24

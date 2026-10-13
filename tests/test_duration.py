@@ -32,7 +32,7 @@ def probe(frames):
 def test_request_and_formula_domain(seconds, frames):
     for cls in (RunRequest, ContinueRequest):
         assert cls(seed=1, duration_seconds=seconds).duration_seconds == seconds
-        assert cls(seed=1).duration_seconds == 2.3
+        assert cls(seed=1).duration_seconds == 8
     assert frames_for_duration(seconds) == frames
 
 
@@ -57,6 +57,7 @@ def test_python_half_even_alignment_and_neighbor_boundary(raw, frames):
 
 def test_capabilities_are_derived_and_return_fresh_values():
     caps = duration_capabilities()
+    assert caps["default_requested_seconds"] == 8
     assert caps["max_frames"] == frames_for_duration(caps["max_requested_seconds"]) == 243
     assert caps["max_actual_seconds"] == 10.125
     caps["max_frames"] = 1

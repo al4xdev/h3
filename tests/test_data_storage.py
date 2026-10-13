@@ -256,7 +256,7 @@ async def test_migrated_accepted_parent_continues_into_new_layout_without_gpu(tm
     service = make_service(tmp_path)
     await service.startup()
     try:
-        child = await service.continue_run(parent.id, ContinueRequest(seed=55))
+        child = await service.continue_run(parent.id, ContinueRequest(seed=55, duration_seconds=2.3))
         await service._task
         run = service.store.get(child.id)
         assert run.state == "ready_for_review"

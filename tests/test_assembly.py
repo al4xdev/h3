@@ -240,7 +240,7 @@ async def test_global_cpu_native_review_and_filesystem_busy_capture(tmp_path, so
     await entered.wait()
     assert service._cpu_active == operation.state.id and service._cpu_task is task
     with pytest.raises(Conflict):
-        await service.create(RunRequest(seed=7))
+        await service.create(RunRequest(seed=7, duration_seconds=2.3))
     with pytest.raises(Conflict):
         await service.decide(runs[-1].id, True)
     with pytest.raises(Conflict):
@@ -261,7 +261,7 @@ async def test_global_cpu_native_review_and_filesystem_busy_capture(tmp_path, so
 async def test_native_job_prevents_cpu_assembly_admission(tmp_path):
     service = make_service(tmp_path)
     service.comfy.gate = asyncio.Event()
-    run = await service.create(RunRequest(seed=7))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     with pytest.raises(Conflict):
         await pipe(service, run.id).arun()
     assert not (tmp_path / ".data/assemblies").exists()

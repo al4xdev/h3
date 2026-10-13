@@ -23,7 +23,7 @@ from h3_backend.infrastructure.store import Store, timestamp
 
 def admitted(service, *, operation="i2v", parent_id=None, seed=2026101205, continuation=None):
     now = timestamp()
-    request = continuation or ContinueRequest(seed=seed)
+    request = continuation or ContinueRequest(seed=seed, duration_seconds=2.3)
     from h3_backend.generation.models import CONTINUATION_PROMPT, DEFAULT_PROMPT
 
     return Run(
@@ -139,7 +139,7 @@ async def test_public_hydration_is_pure_sealed_canonical(tmp_path, monkeypatch, 
     service = make_service(tmp_path)
     project = Path(__file__).resolve().parents[1]
     service.builder = WorkflowBuilder(project, output_profile=profile)
-    options = ContinueRequest(seed=17, prompt=None, reference_tail_seconds=2, include_audio=False)
+    options = ContinueRequest(seed=17, duration_seconds=2.3, prompt=None, reference_tail_seconds=2, include_audio=False)
     run = admitted(service, operation=kind, seed=17,
                    parent_id=str(uuid4()) if kind == "v2v" else None, continuation=options)
     # Round-trip provenance tuples through the actual request serialization contract.
@@ -284,7 +284,7 @@ async def test_manifest_input_tamper_disagrees_with_request(tmp_path, field):
 @pytest.mark.asyncio
 async def test_worker_uses_disk_not_caller_pipeline_and_one_http_wait(tmp_path, monkeypatch):
     service = make_service(tmp_path)
-    pipe = I2VPipe(service).have(RunRequest(seed=2026101205)).with_workflow(I2V_CONFIG).save_chunk()
+    pipe = I2VPipe(service).have(RunRequest(seed=2026101205, duration_seconds=2.3)).with_workflow(I2V_CONFIG).save_chunk()
     run = await service.submit(pipe)
     # Corrupt the captured caller object's private state: the central worker must hydrate afresh.
     pipe._state = replace(pipe._state, request=None, run=None)
@@ -302,7 +302,7 @@ async def test_worker_uses_disk_not_caller_pipeline_and_one_http_wait(tmp_path, 
 @pytest.mark.asyncio
 async def test_worker_rereads_request_after_reservation_and_rejects_tamper(tmp_path):
     service = make_service(tmp_path)
-    run = await service.create(RunRequest(seed=7))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     path = service.store.directory(run.id) / "request.json"
     data = json.loads(path.read_text())
     data["seed"] = 99
@@ -332,7 +332,7 @@ async def test_real_inotify_executes_only_new_committed_native_requests(tmp_path
     assert len(service.comfy.submitted) == 1
     assert (service.store.directory(old.id) / "request.json").read_bytes() == original
     await service.decide(fresh.id, True)
-    options = ContinueRequest(seed=2026101206, reference_tail_seconds=2, include_audio=False)
+    options = ContinueRequest(seed=2026101206, duration_seconds=2.3, reference_tail_seconds=2, include_audio=False)
     child = admitted(service, operation="v2v", parent_id=fresh.id, seed=options.seed,
                      continuation=options)
     service.store.create(child, materialize_request=True)
@@ -360,7 +360,7 @@ async def test_busy_events_fail_even_if_slot_frees_before_consumer(tmp_path):
     service = make_service(tmp_path)
     await service.startup()
     service.comfy.gate = asyncio.Event()
-    active = await service.create(RunRequest(seed=7))
+    active = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     conflicting = admitted(service, seed=8)
     service.store.create(conflicting, materialize_request=True)
     service._request_hint(conflicting.id)
@@ -399,7 +399,7 @@ async def test_http_202_registers_own_uuid_before_first_get_wait(tmp_path):
     service.comfy.gate = asyncio.Event()
     app = create_app(service=service)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fake") as client:
-        response = await client.post("/runs/i2v", json={"seed": 2026101205})
+        response = await client.post("/runs/i2v", json={"seed": 2026101205, "duration_seconds": 2.3})
         assert response.status_code == 202
         run_id = response.json()["id"]
         assert response.json()["state"] == "queued" and service._active == run_id
@@ -502,7 +502,7 @@ async def test_fifo_manifest_or_identity_never_blocks_worker(tmp_path, name):
 @pytest.mark.asyncio
 async def test_plain_queued_state_edit_cannot_replay_execution_evidence(tmp_path):
     service = make_service(tmp_path)
-    run = await service.create(RunRequest(seed=7))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     await service._task
     manifest = service.store.directory(run.id) / "manifest.json"
     data = json.loads(manifest.read_text())
@@ -543,7 +543,7 @@ async def test_malformed_external_record_fails_own_state_and_observer_keeps_runn
 async def test_terminal_request_events_never_repeat_or_decide_generation(tmp_path):
     service = make_service(tmp_path)
     await service.startup()
-    run = await service.create(RunRequest(seed=7))
+    run = await service.create(RunRequest(seed=7, duration_seconds=2.3))
     await service._task
     await service.decide(run.id, False)
     stream = service.watcher.events()

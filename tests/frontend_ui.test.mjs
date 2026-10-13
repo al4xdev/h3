@@ -187,13 +187,23 @@ test('assembly filesystem hints only invalidate metadata, not media/requests', (
   assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/metadata.json`, invalidation: true}), true);
   for (const file of ['request.json', 'video.mp4', '.part']) assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/${file}`, invalidation: true}), false);
 });
-const capsDTO = {default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
+const capsDTO = {default_requested_seconds: 8, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
 test('duration capabilities are exact and missing legacy capabilities never unlock time', () => {
   assert.equal(durationCapabilities(undefined), null);
   assert.deepEqual(durationCapabilities(capsDTO), capsDTO);
+  assert.deepEqual(durationCapabilities({...capsDTO, default_requested_seconds: 2.3}), {...capsDTO, default_requested_seconds: 2.3});
+  for (const default_requested_seconds of [0, -1, 10.01, 2.333, '8', NaN, Infinity]) assert.throws(() => durationCapabilities({...capsDTO, default_requested_seconds}));
   assert.equal(parseDuration('2,30'), 2.3);
   assert.throws(() => parseDuration('3'));
   for (const value of [null, {}, {...capsDTO, max_frames: 240}, {...capsDTO, rounding: 'half_up'}, {...capsDTO, private: true}]) assert.throws(() => durationCapabilities(value));
+});
+test('app defaults use backend eight seconds, while legacy and explicit historical time stay intact', () => {
+  for (const continuation of [false, true]) {
+    const request = {seed: '42', prompt: 'Preserve this scene', capabilities: capsDTO, continuation};
+    assert.equal(makePayload(request).duration_seconds, 8);
+    assert.equal(makePayload({...request, duration: '2.3'}).duration_seconds, 2.3);
+  }
+  assert.equal(alignedFrames(8), 192);
 });
 test('native half-even rounding includes ties that JavaScript Math.round gets wrong', () => {
   for (const [value, expected] of [[4.5, 4], [5.5, 6], [22.5, 22], [56.5, 56], [239.5, 240]]) assert.equal(roundHalfEven(value), expected);

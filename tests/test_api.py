@@ -78,7 +78,7 @@ async def test_http_validation_gate_and_video(tmp_path):
         assert response.status_code == 202
         run = response.json()
         run_id = run["id"]
-        assert run["state"] == "queued" and run["duration_seconds"] == 2.3
+        assert run["state"] == "queued" and run["duration_seconds"] == 8
         assert "<Picture 1>" in run["prompt"]
         assert (await client.get(f"/runs/{run_id}")).json()["seed"] == 7
         assert (await client.post(f"/runs/{run_id}/accept")).status_code == 409
@@ -97,5 +97,6 @@ async def test_http_validation_gate_and_video(tmp_path):
         assert (await client.post(f"/runs/{run_id}/reject")).status_code == 409
         assert (await client.post(f"/runs/{run_id}/continue", json={"seed": 8})).status_code == 202
         assert len(service.calls) == 2
+        assert service.calls[-1].duration_seconds == 8
         assert (await client.get(f"/runs/{uuid4()}")).status_code == 404
         assert (await client.get("/runs/not-a-uuid")).status_code == 400
