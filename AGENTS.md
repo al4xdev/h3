@@ -32,7 +32,8 @@ Autonomia não autoriza: alterar parâmetros de geração para tentar melhorar o
 
 O dono adicionou a rota independente no commit `041b014` e esclareceu: quer descrever sua ideia diretamente ao Grok, em linguagem simples, sem precisar escrever um prompt detalhado. Um system prompt explica a tarefa e pode ser alterado no front/persistido em configuração própria sob `.data/grok/`.
 
-- O front envia `system_prompt` e `prompt` a `POST /grok` (modelo opcional); recebe apenas texto editado. Esse texto volta ao campo de instrução/proposta editável. Gerar vídeo continua sendo outro clique explícito.
+- Correção posterior do dono: enviar a imagem selecionada JUNTO com `system_prompt` e `prompt` ao editor. A imagem é contexto visual, não saída/edit de imagem. Modelo fixo em `.data/grok/editor.json`: `grok-4.20-0309-non-reasoning`, verificado no card público oficial como text+image→text; elegibilidade/cota da conta não foi testada. Backend relê configuração própria e rejeita override diferente, sem escolher outro modelo automaticamente.
+- Resultado sempre vira proposta de texto editável; usar a proposta e gerar vídeo são ações explícitas separadas. Não sobrescrever ideia/rascunho em navegação ou resposta atrasada. Referência própria limitada com prova técnica e JSON/base64 em streaming; Python não decodifica pixels nem mantém a imagem inteira na memória. URLs arbitrárias/paths privados/OAuth nunca são referência.
 - Não conectar Grok a Store, dispatcher, worker, runs, revisão ou montagem; não gerar/aceitar/continuar automaticamente. Compartilhar servidor HTTP não autoriza acoplamento de negócio. Grok não edita imagens nesta rota.
 - Configuração do editor é separada de `.data/grok/oauth.json`. Nunca ler/exibir/copiar credenciais ou alterar o grant importado pelo dono; preservar o módulo OAuth independente.
 - Nenhuma chamada real ao provider em testes/importação/startup/abertura da página/SSE/reconexão. Modelos/autenticação/inferência só por ações explícitas; sem retry automático de resultado incerto ou seleção arbitrária do primeiro modelo.
@@ -40,7 +41,9 @@ O dono adicionou a rota independente no commit `041b014` e esclareceu: quer desc
 
 ## Geração: simplificar trabalho, não reajustar o resultado
 
-O dono já configurou os parâmetros. Preservar modelos, sampler, scheduler, passos, resolução/MP, duração/fórmula de frames, atenção, condicionamento, referências, guias, VAEs e caminho de decode/export final. Não experimentar parâmetros para obter uma geração "melhor" durante a simplificação.
+O dono já configurou os parâmetros. Preservar modelos, sampler, scheduler, passos, resolução/MP, fórmula de frames, atenção, condicionamento, referências, guias, VAEs e caminho de decode/export final. Não experimentar parâmetros para obter uma geração "melhor" durante a simplificação.
+
+Correção posterior explícita do dono: duração deve ser ajustável POR BLOCO, inclusive acima de3s. Apenas esse antigo cap está supersedido: manter default2.3,24fps e fórmula5+17k/Pythonhalf-even, grafos/benchmark congelados. Plano24 define requested(0,10] como orçamento operacional, máximo alinhado243frames/10.125s; não alegar máximo do modelo, RAM/VRAM segura ou geração longa validada sem evidência. Schema estático instalado MiniMaxH3ReferenceToVideo aceita length5..3600(step17), tooltiptrained~124..362; isso não certifica performance/qualidade do checkpoint. UI mostra solicitado→frames→tempo efetivo; contexto tail3/audioTrue permanece independente. Guard de saída/hidratação precisa acompanhar exatamente a duração escolhida, nunca remover validação por só liberar o input.
 
 Investigar dependências e execução real antes de remover nós. Menos nós no JSON não significa menos RAM: os nós fora da ancestralidade dos outputs podem não executar. Ramos já bypassados não justificam promessas de ganho.
 
@@ -103,7 +106,9 @@ Usar tools nativas para leitura/busca/edição e `bash` para Git, build/test e p
 
 HTML/CSS/JS simples, preferencialmente same-origin servido pelo backend; sem framework/build/service extra sem motivo concreto. A página deve permitir ver vídeos, estados e sequência, revisar e continuar explicitamente, com erros e loading honestos. Não apresentar failed/incompleto como vídeo pronto.
 
-Design intencional ligado à montagem por blocos, não dashboard genérico; responsivo, foco de teclado visível, labels claros, reduced-motion e sem autoplay pesado. Usar mídias reais existentes, não placeholders. Seguir `frontend-design` antes de criar UI e `playwright` antes de automatizar validação/browser. Testes de UI não disparam GPU por clique incidental; geração real fica restrita a benchmarks deliberados.
+Design intencional ligado à montagem por blocos, não dashboard genérico; responsivo, foco de teclado visível, labels claros, reduced-motion e sem autoplay pesado. Usar mídias reais existentes, não placeholders. Seguir `frontend-design` antes de criar UI e `playwright-mobile-media` antes de automatizar validação/captura mobile. Testes de UI não disparam GPU por clique incidental; geração real fica restrita a benchmarks deliberados.
+
+Correção posterior do dono: mobile deve mostrar fluxo de TELAS, não todos os painéis empilhados. Biblioteca → referência/ideia → proposta Grok editável → preparar geração/status → revisão → preparar continuação → montagem. Um painel principal ativo, navegação Voltar/foco/touch claros; preservar rascunhos por cena/parent/duração/referência e IDs/incertezas em navegação. Usar proposta não gera, aceitar não continua/monta, voltar/reload/SSE nunca POSTam. Estado transitório de tela não substitui `.data`; desktop permanece usável. Durante estas correções não reiniciar servidor produção nem executar provider/GPU incidentalmente: dono fechou o server para economizarRAM.
 
 ## Ordem autônoma de execução
 
