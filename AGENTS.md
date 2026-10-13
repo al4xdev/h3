@@ -28,6 +28,16 @@ Autonomia não autoriza: alterar parâmetros de geração para tentar melhorar o
 - O navegador precisa da ponte para acessar a pasta do PC, especialmente pelo celular; não prometer filesystem direto sem permissão/suporte real. A ponte não expõe a árvore inteira do PC nem permite caminhos arbitrários.
 - Locks/filesystem não eliminam cache de modelos/tensores do ComfyUI nem cache recuperável de arquivos do Linux. Medir RSS de processos separadamente; não prometer ganho só por trocar arquitetura.
 
+## Grok: editor de texto isolado, não motor de geração
+
+O dono adicionou a rota independente no commit `041b014` e esclareceu: quer descrever sua ideia diretamente ao Grok, em linguagem simples, sem precisar escrever um prompt detalhado. Um system prompt explica a tarefa e pode ser alterado no front/persistido em configuração própria sob `.data/grok/`.
+
+- O front envia `system_prompt` e `prompt` a `POST /grok` (modelo opcional); recebe apenas texto editado. Esse texto volta ao campo de instrução/proposta editável. Gerar vídeo continua sendo outro clique explícito.
+- Não conectar Grok a Store, dispatcher, worker, runs, revisão ou montagem; não gerar/aceitar/continuar automaticamente. Compartilhar servidor HTTP não autoriza acoplamento de negócio. Grok não edita imagens nesta rota.
+- Configuração do editor é separada de `.data/grok/oauth.json`. Nunca ler/exibir/copiar credenciais ou alterar o grant importado pelo dono; preservar o módulo OAuth independente.
+- Nenhuma chamada real ao provider em testes/importação/startup/abertura da página/SSE/reconexão. Modelos/autenticação/inferência só por ações explícitas; sem retry automático de resultado incerto ou seleção arbitrária do primeiro modelo.
+- Resposta é texto não confiável: usar `.value`/`textContent`, respeitar o limite de cena e manter rascunho em erro. Não alterar templates/benchmark/presets nativos para integrar o editor.
+
 ## Geração: simplificar trabalho, não reajustar o resultado
 
 O dono já configurou os parâmetros. Preservar modelos, sampler, scheduler, passos, resolução/MP, duração/fórmula de frames, atenção, condicionamento, referências, guias, VAEs e caminho de decode/export final. Não experimentar parâmetros para obter uma geração "melhor" durante a simplificação.

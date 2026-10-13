@@ -34,11 +34,23 @@ Pillow não deve integrar o runtime. Scripts históricos CPU de comparação sã
 
 Cache de arquivos do Linux e modelos/tensores do ComfyUI são separados do heap do orquestrador. Medir RSS por processo; não prometer redução de memória por usar locks ou por não usar banco.
 
-## Âncoras existentes e implementação pendente
+## Implementação e âncoras verificadas
 
 - Geração nativa estável `502c13f`, benchmark inicial `990e27a`, MCP `6e20e61`.
 - Perfil opt-in `final_only`, `b83c6ca`: somente preview18/176/177 removido, sem religar decodes. Comparação de 7s concluída; cache/processo externo mudou, portanto tempo não prova ganho causal.
 - Migração `e6c2b45`: `.data/runs` autoritativa com recibo `4854b208-743e-42d8-a7de-c40a9f1f7ff0`; 12 runs/80 arquivos copiados, originais `runs/` preservados. Verificar o recibo real antes de novas operações; contagens podem crescer.
-- Assets de UI `e00c641` foram testados com API falsa; não são prova de integração final.
+- Mídia externa `750dfe2`: sem Pillow no runtime, validação FFmpeg/ffprobe e hashes com buffers limitados. Extração mantém RGB nativo verificado; PNG codificado pode ter metadados diferentes.
+- Worker `051c5ba`: `.data/runs/<mesmo UUID>/request.json` é o snapshot imutável admitido, publicado por último. `manifest.json` contém lifecycle/output. Worker recebe somente UUID e reidrata dos arquivos; startup interrompe antigos queued/running, nunca os reproduz. Os leases existentes `.data/state/storage.lock` SH e `runtime.lock` EX coordenam a propriedade.
+- Ponte `6eae6f9`: UI estática, catálogos, upload bruto limitado a32MiB, referências `assets|inputs|runs`, mídia própria/Range e SSE no mesmo observador inotify. Publicação de upload preserva bytes originais; `metadata.json` é o commit final. Validação/frame/thumbnail não passam pixels pelo Python.
+- Front `4a68a02`: selecionar referência, enviar imagem ao PC, assistir/revisar/continuar explicitamente; SSE precede snapshot e nunca reenvia POST. 521 testes Python e32 Node passaram, incluindo71 novos da ponte e4 eventos de subpastas profundas. Dados antigos e cópia permaneceram byte-exact.
+- Auditoria real somente leitura: desktop1440 e celular emulado393/touch, reprodução manual480×864/24fps e Range206, failed oculto, SSE inicial `.data`; zero POST/provider/GPU. Evidência local `.dumps/tests/reports/frontend_real.json` e `runtime_sse.json`. A inspeção visual encontrou compressão de cards com12 blocos; sua correção e revalidação estão pendentes, portanto isso ainda não certifica UI final.
 
-A retirada de Pillow e a ponte/observador precisam de testes e commits próprios. Este documento registra o contrato escolhido, não afirma que toda a nova arquitetura já esteja implementada. A ponte final preservará o acesso por UUID, streaming/Range, revisão explícita, compatibilidade do benchmark e ausência de geração incidental.
+O processo próprio da ponte observado após essa auditoria tinha RSS58928KiB e swap0. É uma amostra de um processo Python, não pico de todo o sistema, redução medida ou afirmação sobre memória/cache do ComfyUI.
+
+## Grok apartado
+
+A rota independente do dono (`041b014`) recebe system prompt/ideia e devolve texto ao front. Não conhece Store/worker/runs/revisão nem dispara vídeo. Configuração editável própria em `.data/grok/` é separada de credenciais OAuth; nenhuma chamada ao provider em importação, startup, abertura da página ou reconexão. O editor visual é uma tarefa separada; gerar vídeo continua outro clique explícito.
+
+## Ainda falta para a entrega completa
+
+Corrigir/revalidar a biblioteca com muitos blocos, concluir editor Grok isolado e montagem vertical de sequência via FFmpeg, verificar integração final/memória/benchmark e documentar execução local. Montagem permanece desabilitada na configuração até existir uma implementação verificada; fim ready é prévia, não aceitação artística.
