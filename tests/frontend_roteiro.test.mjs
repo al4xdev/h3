@@ -6,6 +6,24 @@ const {savedEditorMatches, editorPayload, relevantChange, batchDraftsClean, batc
 const id = '11111111-1111-4111-8111-111111111111', block = '22222222-2222-4222-8222-222222222222', intent = '33333333-3333-4333-8333-333333333333';
 const fixture = () => ({id, revision: 2, name: '<img onerror=evil()>', idea: 'Macro', reference: {source_root: 'inputs', path: 'own/original.png'}, reference_sha256: 'a'.repeat(64), adopted: true, blocks: [{id: block, action: 'Dance', prompt: ' exact FINAL\n', duration_seconds: 8, seed: 42}], attempts: []});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
+test('actual story renderer opens pending blocks and attaches organization actions', async () => {
+  const handler = source.slice(source.indexOf('  function renderStory()'), source.indexOf('  async function saveStoryBlocks'));
+  const nodes = new Map(), saved = [];
+  const element = (tag, classes, value) => ({tag, textContent: value, children: [], dataset: {}, listeners: {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, addEventListener(event, callback) { this.listeners[event] = callback; }});
+  const $ = key => { if (!nodes.has(key)) nodes.set(key, element('div')); return nodes.get(key); };
+  const doc = fixture();
+  doc.blocks.push({...doc.blocks[0], id: intent});
+  const story = {doc};
+  const deps = {story, $, element, storyBlocks: () => doc.blocks, storyBlockState, alignedFrames: () => 192, text: (key, value) => { $(key).textContent = value; }, batchBlocked: () => false, saveStoryBlocks: async blocks => { saved.push(blocks); }, STATE_LABELS: {}, document: {defaultView: {confirm: () => true}}};
+  const render = new Function(...Object.keys(deps), `${handler}; return renderStory;`)(...Object.values(deps));
+  render();
+  assert.equal($('story-blocks').children.length, 2);
+  const organize = $('story-blocks').children[0].children.find(node => node.tag === 'details');
+  const moveDown = organize.children.at(-1);
+  assert.equal(moveDown.disabled, false);
+  await moveDown.listeners.click();
+  assert.deepEqual(saved[0].map(item => item.id), [intent, block]);
+});
 test('story pointers preserve assembly, extras and hash before submission', () => {
   const result = storyLocation(`http://local/?assembly=${intent}&extra=x#viewer`, {id, block, intent});
   assert.equal(result, `/roteiro?assembly=${intent}&extra=x&roteiro=${id}&block=${block}&intent=${intent}#viewer`);
