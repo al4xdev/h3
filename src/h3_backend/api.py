@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from .favorites import router as favorites_router
 from .generation.assembly import router as assembly_router
 from .generation.dispatcher import Conflict, RunService
 from .generation.i2v import router as i2v_router
@@ -22,6 +23,7 @@ from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
 from .library import router as library_router
+from .pwa import router as pwa_router
 from .roteiro import router as roteiro_router
 from .roteiro_batch import RoteiroBatch
 from .roteiro_batch import router as roteiro_batch_router
@@ -31,7 +33,7 @@ MAX_INPUT_BYTES = 32 * 1024**2
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
     "media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; "
-    "frame-ancestors 'none'; form-action 'self'"
+    "frame-ancestors 'none'; form-action 'self'; manifest-src 'self'; worker-src 'self'"
 )
 
 
@@ -70,6 +72,8 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     app.include_router(roteiro_router)
     app.include_router(roteiro_batch_router)
     app.include_router(library_router)
+    app.include_router(favorites_router)
+    app.include_router(pwa_router)
     app.include_router(assembly_router)
     if service is not None:
         app.state.service = service

@@ -298,12 +298,12 @@ function motionFixture() {
   return {document, preference, classes, listeners, preferenceListeners, viewListeners, calls, node};
 }
 test('motion tokens are bounded, directional and compositor-only, with six-card stagger', () => {
-  assert.equal(motionSpec('enter').options.duration, 180);
+  assert.equal(motionSpec('enter').options.duration, 360);
   assert.match(motionSpec('enter', {direction: -1}).frames[0].transform, /-12px/);
-  assert.equal(motionSpec('enter', {index: 5}).options.delay, 80);
+  assert.equal(motionSpec('enter', {index: 5}).options.delay, 160);
   assert.equal(motionSpec('enter', {index: 6}).options.delay, 0);
-  assert.equal(motionSpec('confirm').options.duration, 240);
-  assert.equal(motionSpec('cue').options.duration, 160);
+  assert.equal(motionSpec('confirm').options.duration, 480);
+  assert.equal(motionSpec('cue').options.duration, 320);
   for (const kind of ['enter', 'confirm', 'cue']) for (const frame of motionSpec(kind).frames) assert.ok(Object.keys(frame).every(key => ['transform', 'opacity'].includes(key)));
 });
 test('motion signatures survive recreated cards and cannot grow from arbitrary identifiers', () => {

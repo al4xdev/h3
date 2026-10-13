@@ -114,7 +114,7 @@ class FileWatcher:
     def _allowed_directory(self, path: Path) -> bool:
         parts = path.relative_to(self.data).parts
         if len(parts) == 1:
-            return parts[0] in {"runs", "inputs", "assemblies", "roteiros", "roteiro-batches"}
+            return parts[0] in {"runs", "inputs", "assemblies", "roteiros", "roteiro-batches", "library"}
         if parts[0] == "runs":
             return len(parts) == 2 and self._uuid(parts[1])
         if parts[0] == "roteiros":
@@ -169,7 +169,7 @@ class FileWatcher:
                         continue
                     path = directory / name
                     if path.relative_to(self.data).parts[0] not in {
-                        "runs", "inputs", "assemblies", "roteiros", "roteiro-batches",
+                        "runs", "inputs", "assemblies", "roteiros", "roteiro-batches", "library",
                     }:
                         continue
                     self._emit(path.relative_to(self.root).as_posix())

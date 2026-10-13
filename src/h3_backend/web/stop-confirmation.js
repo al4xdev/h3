@@ -57,7 +57,7 @@ export function createStopConfirmation({document, card, onConfirm, onCancel, lab
     stopButton.setAttribute('aria-expanded', 'true');
     cancelButton.focus();
     if (!preference?.matches && !document.hidden && fill.animate) {
-      animation = fill.animate([{transform: 'scaleX(0)'}, {transform: 'scaleX(1)'}], {duration: 200, easing: 'ease-out'});
+      animation = fill.animate([{transform: 'scaleX(0)'}, {transform: 'scaleX(1)'}], {duration: 400, easing: 'ease-out'});
     }
   };
   const cancel = () => {

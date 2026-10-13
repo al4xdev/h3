@@ -154,6 +154,21 @@ ou resultado mais recente.
 
 ## Validação e evidência
 
+Atualização de avisos, favoritos e PWA em 2026-10-13: **933 testes Python**
+fake/CPU e **236 testes Node** passaram; Ruff e whitespace check aprovados.
+Inclui reconciliação do mesmo pedido após desconexão, decisão ainda incerta
+preservada, dispensa sem apagar/repetir, favoritos atômicos compartilhados,
+resumos limitados, paginação lazy de12 sem perder atualização SSE, PWA sem cache
+de API/mídia/operações e reconexão preservando os IDs da URL. Os textos das listas
+ficam em três linhas e os ícones de favorito/apagar têm área de toque44px.
+O ícone próprio foi gerado pela ferramenta nativa image_gen; original e exportações
+estão em `src/h3_backend/web/`, com prompt em `icon-provenance.json`.
+Logs em `.dumps/tasks/notices-pwa-library-pytest.txt` e
+`notices-pwa-library-node-tests.txt`. Sem nova chamada ao Grok/GPU, reinício de
+servidor de produção ou nova captura visual automatizada. Instalação PWA no
+celular requer HTTPS confiável; fullscreen e fechamento animado do dropdown
+dependem do suporte do navegador.
+
 Atualização de lote, Freestyle e parada em 2026-10-13: **924 testes Python**
 fake/CPU e **209 testes Node** passaram; Ruff e whitespace check aprovados.
 Inclui melhoria Grok obrigatória por bloco, ausência de fallback/replay, descoberta

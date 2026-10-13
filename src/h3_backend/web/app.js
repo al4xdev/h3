@@ -34,12 +34,25 @@ export function relevantChange(event) {
   if (!event.path || event.path === '.data') return true;
   if (typeof event.path !== 'string') return false;
   const path = event.path.replace(/^\.data\//, '');
-  if (path === 'roteiros' || path === 'roteiro-batches' || /^roteiros\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(path)) return true;
+  if (path === 'library' || path === 'library/favorites.json' || path === 'roteiros' || path === 'roteiro-batches' || /^roteiros\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(path)) return true;
   return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^roteiros\/.+\.json$/.test(path) || /^roteiro-batches\/(?:active|[0-9a-f-]+)\.json$/.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
 }
 export function canonicalUUID(value) {
   if (typeof value !== 'string' || value.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) throw new Error('ID deve ser um UUID canônico local.');
   return value;
+}
+export function noticePointer(href) {
+  const params = new URL(href).searchParams;
+  if (!params.has('pending_run') && !params.has('pending_action')) return null;
+  if (params.getAll('pending_run').length !== 1 || params.getAll('pending_action').length !== 1 || !['generate', 'accept', 'reject'].includes(params.get('pending_action'))) throw new Error('Ponteiro do aviso inválido.');
+  return {kind: 'run', id: canonicalUUID(params.get('pending_run')), action: params.get('pending_action')};
+}
+export function confirmedNoticeRun(run, owner) {
+  if (!run || run.id !== owner.id || !Object.hasOwn(STATE_LABELS, run.state)) throw new Error('O resultado não corresponde ao pedido acompanhado.');
+  canonicalUUID(run.id);
+  const terminal = !['queued', 'running'].includes(run.state);
+  const resolved = owner.action === 'generate' || ['accepted', 'rejected', 'interrupted', 'failed'].includes(run.state);
+  return {id: run.id, label: STATE_LABELS[run.state], terminal, resolved};
 }
 export function newAssemblyUUID(crypto) {
   if (typeof crypto?.randomUUID === 'function') return canonicalUUID(crypto.randomUUID());
@@ -445,11 +458,11 @@ export function createBackSwipe(document, {back, canGoBack, navigationEpoch}) {
   return {destroy() { cancel(); for (const [name, handler] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', cancel]]) document.removeEventListener(name, handler); }};
 }
 export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
-  const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 16 : 0;
+  const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 32 : 0;
   const easing = 'cubic-bezier(.2,.8,.2,1)';
-  if (kind === 'enter') return {frames: [{opacity: .65, transform: `translateX(${direction < 0 ? -12 : 12}px)`}, {opacity: 1, transform: 'translateX(0)'}], options: {duration: 180, delay, easing}};
-  if (kind === 'confirm') return {frames: [{opacity: .75, transform: 'scale(.985)'}, {opacity: 1, transform: 'scale(1)'}], options: {duration: 240, easing}};
-  return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 160, easing}};
+  if (kind === 'enter') return {frames: [{opacity: .65, transform: `translateX(${direction < 0 ? -12 : 12}px)`}, {opacity: 1, transform: 'translateX(0)'}], options: {duration: 360, delay, easing}};
+  if (kind === 'confirm') return {frames: [{opacity: .75, transform: 'scale(.985)'}, {opacity: 1, transform: 'scale(1)'}], options: {duration: 480, easing}};
+  return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 320, easing}};
 }
 // Presentation owns no timers, requests or completion callbacks into business state.
 export function createScreenTransitions(document) {
@@ -541,7 +554,24 @@ export function createPresentationMotion(document) {
   return {play, changed, enter, busy, stop, destroy, get activeCount() { return active.size; }, get channelCount() { return signatures.size; }};
 }
 
-export function startUI(document, client = createClient(), stories = createStoryClient()) {
+export function createLibraryClient(fetcher = globalThis.fetch) {
+  return {async favorite(kind, id, favorite) {
+    if (!['roteiro', 'freestyle'].includes(kind) || typeof favorite !== 'boolean') throw new Error('Favorito inválido.');
+    const response = await fetcher(`/favorites/${kind}/${canonicalUUID(id)}`, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({favorite})});
+    const value = await response.json();
+    if (!response.ok) throw new HTTPError(response.status, value.detail || 'Não foi possível salvar o favorito.');
+    return value;
+  }};
+}
+
+export function appendLibraryPage(existing, result, append = false) {
+  if (!Array.isArray(result.items) || !Number.isInteger(result.total) || result.total < 0) throw new Error('Resposta inválida da biblioteca.');
+  const unique = new Map((append ? existing : []).map(item => [item.id, item]));
+  for (const item of result.items) unique.set(canonicalUUID(item.id), item);
+  return [...unique.values()];
+}
+
+export function startUI(document, client = createClient(), stories = createStoryClient(), libraries = createLibraryClient()) {
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
   const screenTransitions = createScreenTransitions(document);
@@ -549,12 +579,21 @@ export function startUI(document, client = createClient(), stories = createStory
   const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
   let stopFactory = null;
   let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0, assemblyEpoch = 0;
+  let favoriteItems = [], favoritesReady = false, favoriteBusy = false, freestyleLoading = false;
   let pointer = null, pointerError = null;
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
-  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 12, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   Object.assign(state, {screen: 'library', stopBusy: false, stopUncertain: false, stopOwner: null, batchOwner: null, batchRecord: null, globalBatchRecord: null, batchDiscoveryUncertain: true, batchDiscoveryEpoch: 0, batchUncertain: false, batchReading: false, batchEpoch: 0, conversionBusy: false, conversionUncertain: false, conversionEnd: null, conversionId: null, branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
-  const story = {available: false, runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
+  const story = {available: false, items: [], runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
+  Object.assign(state, {noticeOwner: null, noticeResult: null, noticeReading: false, dismissedRunNotice: null, dismissedBatchNotice: null});
+  try {
+    const href = document.defaultView?.location?.href || 'http://local/';
+    state.noticeOwner = noticePointer(href);
+    if (state.noticeOwner) state.uncertain = true;
+    const params = new URL(href).searchParams;
+    for (const [key, field] of [['dismiss_run', 'dismissedRunNotice'], ['dismiss_batch', 'dismissedBatchNotice']]) if (params.has(key)) { if (params.getAll(key).length !== 1) throw new Error('Ponteiro de aviso dispensado inválido.'); state[field] = canonicalUUID(params.get(key)); }
+  } catch (error) { state.uncertain = true; message('notice', error.message, true); }
   let storyRecovery = null; try { const href = document.defaultView?.location?.href || 'http://local/'; storyRecovery = storyPointer(href); const params = new URL(href).searchParams; if (!storyRecovery.intent && params.has('pending_intent')) { for (const key of ['pending_roteiro', 'pending_block', 'pending_intent']) if (params.getAll(key).length !== 1) throw new Error('Ponteiro de recuperação inválido.'); storyRecovery = {roteiro: canonicalUUID(params.get('pending_roteiro')), block: canonicalUUID(params.get('pending_block')), intent: canonicalUUID(params.get('pending_intent'))}; } } catch (error) { message('notice', error.message, true); }
   try { state.batchOwner = batchPointer(document.defaultView?.location?.href || 'http://local/'); state.batchUncertain = Boolean(state.batchOwner); } catch (error) { state.batchUncertain = true; message('notice', error.message, true); }
   try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('conversion_roteiro') || params.has('conversion_end')) { if (params.getAll('conversion_roteiro').length !== 1 || params.getAll('conversion_end').length !== 1) throw new Error('Ponteiro de conversão inválido.'); state.conversionId = canonicalUUID(params.get('conversion_roteiro')); state.conversionEnd = canonicalUUID(params.get('conversion_end')); state.conversionUncertain = true; } } catch (error) { state.conversionUncertain = true; message('notice', error.message, true); }
@@ -711,6 +750,59 @@ export function startUI(document, client = createClient(), stories = createStory
     if (state.stopOwner) { url.searchParams.set('stop_id', state.stopOwner.id); url.searchParams.set('stop_kind', state.stopOwner.kind); if (state.stopOwner.roteiro) url.searchParams.set('stop_roteiro', state.stopOwner.roteiro); }
     view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }
+  function noticeURL() {
+    const view = document.defaultView; if (!view?.history) return;
+    const url = new URL(view.location.href);
+    for (const key of ['pending_run', 'pending_action', 'dismiss_run', 'dismiss_batch']) url.searchParams.delete(key);
+    if (state.noticeOwner?.kind === 'run') { url.searchParams.set('pending_run', state.noticeOwner.id); url.searchParams.set('pending_action', state.noticeOwner.action); }
+    if (state.dismissedRunNotice) url.searchParams.set('dismiss_run', state.dismissedRunNotice);
+    if (state.dismissedBatchNotice) url.searchParams.set('dismiss_batch', state.dismissedBatchNotice);
+    view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  async function reconcilePendingNotice() {
+    if (state.busy || state.noticeReading) return;
+    if (!state.uncertain && state.noticeResult?.terminal && state.noticeResult.resolved && state.dismissedRunNotice === state.noticeResult.id) return;
+    let owner = state.noticeOwner;
+    if (!owner && story.uncertainIntent && story.intentOwner?.intent === story.uncertainIntent) owner = {kind: 'story', id: story.uncertainIntent, roteiro: story.intentOwner.id, block: story.intentOwner.block, action: 'generate'};
+    if (!owner && state.pendingRun?.id) owner = {kind: 'run', id: state.pendingRun.id, action: 'generate'};
+    if (!owner) return;
+    state.noticeOwner = owner; state.noticeReading = true; controls();
+    try {
+      let run, result, doc;
+      if (owner.kind === 'story') {
+        doc = await stories.read(owner.roteiro);
+        const expected = {id: owner.roteiro, block: owner.block, intent: owner.id};
+        const attempt = await readOwnedStoryIntent(stories, doc, owner.block, owner.id, expected);
+        if (doc.id !== owner.roteiro || attempt.roteiro_id !== owner.roteiro || attempt.block_id !== owner.block || attempt.intent_id !== owner.id || attempt.run_id !== owner.id) throw new Error('O envio recebido pertence a outro roteiro ou bloco.');
+        if (attempt.admission === 'rejected' && attempt.state === 'not_admitted' && attempt.run === null) result = {id: owner.id, label: 'Envio recusado antes da geração', terminal: true, resolved: true};
+        else if (attempt.admission === 'admitted' && attempt.run?.id === owner.id) run = attempt.run;
+        else throw new Error('A admissão deste envio ainda não foi confirmada.');
+      } else run = await client.get(`/runs/${owner.id}`);
+      if (run) result = confirmedNoticeRun(run, owner);
+      if (state.noticeOwner !== owner || stopped) return;
+      state.noticeResult = result;
+      if (run) state.pendingRun = run;
+      if (!story.uncertainIntent || story.uncertainIntent === owner.id) {
+        state.uncertain = !result.resolved;
+        if (result.resolved && story.uncertainIntent === owner.id) story.uncertainIntent = null;
+      }
+      if (doc && story.doc?.id === doc.id && !story.editing && !story.candidate) { story.doc = doc; if (state.screen === 'story') renderStory(); }
+      message('operation', `${result.label} · ${owner.id}. ${result.resolved ? 'Estado confirmado no PC; histórico preservado.' : 'A decisão ainda não foi confirmada. Não repita o pedido.'}`);
+      noticeURL();
+    } catch (error) {
+      if (state.noticeOwner === owner) { state.uncertain = true; message('notice', `Pedido ${owner.id} ainda não confirmado: ${error.message}. Consulte este mesmo pedido; não reenvie.`, true); }
+    } finally { state.noticeReading = false; controls(); }
+  }
+  function dismissNotice(kind) {
+    if (kind === 'run') {
+      if (state.busy || state.noticeReading || state.uncertain || state.stopBusy || state.stopUncertain || !state.noticeResult?.terminal || !state.noticeResult.resolved) return;
+      state.dismissedRunNotice = state.noticeResult.id;
+    } else {
+      if (state.batchReading || state.batchUncertain || state.stopBusy || state.stopUncertain || !state.batchRecord || state.batchRecord.state === 'active') return;
+      state.dismissedBatchNotice = state.batchRecord.id;
+    }
+    noticeURL(); controls();
+  }
   async function readStopOwner() {
     const owner = state.stopOwner; if (!owner || state.stopBusy || !state.stopUncertain) return;
     try {
@@ -720,6 +812,7 @@ export function startUI(document, client = createClient(), stories = createStory
       if (terminal) { state.stopUncertain = false; state.stopOwner = null; stopURL(); }
       if (owner.kind === 'batch' && state.batchOwner?.id === owner.id) state.batchRecord = result;
       if (owner.kind === 'run' && state.pendingRun?.id === owner.id) state.pendingRun = result;
+      if (owner.kind === 'run' && state.noticeOwner?.id === owner.id) state.noticeResult = confirmedNoticeRun(result, state.noticeOwner);
     } catch (error) { message('notice', `Parada ainda não confirmada: ${error.message}. Consulte os metadados do mesmo ID.`, true); }
     finally { controls(); }
   }
@@ -759,6 +852,7 @@ export function startUI(document, client = createClient(), stories = createStory
         if (run.id !== owner.id || !['interrupted', 'failed', 'ready_for_review', 'accepted', 'rejected'].includes(run.state)) throw new Error('O bloco ainda não confirmou um estado terminal.');
         state.items = state.items.map(item => item.id === owner.id ? {...item, ...run} : item);
         if (state.pendingRun?.id === owner.id) state.pendingRun = run;
+        if (state.noticeOwner?.id === owner.id) state.noticeResult = confirmedNoticeRun(run, state.noticeOwner);
         if (state.selected?.id === owner.id) { state.selected = run; renderRun(); }
       }
       state.stopUncertain = false; state.stopOwner = null; stopURL();
@@ -959,17 +1053,22 @@ export function startUI(document, client = createClient(), stories = createStory
     $('late-proposal').value = draft().lateProposal?.text || '';
     text('late-proposal-context', draft().lateProposal?.context || '');
     $('show-proposal').hidden = !draft().proposal;
-    $('pending-run-card').hidden = !state.uncertain && !['queued', 'running'].includes(state.pendingRun?.state);
-    $('batch-library-card').hidden = !state.batchOwner;
-    $('batch-card').hidden = !state.batchOwner || story.doc?.id !== state.batchOwner.roteiro;
+    const resolvedNotice = !state.uncertain && state.noticeResult?.terminal && state.noticeResult.resolved;
+    const showRunNotice = state.uncertain || ['queued', 'running'].includes(state.pendingRun?.state) || Boolean(resolvedNotice && state.dismissedRunNotice !== state.noticeResult.id);
+    const resolvedBatch = !state.batchUncertain && state.batchRecord && state.batchRecord.state !== 'active';
+    const showBatchNotice = Boolean(state.batchOwner && (!resolvedBatch || state.dismissedBatchNotice !== state.batchRecord.id));
+    $('pending-run-card').hidden = !showRunNotice;
+    $('batch-library-card').hidden = !showBatchNotice;
+    $('batch-card').hidden = !showBatchNotice || story.doc?.id !== state.batchOwner.roteiro;
+    $('pending-notice-dismiss').hidden = !resolvedNotice;
+    $('pending-notice-dismiss').disabled = state.noticeReading || state.busy || state.stopBusy || state.stopUncertain;
+    for (const id of ['batch-dismiss', 'batch-library-dismiss']) { $(id).hidden = !resolvedBatch; $(id).disabled = state.batchReading || state.stopBusy || state.stopUncertain; }
     syncStopViews();
-    $('nav-status').hidden = !state.uncertain && !['queued', 'running'].includes(state.pendingRun?.state);
-    text('nav-status', state.uncertain ? 'Consultar pedido com resultado incerto · não reenviar' : `Pedido no PC · ${state.pendingRun?.id?.slice(0, 8) || 'aguardando ID'}`);
-    text('status-state', state.pendingRun ? label(state.pendingRun) : state.uncertain ? 'Admissão incerta' : 'Sem pedido');
-    text('status-id', state.pendingRun?.id || 'ID não confirmado. Não envie novamente.');
+    $('nav-status').hidden = !showRunNotice;
+    text('nav-status', state.noticeReading ? 'Consultando o mesmo pedido…' : state.uncertain ? 'Consultar pedido com resultado incerto · não reenviar' : state.noticeResult ? `${state.noticeResult.label} · ${state.noticeResult.id.slice(0, 8)}` : `Pedido no PC · ${state.pendingRun?.id?.slice(0, 8) || 'aguardando ID'}`);
+    text('status-state', state.pendingRun ? label(state.pendingRun) : state.noticeResult?.label || (state.uncertain ? 'Admissão incerta' : 'Sem pedido'));
+    text('status-id', state.pendingRun?.id || state.noticeResult?.id || 'ID não confirmado. Não envie novamente.');
     $('status-review').disabled = !state.pendingRun || state.busy;
-    $('previous').disabled = state.offset === 0;
-    $('next').disabled = state.offset + state.limit >= state.total;
     for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
@@ -1003,11 +1102,32 @@ export function startUI(document, client = createClient(), stories = createStory
     if (owner) for (const [key, value] of [['pending_roteiro', owner.id], ['pending_block', owner.block], ['pending_intent', owner.intent]]) url.searchParams.set(key, canonicalUUID(value));
     view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }
-  let deleting = false;
+  let deleting = false, favoriteDeleteReading = false;
   const removedStories = new Set(), removedRuns = new Set();
   function deleteButton(label, action) {
-    const button = element('button', 'delete-item', label); button.type = 'button';
-    button.disabled = deleting; button.addEventListener('click', action); return button;
+    const button = element('button', 'delete-item card-icon'); button.type = 'button'; cardIcon(button, 'trash', label);
+    button.disabled = deleting || favoriteDeleteReading; button.addEventListener('click', action); return button;
+  }
+  function cardIcon(button, kind, label) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '20'); svg.setAttribute('height', '20'); svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', kind === 'star' ? 'm12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9L12 3Z' : 'M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 10v7M14 10v7');
+    svg.append(path); button.replaceChildren(svg); button.setAttribute('aria-label', label); button.title = label;
+  }
+  function cardTools(...buttons) { const tools = element('div', 'card-tools'); tools.setAttribute('data-no-swipe', ''); tools.append(...buttons); return tools; }
+  async function removeFavoriteItem(favorite) {
+    if (favoriteDeleteReading || deleting) return;
+    const navigation = state.navigationEpoch;
+    favoriteDeleteReading = true;
+    for (const button of document.querySelectorAll('.delete-item')) button.disabled = true;
+    try {
+      const item = favorite.kind === 'roteiro' ? await stories.read(favorite.id) : await client.get(`/runs/${canonicalUUID(favorite.id)}`);
+      if (item.id !== favorite.id) throw new Error('O item recebido pertence a outro favorito.');
+      if (navigation !== state.navigationEpoch || stopped) return;
+      await removeLibraryItem(favorite.kind === 'roteiro' ? 'story' : 'run', item);
+    } catch (error) { message('favorites-status', `Não foi possível conferir o item: ${error.message}. Releia a biblioteca.`, true); }
+    finally { favoriteDeleteReading = false; for (const button of document.querySelectorAll('.delete-item')) button.disabled = deleting; }
   }
   async function removeLibraryItem(kind, item) {
     if (!item || batchBlocked() || state.conversionBusy || state.conversionUncertain || deleting || story.busy || state.busy || state.uncertain || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.grokBusy || state.grokUncertain) return;
@@ -1022,6 +1142,7 @@ export function startUI(document, client = createClient(), stories = createStory
       if (isStory) removedStories.add(item.id);
       if (isStory && story.doc?.id === item.id) { story.doc = null; story.block = null; story.candidate = null; story.editing = null; story.creating = false; storyURL(); }
       const deletedRunIDs = isStory ? new Set((item.attempts || []).map(attempt => attempt.run_id).filter(Boolean)) : new Set([item.id]);
+      if (deletedRunIDs.has(state.noticeOwner?.id)) { state.noticeOwner = null; state.noticeResult = null; state.pendingRun = null; noticeURL(); }
       for (const id of deletedRunIDs) removedRuns.add(id);
       if (deletedRunIDs.has(state.selected?.id)) { ++state.epoch; state.selected = null; state.sequence = null; state.branchSequence = null; state.openedBranchEnd = null; renderRun(); }
       if (navigation === state.navigationEpoch && state.screen !== 'library') navigate('library');
@@ -1038,16 +1159,43 @@ export function startUI(document, client = createClient(), stories = createStory
     try {
       const result = await stories.list(); if (!Array.isArray(result.items)) throw new Error('Biblioteca de roteiros inválida.');
       story.available = true;
+      story.items = result.items;
       story.runIDs = new Set(result.items.flatMap(doc => doc.attempts.map(attempt => attempt.run_id).filter(Boolean)));
-      $('story-library').replaceChildren();
-      if (!result.items.length) $('story-library').append(element('p', 'caption', 'Seu primeiro roteiro começa com uma ideia.'));
-      for (const doc of result.items) {
-        const card = element('article', 'story-card'), accepted = doc.blocks.filter(block => storyBlockState(doc, block).accepted).length;
-        const button = element('button', '', 'Abrir roteiro'); button.type = 'button'; button.addEventListener('click', () => openStory(doc.id));
-        card.append(element('h3', '', doc.name || 'Roteiro sem nome'), element('p', 'caption', `${doc.blocks.length} blocos · ${accepted} aceitos`), button, deleteButton('Apagar roteiro', () => removeLibraryItem('story', doc))); $('story-library').append(card);
-      }
       message('story-library-status', ''); renderLibrary();
     } catch (error) { message('story-library-status', `Não foi possível ler os roteiros: ${error.message}. Use Reler biblioteca.`, true); }
+  }
+  function renderStoryLibrary() {
+    $('story-library').replaceChildren();
+    if (!story.items.length) $('story-library').append(element('p', 'caption', 'Seu primeiro roteiro começa com uma ideia.'));
+    for (const doc of story.items) {
+      const card = element('article', 'story-card'), accepted = doc.blocks.filter(block => storyBlockState(doc, block).accepted).length;
+      const button = element('button', 'card-open'); button.type = 'button'; button.setAttribute('aria-label', `Abrir roteiro ${doc.name || 'sem nome'}`); button.addEventListener('click', () => openStory(doc.id));
+      button.append(element('span', 'card-title', doc.name || 'Roteiro sem nome'), element('span', 'caption', `${doc.blocks.length} blocos · ${accepted} aceitos`));
+      card.append(button, cardTools(favoriteButton('roteiro', doc.id), deleteButton('Apagar roteiro', () => removeLibraryItem('story', doc)))); $('story-library').append(card);
+    }
+  }
+  function favoriteButton(kind, id) {
+    const selected = favoriteItems.some(item => item.kind === kind && item.id === id);
+    const button = element('button', 'favorite-toggle card-icon'); button.type = 'button'; cardIcon(button, 'star', selected ? 'Remover dos favoritos' : 'Adicionar aos favoritos'); button.setAttribute('aria-pressed', String(selected)); button.disabled = favoriteBusy || !favoritesReady;
+    button.addEventListener('click', async () => {
+      if (favoriteBusy || !favoritesReady) return;
+      favoriteBusy = true; for (const node of document.querySelectorAll('.favorite-toggle')) node.disabled = true;
+      try { const result = await libraries.favorite(kind, id, !selected); if (!Array.isArray(result.items)) throw new Error('Catálogo de favoritos inválido.'); favoriteItems = result.items; message('favorites-status', 'Favoritos salvos no PC.'); }
+      catch (error) { favoritesReady = false; message('favorites-status', `${error.message} Releia a biblioteca para confirmar.`, true); }
+      finally { favoriteBusy = false; renderLibrary(); await storyLibrary(); }
+    });
+    return button;
+  }
+  function renderFavorites() {
+    const list = $('favorites-library'); list.replaceChildren();
+    if (!favoriteItems.length) list.append(element('p', 'caption', 'Marque um roteiro ou Freestyle com a estrela para encontrá-lo aqui.'));
+    for (const favorite of favoriteItems) {
+      const item = favorite.item, card = element('article', 'story-card');
+      const button = element('button', 'card-open'); button.type = 'button'; button.setAttribute('aria-label', favorite.kind === 'roteiro' ? `Abrir roteiro ${item.name || 'sem nome'}` : `Abrir Freestyle ${item.id.slice(0, 8)}`);
+      button.addEventListener('click', async () => { if (favorite.kind === 'roteiro') await openStory(item.id); else { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(item.id); if (navigation === state.navigationEpoch && state.selected?.id === item.id) navigate('review', {origin}); } });
+      button.append(element('span', 'card-title', favorite.kind === 'roteiro' ? item.name || 'Roteiro sem nome' : `Freestyle · ${item.id.slice(0, 8)}`), element('span', 'caption block-preview', favorite.kind === 'roteiro' ? `${item.block_count ?? item.blocks.length} blocos` : `${label(item)} · ${item.prompt || 'Sem instrução'}`));
+      card.append(button, cardTools(favoriteButton(favorite.kind, item.id), deleteButton(favorite.kind === 'roteiro' ? 'Apagar roteiro' : 'Apagar bloco', () => removeFavoriteItem(favorite)))); list.append(card);
+    }
   }
   async function openStory(id) {
     if (story.doc?.id === id && (story.editing || story.candidate)) { renderStory(); navigate('story'); return; }
@@ -1073,7 +1221,7 @@ export function startUI(document, client = createClient(), stories = createStory
         action.addEventListener('input', () => { story.editDraft.action = action.value; }); duration.addEventListener('input', () => { story.editDraft.durationText = duration.value; });
         const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
       } else {
-        li.append(element('p', '', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
+        li.append(element('p', 'block-preview', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
         const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
         edit.addEventListener('click', () => { if (batchBlocked() && !info.latest) return; if (info.latest) void openStoryAttempt(info.accepted || info.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...block}; renderStory(); } }); li.append(edit);
         if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
@@ -1338,19 +1486,26 @@ export function startUI(document, client = createClient(), stories = createStory
     for (const run of standalone) {
       let card = libraryCards.get(run.id);
       const button = card?.querySelector('.clip-card') || element('button', 'clip-card'); button.replaceChildren(); button.type = 'button'; button.setAttribute('aria-current', String(run.id === state.selected?.id));
-      button.setAttribute('aria-label', `${label(run)} · ${run.id} · ${run.prompt || 'Sem instrução'}`);
+      button.setAttribute('aria-label', `Abrir bloco ${run.id.slice(0, 8)} · ${label(run)}`);
       const top = element('span', 'card-top'); top.append(element('span', '', run.id.slice(0, 8)), element('span', '', `${run.duration_seconds ?? '—'} s`));
       const bottom = element('span', 'card-bottom'); bottom.append(element('span', '', label(run)), element('span', 'mono', `seed ${run.seed}`));
       const created = new Date(run.created_at);
       const stamp = Number.isNaN(created.getTime()) ? 'Data indisponível' : new Intl.DateTimeFormat('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(created);
       const date = element('span', 'card-created', `Criado ${stamp}`); date.title = run.created_at || '';
       button.append(top, element('span', 'card-prompt', run.prompt || 'Sem instrução'), bottom, date);
-      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); if (!card) { card = element('article', 'library-item'); card.append(button, deleteButton('Apagar bloco', () => removeLibraryItem('run', run))); libraryCards.set(run.id, card); } libraryStop(run, card); list.append(card);
+      button.onclick = async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); };
+      if (!card) { card = element('article', 'library-item'); card.append(button, cardTools(favoriteButton('freestyle', run.id), deleteButton('Apagar bloco', () => removeLibraryItem('run', run)))); libraryCards.set(run.id, card); }
+      else { const tools = card.querySelector('.card-tools'); tools.querySelector('.favorite-toggle')?.remove(); tools.prepend(favoriteButton('freestyle', run.id)); }
+      libraryStop(run, card); list.append(card);
     }
     for (const [id, existing] of libraryStops) if (!standalone.some(run => run.id === id)) { existing.view.destroy(); libraryStops.delete(id); libraryCards.delete(id); }
     for (const id of libraryCards.keys()) if (!standalone.some(run => run.id === id)) libraryCards.delete(id);
     text('library-count', `${state.total} blocos`);
-    text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
+    text('page-label', `${state.items.length} de ${state.total}`);
+    $('load-more').hidden = state.offset >= state.total;
+    $('load-more').disabled = freestyleLoading;
+    renderFavorites();
+    renderStoryLibrary();
     motion.changed('library', `${state.offset}:${state.items.map(run => `${run.id}:${run.state}`).join('|')}`, [...list.children], 'enter');
     controls();
   }
@@ -1473,15 +1628,25 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { if (epoch === state.retryEpoch && state.selected?.id === sourceId) message('retry-status', `Não foi possível copiar esta tentativa: ${error.message} Nenhum pedido foi enviado.`, true); }
     finally { state.retryPreparing = false; controls(); }
   }
-  async function loadLibrary() {
+  async function loadLibrary(append = false) {
+    if (freestyleLoading) { if (!append) { dirty = true; await loadLibrary.pending; } return; }
+    freestyleLoading = true;
+    let release;
+    loadLibrary.pending = new Promise(resolve => { release = resolve; });
     const epoch = ++libraryEpoch;
     $('library').setAttribute('aria-busy', 'true');
     try {
-      const result = await client.get(`/runs?limit=${state.limit}&offset=${state.offset}`);
-      if (!Array.isArray(result.items) || !Number.isInteger(result.total)) throw new Error('Resposta inválida da biblioteca.');
-      if (epoch !== libraryEpoch || stopped) return;
-      state.items = result.items; state.total = result.total; renderLibrary();
-    } finally { $('library').setAttribute('aria-busy', 'false'); }
+      const target = append ? state.offset + state.limit : Math.max(state.limit, state.offset);
+      let offset = append ? state.offset : 0, items = append ? state.items : [], result;
+      do {
+        result = await client.get(`/library/freestyle?limit=${state.limit}&offset=${offset}`);
+        if (epoch !== libraryEpoch || stopped) return;
+        items = appendLibraryPage(items, result, true); offset += result.items.length;
+      } while (!append && offset < target && offset < result.total && result.items.length === state.limit);
+      state.items = items; state.total = result.total; state.offset = offset;
+      if (!append) { try { const favorites = await client.get('/favorites'); if (!Array.isArray(favorites.items)) throw new Error('Catálogo de favoritos inválido.'); favoriteItems = favorites.items; favoritesReady = true; message('favorites-status', ''); } catch (error) { favoritesReady = false; message('favorites-status', `Favoritos indisponíveis: ${error.message}`, true); } }
+      renderLibrary();
+    } finally { freestyleLoading = false; $('library').setAttribute('aria-busy', 'false'); $('load-more').disabled = false; release(); drainChanges(); }
   }
   async function select(id, knownRun, {preserveBranch = false, branchEnd = null} = {}) {
     if (state.busy && !knownRun) return;
@@ -1540,6 +1705,7 @@ export function startUI(document, client = createClient(), stories = createStory
   }
   async function syncConfirmedRun(run) {
     if (state.pendingRun?.id === run.id) state.pendingRun = run;
+    if (state.noticeOwner?.id === run.id) { state.noticeResult = confirmedNoticeRun(run, state.noticeOwner); if (state.noticeResult.resolved) state.uncertain = false; noticeURL(); }
     state.selected = run; state.sequence = null; renderRun();
     try { await loadLibrary(); await select(run.id, run); }
     catch (error) { message('notice', `Resultado confirmado; biblioteca não atualizada: ${error.message}. Atualizar faz apenas leitura.`, true); }
@@ -1565,6 +1731,7 @@ export function startUI(document, client = createClient(), stories = createStory
       await discoverBatch();
       await readStopOwner();
       if (state.batchOwner) await readBatch();
+      await reconcilePendingNotice();
       if (story.doc && !story.busy && !story.editing && !story.candidate) { story.doc = await stories.read(story.doc.id); if (state.screen === 'story') renderStory(); }
       if (!state.busy && selectionEpoch === state.epoch) {
         if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true});
@@ -1578,6 +1745,7 @@ export function startUI(document, client = createClient(), stories = createStory
     if (state.screen !== 'review' || state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
     ++state.epoch; ++libraryEpoch;
     pendingDecision = {action, id: state.selected.id};
+    state.noticeOwner = {kind: 'run', id: state.selected.id, action}; state.noticeResult = null; state.pendingRun = state.selected; noticeURL();
     state.busy = true; controls();
     const id = state.selected.id;
     try {
@@ -1611,6 +1779,8 @@ export function startUI(document, client = createClient(), stories = createStory
       try { storyIntent = newAssemblyUUID(document.defaultView.crypto); story.intent = storyIntent; story.intentOwner = {id: story.doc.id, block: story.block, intent: storyIntent}; storyURL(); }
       catch (error) { message('operation', `Nenhum envio: ${error.message}`, true); return; }
     }
+    state.noticeOwner = storyIntent ? {kind: 'story', id: storyIntent, roteiro: story.doc.id, block: story.block, action: 'generate'} : null;
+    state.noticeResult = null; noticeURL();
     const submittedDraft = draft(); submittedDraft.submitted = true;
     const path = parent ? `/runs/${encodeURIComponent(parent)}/v2v` : '/runs/i2v';
     ++state.epoch; ++libraryEpoch;
@@ -1620,6 +1790,8 @@ export function startUI(document, client = createClient(), stories = createStory
     try {
       const onAdmitted = admitted => {
         admittedID = admitted.id; state.pendingRun = admitted; state.selected = admitted; state.sequence = null;
+        if (!storyIntent) state.noticeOwner = {kind: 'run', id: canonicalUUID(admitted.id), action: 'generate'};
+        state.noticeResult = confirmedNoticeRun(admitted, state.noticeOwner); noticeURL();
         renderRun(); message('operation', `Admitido: ${admitted.id}. Aguardando este bloco; HTTP 202 não significa vídeo pronto.`);
       };
       let run;
@@ -1655,7 +1827,9 @@ export function startUI(document, client = createClient(), stories = createStory
   $('retry-mode').addEventListener('click', prepareRetry);
   $('back').addEventListener('click', back);
   $('screen-eyebrow').addEventListener('click', goHome);
-  $('nav-status').addEventListener('click', () => { state.statusOnly = true; navigate('generation'); });
+  $('nav-status').addEventListener('click', async () => { state.statusOnly = true; navigate('generation'); await reconcilePendingNotice(); });
+  const dismissRun = element('button', 'notice-dismiss', 'Dispensar aviso'); dismissRun.id = 'pending-notice-dismiss'; dismissRun.type = 'button'; dismissRun.hidden = true; dismissRun.addEventListener('click', () => dismissNotice('run')); $('pending-run-card').append(dismissRun);
+  for (const [card, id] of [['batch-card', 'batch-dismiss'], ['batch-library-card', 'batch-library-dismiss']]) { const button = element('button', 'notice-dismiss', 'Dispensar aviso'); button.id = id; button.type = 'button'; button.hidden = true; button.addEventListener('click', () => dismissNotice('batch')); $(card).append(button); }
   $('status-review').addEventListener('click', async () => { if (!state.pendingRun || state.busy) return; const origin = viewSnapshot(), navigation = state.navigationEpoch, id = state.pendingRun.id; await select(id); if (navigation === state.navigationEpoch && state.selected?.id === id) navigate('review', {origin}); });
   $('use-idea').addEventListener('click', useIdea);
   $('show-proposal').addEventListener('click', () => { restoreDraft(); navigate('proposal'); });
@@ -1683,8 +1857,7 @@ export function startUI(document, client = createClient(), stories = createStory
   $('reference').addEventListener('change', () => { if (state.mode === 'continue' || state.busy || state.uploadBusy) return; const value = $('reference').value; state.reference = value === 'dance_reference.png' ? null : state.references[Number(value)] || state.reference; ++draft().revision; saveDraft(); showReference(); controls(); });
   $('upload').addEventListener('click', upload);
   $('refresh').addEventListener('click', () => refresh());
-  $('previous').addEventListener('click', () => { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.limit); refresh(); } });
-  $('next').addEventListener('click', () => { if (state.offset + state.limit < state.total) { state.offset += state.limit; refresh(); } });
+  $('load-more').addEventListener('click', () => { if ($('freestyle-group').open && state.offset < state.total) loadLibrary(true).catch(error => message('notice', `Não foi possível carregar mais: ${error.message}`, true)); });
   $('new-mode').addEventListener('click', () => setMode('new'));
   $('continue-mode').addEventListener('click', () => { if (story.doc && story.block) void storyNext(); else setMode('continue'); });
   $('accept').addEventListener('click', () => decide('accept'));
@@ -1757,6 +1930,7 @@ export function startUI(document, client = createClient(), stories = createStory
     await loadStopViews().catch(error => message('notice', `Controle de parada indisponível: ${error.message}`, true));
     await readStopOwner();
     if (state.batchOwner) await readBatch();
+    await reconcilePendingNotice();
     if (state.conversionId) await readConversion();
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);

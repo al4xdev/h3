@@ -12,7 +12,7 @@ const motionArtifacts = resolve(root, '.dumps/tests/ui-app-motion');
 await mkdir(artifacts, {recursive: true});
 await mkdir(motionArtifacts, {recursive: true});
 const motionEvidence = {};
-const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
+const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js', 'stop-confirmation.css', 'stop-confirmation.js', 'pwa.js', 'manifest.webmanifest', 'offline.html', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
 const {alignedFrames} = await import(`data:text/javascript;base64,${Buffer.from(assets['app.js']).toString('base64')}`);
 const sourceHashes = Object.fromEntries(Object.entries(assets).map(([file, bytes]) => [file, createHash('sha256').update(bytes).digest('hex')]));
 async function currentSourceHashes() { return Object.fromEntries(await Promise.all(Object.keys(assets).map(async file => [file, createHash('sha256').update(await readFile(resolve(root, 'src/h3_backend/web', file))).digest('hex')]))); }
@@ -93,7 +93,8 @@ async function routeRequest(route) {
   requests.push({method, path: path + url.search, body: path === '/inputs' && method === 'POST' ? {diskUploadFake: true, bytes: request.postDataBuffer()?.length} : request.postDataJSON()});
   const json = (body, status = 200) => route.fulfill({status, contentType: 'application/json', body: JSON.stringify(body)});
   if (path === '/') return route.fulfill({contentType: 'text/html', body: assets['index.html']});
-  if (path.startsWith('/ui/') && assets[path.slice(4)]) return route.fulfill({contentType: path.endsWith('.js') ? 'text/javascript' : 'text/css', body: assets[path.slice(4)]});
+  if (path === '/manifest.webmanifest') return route.fulfill({contentType: 'application/manifest+json', body: assets['manifest.webmanifest']});
+  if (path.startsWith('/ui/') && assets[path.slice(4)]) return route.fulfill({contentType: path.endsWith('.js') ? 'text/javascript' : path.endsWith('.png') ? 'image/png' : path.endsWith('.html') ? 'text/html' : 'text/css', body: assets[path.slice(4)]});
   if (path === '/favicon.ico') return route.fulfill({status: 204});
   if (path === '/app/config') return mode === 'config-error' ? json({detail: 'Configuração indisponível'}, 503) : json(config);
   if (path === '/grok/editor') {
@@ -121,7 +122,8 @@ async function routeRequest(route) {
     return json({items: references, total: references.length});
   }
   if (['/assets/image', '/inputs/image'].includes(path) || path.endsWith('/image')) return route.fulfill({contentType: 'image/png', body: image});
-  if (path === '/runs') return mode === 'list-error' ? json({detail: 'Leitura indisponível <b>texto</b>'}, 503) : json({items: mode === 'empty' ? [] : runs.map(slimRun), total: mode === 'empty' ? 0 : runs.length});
+  if (path === '/favorites') return json({items: [], total: 0});
+  if (path === '/runs' || path === '/library/freestyle') { const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 50); return mode === 'list-error' ? json({detail: 'Leitura indisponível <b>texto</b>'}, 503) : json({items: mode === 'empty' ? [] : runs.slice(offset, offset + limit).map(slimRun), total: mode === 'empty' ? 0 : runs.length}); }
   if (method === 'POST' && (path === '/runs/i2v' || path.endsWith('/v2v'))) {
     if (mode === 'ambiguous') return route.abort('connectionfailed');
     if (mode === 'conflict') return json({detail: 'Slot ocupado'}, 409);
@@ -180,7 +182,7 @@ await context.route('**/*', routeRequest); await context.addInitScript(mockStart
 const page = await context.newPage();
 function watch(page) { page.on('pageerror', error => exceptions.push(error.message)); page.on('console', message => { if (message.type() === 'error') consoleMessages.push(message.text()); }); page.on('requestfailed', request => failedRequests.push({url: request.url(), reason: request.failure()?.errorText})); }
 watch(page);
-async function ready(href = 'http://h3.mock.invalid/?other=keep#viewer') { await page.goto(href); await page.locator('#notice').filter({hasText: /Escolha um bloco|API indisponível/}).waitFor(); }
+async function ready(href = 'http://h3.mock.invalid/?other=keep#viewer') { await page.goto(href); await page.locator('#notice').filter({hasText: /Escolha um bloco|API indisponível/}).waitFor(); await expandFreestyle(page); }
 async function active(screen) { await page.locator(`[data-screen="${screen}"]`).waitFor({state: 'visible'}); assert.equal(await page.locator('[data-screen]:visible').count(), 1); }
 async function audit(name, target = page) {
   const bounds = await target.evaluate(() => ({width: innerWidth, height: innerHeight, scrollX, scrollY, visualViewport: {x: visualViewport.offsetLeft, y: visualViewport.offsetTop, width: visualViewport.width, height: visualViewport.height, scale: visualViewport.scale}, heading: document.getElementById('screen-title').getBoundingClientRect().toJSON(), overflow: document.documentElement.scrollWidth > innerWidth, active: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => node.dataset.screen), hiddenInert: [...document.querySelectorAll('[data-screen][hidden]')].every(node => node.inert), hiddenFocus: Boolean(document.activeElement?.closest('[data-screen][hidden]')), controls: [...document.querySelectorAll('button')].filter(node => node.getClientRects().length).map(node => ({id: node.id, height: node.getBoundingClientRect().height, width: node.getBoundingClientRect().width})), panels: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => ({screen: node.dataset.screen, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflow: getComputedStyle(node).overflow, bounds: node.getBoundingClientRect().toJSON()}))}));
@@ -218,6 +220,7 @@ async function capture(name, target = page, {directory = artifacts, animations =
   // An explicit document-origin clip avoids mobile IME/compositor scroll races.
   await target.screenshot({path, animations, clip: {x: 0, y: 0, width: size.width, height: size.height}}); captures.push(path);
 }
+async function expandFreestyle(target) { if (!await target.locator('#freestyle-group').evaluate(node => node.open)) await target.locator('#freestyle-group>summary').click(); }
 async function rootLibrary(target = page) {
   for (let i = 0; i < 80 && !await target.locator('[data-screen="library"]').isVisible(); i++) {
     const token = await target.evaluate(() => history.state?.h3View);
@@ -226,6 +229,7 @@ async function rootLibrary(target = page) {
     await target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   }
   await target.locator('[data-screen="library"]').waitFor({state: 'visible'});
+  await expandFreestyle(target);
 }
 async function beginIdea(target = page) { await rootLibrary(target); await target.locator('#new-mode').click(); await target.locator('[data-screen="context"]').waitFor({state: 'visible'}); }
 async function openRun(id) { await rootLibrary(); await page.getByRole('button', {name: new RegExp(id)}).click(); await active('review'); }

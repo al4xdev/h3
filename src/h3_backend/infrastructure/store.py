@@ -599,7 +599,8 @@ class Store:
             raise ValueError("Invalid block removal marker")
         return True
 
-    def list_runs(self, *, limit: int = 50, offset: int = 0) -> tuple[list[Run], int]:
+    def list_runs(self, *, limit: int = 50, offset: int = 0,
+                  excluded_ids: frozenset[str] = frozenset()) -> tuple[list[Run], int]:
         """Bounded metadata page; never probe videos, select siblings or touch ComfyUI."""
         if type(limit) is not int or type(offset) is not int or not (
             1 <= limit <= 100 and 0 <= offset <= 10000
@@ -609,6 +610,8 @@ class Store:
             self._authority()
             order = []
             for path in self.runs.glob("*/manifest.json"):
+                if path.parent.name in excluded_ids:
+                    continue
                 if self.removed(path.parent.name):
                     continue
                 if len(order) >= 10000:

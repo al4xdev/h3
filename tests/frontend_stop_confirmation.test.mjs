@@ -20,7 +20,7 @@ class Element extends EventTarget {
   focus() { this.document.activeElement = this; }
   animate(frames, options) {
     assert.equal(frames[0].transform, 'scaleX(0)');
-    assert.ok(options.duration <= 220);
+    assert.ok(options.duration <= 440);
     this.motion = {cancelled: false, cancel() { this.cancelled = true; }};
     return this.motion;
   }

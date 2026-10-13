@@ -65,6 +65,11 @@ async def test_roteiro_and_batch_changes_notify_without_generation(tmp_path):
         await hint(stream, f".data/roteiros/{ident}")
         (directory / "plan.json").write_text('{"blocks":[]}')
         await hint(stream, f".data/roteiros/{ident}/plan.json")
+        library_root = tmp_path / ".data" / "library"
+        library_root.mkdir()
+        await hint(stream, ".data/library")
+        (library_root / "favorites.json").write_text('{"items":[]}')
+        await hint(stream, ".data/library/favorites.json")
         assert candidates == []
         watcher.recover()
         await hint(stream, ".data")

@@ -202,7 +202,7 @@ test('library deletion uses explicit DELETE contracts without inference', async 
   assert.match(handler, /deletedRunIDs.has\(state.selected\?\.id\)/);
   assert.match(handler, /button.disabled = false/);
   assert.doesNotMatch(handler, /client\.(detail|generate|accept)|stories\.(proposal|create)/);
-  assert.match(source, /card.append\(button, deleteButton\('Apagar bloco'/);
+  assert.match(source, /card.append\(button, cardTools\(favoriteButton\('freestyle', run.id\), deleteButton\('Apagar bloco'/);
 });
 function deletionFixture() {
   const handler = source.slice(source.indexOf('  async function removeLibraryItem'), source.indexOf('  async function storyLibrary'));
@@ -359,7 +359,7 @@ test('conversion chooses full explicit block12 even selected block7 and POSTs ow
 test('Freestyle labels and batch option below planned blocks, conversion inside Operações', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');
   assert.doesNotMatch(html, /Blocos avulsos|Ficha do bloco|>Novo bloco</);
-  assert.match(html, /<h3>Freestyle<\/h3>/); assert.ok(html.indexOf('id="story-batch"') > html.indexOf('id="story-blocks"'));
+  assert.match(html, /<summary><span>Freestyle<\/span>/); assert.ok(html.indexOf('id="story-batch"') > html.indexOf('id="story-blocks"'));
   const operations = html.slice(html.indexOf('<summary>Operações</summary>'), html.indexOf('</details>', html.indexOf('<summary>Operações</summary>')));
   assert.match(operations, /id="open-assembly"/); assert.match(operations, /id="convert-story"/);
 });
