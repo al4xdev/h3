@@ -532,10 +532,13 @@ export function createScreenTransitions(document) {
     active = null;
   }
   function paint(key, update, direction = 1) {
+    const from = previous;
     const changed = previous !== null && previous !== key;
     previous = key;
     finish();
-    if (!changed || disposed || document.hidden || reduced?.matches || !mobile?.matches || document.getElementById?.('loading-screen')?.hidden === false || typeof document.startViewTransition !== 'function') { update(); return; }
+    const settings = changed && (from === 'settings' || key === 'settings');
+    document.documentElement.dataset.screenTransition = settings ? key === 'settings' ? 'settings-open' : 'settings-close' : 'slide';
+    if (!changed || disposed || document.hidden || reduced?.matches || (!mobile?.matches && !settings) || document.getElementById?.('loading-screen')?.hidden === false || typeof document.startViewTransition !== 'function') { update(); return; }
     let painted = false;
     const once = () => { if (painted) return; painted = true; pending = null; update(); };
     pending = once;
@@ -726,6 +729,8 @@ export function startUI(document, client = createClient(), stories = createStory
     text('screen-eyebrow', 'Estúdio local');
     $('back').disabled = state.trail.length === 0;
     $('settings-open').disabled = state.screen === 'settings';
+    $('settings-open').dataset.open = String(state.screen === 'settings');
+    $('settings-open').setAttribute('aria-expanded', String(state.screen === 'settings'));
     $('create-form').hidden = state.statusOnly; $('generation-status').hidden = !state.statusOnly;
     if (state.screen !== 'review') $('player').pause();
     if (state.screen !== 'assembly') $('assembly-player').pause();

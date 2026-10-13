@@ -30,16 +30,28 @@ test('screen snapshots slide forward/back and superseded painting executes only 
   f.transitions[1].callback(); assert.deepEqual(f.paints, ['library', 'story', 'library']);
   f.controller.destroy();
 });
+test('settings uses a curtain on desktop as well as mobile and reverses on Back', () => {
+  const f = screenTransitionFixture(); f.mobile.matches = false;
+  f.paint('story'); f.paint('settings');
+  assert.equal(f.transitions.length, 1);
+  assert.equal(f.document.documentElement.dataset.screenTransition, 'settings-open');
+  f.transitions[0].callback();
+  f.paint('story', -1);
+  assert.equal(f.document.documentElement.dataset.screenTransition, 'settings-close');
+  f.transitions[1].callback();
+  assert.deepEqual(f.paints, ['story', 'settings', 'story']);
+  f.controller.destroy();
+});
 test('screen motion respects reduced preference, background, desktop and unsupported browsers', () => {
   const f = screenTransitionFixture(); f.paint('library'); f.paint('story');
   f.reduced.matches = true; f.reduced.dispatchEvent(new Event('change'));
   assert.equal(f.transitions[0].skipped, true); assert.deepEqual(f.paints, ['library', 'story']);
   f.paint('generation'); assert.equal(f.transitions.length, 1);
   f.reduced.matches = false; f.document.hidden = true; f.paint('review');
-  f.document.hidden = false; f.mobile.matches = false; f.paint('settings');
+  f.document.hidden = false; f.mobile.matches = false; f.paint('story');
   f.mobile.matches = true; delete f.document.startViewTransition; f.paint('library');
   assert.equal(f.transitions.length, 1);
-  assert.deepEqual(f.paints, ['library', 'story', 'generation', 'review', 'settings', 'library']);
+  assert.deepEqual(f.paints, ['library', 'story', 'generation', 'review', 'story', 'library']);
   f.controller.destroy();
 });
 test('failed transition capture and teardown retain the requested screen without replay', () => {

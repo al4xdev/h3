@@ -139,3 +139,21 @@ html[data-slide-direction=back]::view-transition-new(studio-screen){animation-na
   .settings-panel details.settings-section[open]::details-content{height:auto;opacity:1}
 }
 @media(prefers-reduced-motion:reduce){.settings-chevron,.settings-panel details.settings-section::details-content{transition:none!important}}
+#settings-open>span{display:inline-block;transition:transform 600ms var(--motion-ease)}
+#settings-open[data-open=true]>span{transform:rotate(180deg)}
+html[data-screen-transition^=settings] .studio{view-transition-name:studio-screen}
+html[data-screen-transition^=settings] #settings-open>span{view-transition-name:settings-gear}
+html[data-screen-transition=settings-open]::view-transition-old(studio-screen){animation:settings-underlay 600ms var(--motion-ease) both;z-index:1}
+html[data-screen-transition=settings-open]::view-transition-new(studio-screen){animation:settings-curtain-down 600ms var(--motion-ease) both;z-index:2}
+html[data-screen-transition=settings-close]::view-transition-old(studio-screen){animation:settings-curtain-up 600ms var(--motion-ease) both;z-index:2}
+html[data-screen-transition=settings-close]::view-transition-new(studio-screen){animation:settings-return 600ms var(--motion-ease) both;z-index:1}
+::view-transition-group(settings-gear){animation:none}
+::view-transition-old(settings-gear){display:none}
+html[data-screen-transition=settings-open]::view-transition-new(settings-gear){animation:settings-gear-open 600ms var(--motion-ease) both}
+html[data-screen-transition=settings-close]::view-transition-new(settings-gear){animation:settings-gear-close 600ms var(--motion-ease) both}
+@keyframes settings-curtain-down{from{clip-path:inset(0 0 100% 0)}to{clip-path:inset(0)}}
+@keyframes settings-curtain-up{from{clip-path:inset(0)}to{clip-path:inset(0 0 100% 0)}}
+@keyframes settings-underlay{from{opacity:1}to{opacity:.35}}
+@keyframes settings-return{from{opacity:.35}to{opacity:1}}
+@keyframes settings-gear-open{from{transform:rotate(0)}to{transform:rotate(180deg)}}
+@keyframes settings-gear-close{from{transform:rotate(0)}to{transform:rotate(-180deg)}}
