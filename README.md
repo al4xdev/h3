@@ -15,14 +15,23 @@ uv sync
 env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
 ```
 
-Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, substitua o host por `0.0.0.0` e abra `http://IP-DO-PC:8010` no celular. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC.
+Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, na porta8888:
+
+```fish
+uv run --no-sync uvicorn h3_backend.api:app --host 0.0.0.0 --port 8888
+```
+
+No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC. Fechar a ponte não libera os modelos do ComfyUI; são processos distintos.
 
 - Selecione uma referência da biblioteca ou **Envie imagem ao PC**; upload não gera vídeo. Imagens próprias ficam em `.data/inputs/`, com bytes originais preservados.
 - Descreva a cena e clique **Gerar** explicitamente. Assista ao bloco antes de aceitar/rejeitar; apenas um pai aceito permite continuar.
-- **Detalhar com Grok** é um editor de texto apartado: transforma sua ideia em uma instrução editável, sem gerar vídeo ou alterar imagens. System prompt/modelo são configuráveis no front; **Salvar configuração** grava somente `.data/grok/editor.json`. Credenciais OAuth ficam separadas. Veja [Grok](docs/grok.md) para modelo/autorização; nenhuma chamada ao provider ocorre ao abrir/reconectar a página.
+- **Detalhar ideia e imagem** envia explicitamente sua ideia e a referência selecionada ao Grok, recebendo uma proposta de texto editável. **Usar esta proposta** e **Gerar** são ações separadas; nenhuma gera vídeo automaticamente. System prompt segue editável, mas o modelo está fixo em `.data/grok/editor.json`: `grok-4.20-0309-non-reasoning`. Credenciais OAuth ficam separadas; disponibilidade na conta ainda não foi testada. Veja [Grok](docs/grok.md); abrir/reconectar a página não chama o provider.
+- Cada bloco permite duração solicitada até10s, com default2.3 preservado. O alinhamento nativo24fps/5+17k produz, por exemplo,3s→73frames/3.042s,5s→124frames/5.167s e10s→243frames/10.125s. A interface distingue solicitado, alinhado e verificado.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga para estas correções.
 - Atualização de arquivos chega por SSE; reconectar ou atualizar a biblioteca só relê metadados, nunca repete geração. Resultado incerto exige consulta do ID conhecido, não novo POST cego.
 
 **Montar sequência** concatena a cadeia selecionada, sem gerar novos blocos: todos os pais devem estar aceitos e o fim pode estar aceito ou pronto para revisão. Assista/baixe o resultado no painel próprio. Montar não aceita o fim: a prévia mantém a revisão pendente. Após aceitar o fim, um novo clique explícito pode publicar uma montagem da sequência aceita. Se a resposta for perdida, use **Reler montagem** no ID conhecido; não reenvie às cegas.
+
+No celular, o estúdio mostra uma tela principal por vez: **Biblioteca → Referência e ideia → Proposta → Preparar geração → Revisão → Continuação → Montagem**. Grok é opcional; **Usar minha instrução** pula o editor. **Voltar** preserva o rascunho da cena/parent, imagem, seed e duração durante essa sessão. Recarregar a página relê os arquivos do PC e não repete operações; os rascunhos ainda não enviados não são persistidos no navegador.
 
 ## Organização
 
