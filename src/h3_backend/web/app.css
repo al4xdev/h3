@@ -129,3 +129,13 @@ html[data-slide-direction=back]::view-transition-new(studio-screen){animation-na
 @keyframes loading-orbit{to{transform:rotate(360deg)}}
 @keyframes loading-breathe{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:1;transform:scale(1.035)}}
 @keyframes loading-frame{0%,70%,100%{opacity:.35;transform:translateY(0)}25%,45%{opacity:1;transform:translateY(-3px)}}
+.settings-panel details.settings-section>summary{justify-content:space-between;gap:16px;min-height:56px;list-style:none;color:var(--copper)}
+.settings-panel details.settings-section>summary::-webkit-details-marker{display:none}
+.settings-chevron{display:inline-block;font-family:var(--body);font-size:24px;transition:transform 400ms var(--motion-ease)}
+.settings-section[open]>summary .settings-chevron{transform:rotate(180deg)}
+@supports selector(details::details-content){
+  .settings-panel details.settings-section{interpolate-size:allow-keywords}
+  .settings-panel details.settings-section::details-content{height:0;overflow:clip;opacity:0;transition:height 440ms var(--motion-ease),opacity 360ms ease,content-visibility 440ms allow-discrete}
+  .settings-panel details.settings-section[open]::details-content{height:auto;opacity:1}
+}
+@media(prefers-reduced-motion:reduce){.settings-chevron,.settings-panel details.settings-section::details-content{transition:none!important}}
