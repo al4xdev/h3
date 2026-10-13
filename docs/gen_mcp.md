@@ -129,6 +129,21 @@ Initialize/list/info tests prove registration; they do **not** hot-add tools to
 this already-running agent's catalog. A new session is required to access the
 new names through the native tool interface.
 
+## Owner-requested alias removal
+
+After relocation, the owner explicitly removed the personal Portuguese alias
+`imagem`; no compatibility alias remains. Only `image` is accepted for that
+profile. The personal CLI registry/controller, README and both bundled/installed
+fish completions were updated. Human/headless `imagem` calls are rejected by
+argument parsing before Controller construction (headless JSON error, exit 2).
+The MCP already exposed only `image`, so its schema/adapter needed no change.
+
+The follow-up passed 76 standalone CPU tests, 17 inert/native Gen MCP tests,
+Ruff and a config-free fish completion check showing `image` but no `imagem`.
+No real model/service start/stop was performed. Pre-edit snapshots are in
+`.dumps/gen-alias-backup/20261013T145639.374621Z/`. These edits belong to the personal
+directory; the earlier source checkpoint and migration hashes remain historical.
+
 ## Re-run safe tests
 
 ```fish
