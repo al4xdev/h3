@@ -1,6 +1,7 @@
 # Tail — extensão de cauda de um roteiro
 
-Estado: plano ativo, preparação da implementação. Pedido do dono em 2026-10-13.
+Estado: concluído e validado com fixtures CPU em 2026-10-13.
+Pedido do dono em 2026-10-13.
 Arquivo mantido diretamente, fora do harness. Interpolação permanece no backlog.
 
 ## Resultado esperado
@@ -76,3 +77,22 @@ Rodar checks adequados, Node, Ruff e diff. Registrar evidências e commit local.
 Não considerar Tail concluído apenas por reapresentar o lote já existente: a nova
 frase deve produzir uma extensão ligada ao fim correto do roteiro. Geração real,
 se necessária, requer intenção explícita própria e não está iniciada por este plano.
+
+## Entrega e evidências
+
+- UI **Continuar roteiro · Tail** com frase, quantidade, duração e seed; proposta
+  editável, prefixo congelado e adoção explícita apenas do trecho novo.
+- Rotas POST/GET/PUT por UUID, reserva anterior ao provider e recuperação do mesmo
+  pedido. Revisão, identidade, cadeia aceita e bytes do vídeo de origem são
+  conferidos; saída inválida é preservada, sem fallback ou replay.
+- O lote existente melhora cada novo bloco usando o frame final atualizado e
+  preserva arquivos, parâmetros e tentativas do prefixo. Último vídeo para revisão.
+- Rejeição comprovada antes do envio libera o formulário; resultado desconhecido
+  permanece bloqueado. Leituras atrasadas preservam navegação e edições locais.
+- Suite Python completa: 949 testes aprovados antes dos últimos ajustes de
+  recuperação. Após esses ajustes, 70 testes de roteiro/Tail/lote/API aprovados,
+  incluindo três novos contratos ASGI. Frontend: 256 testes aprovados.
+- Ruff e `git diff --check` aprovados. Evidências locais em
+  `.dumps/tasks/tail-pytest.txt`, `tail-final-python.txt` e `tail-node-tests.txt`.
+- Não houve chamada real ao provider/GPU, reinício do servidor de produção nem
+  certificação artística. Limite total existente: 50 blocos. Interpolação adiada.

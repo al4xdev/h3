@@ -30,7 +30,18 @@ from .generation.workflow import (
 )
 from .grok import FIXED_EDITOR_MODEL, PromptRequest, read_editor
 from .infrastructure.comfy import QueueBusy
-from .infrastructure.grok_image import EditorReference, _directory, owned_image, snapshot_digest
+from .infrastructure.grok_image import (
+    IMAGE_MAX_BYTES,
+    VIDEO_MAX_BYTES,
+    EditorReference,
+    _directory,
+    _file_digest,
+    _parent,
+    _source,
+    continuation_frame,
+    owned_image,
+    snapshot_digest,
+)
 from .infrastructure.grok_oauth import OAuthError
 from .infrastructure.store import Store
 
@@ -223,6 +234,23 @@ class ProposalRequest(StrictDTO):
     seed: StrictInt = Field(ge=0, le=2**53 - 1)
 
     _duration = field_validator("duration_seconds")(Block.duration.__func__)
+
+
+class TailRequest(ProposalRequest):
+    idea: str = Field(min_length=1, max_length=12000)
+
+    _idea = field_validator("idea")(Block.nonblank.__func__)
+
+
+class AdoptTail(StrictDTO):
+    expected_revision: StrictInt = Field(ge=1)
+    blocks: list[Block] = Field(min_length=1, max_length=MAX_BLOCKS)
+
+    @model_validator(mode="after")
+    def unique(self):
+        if len({b.id for b in self.blocks}) != len(self.blocks):
+            raise ValueError("Duplicate tail block key")
+        return self
 
 
 class ProposedBlock(StrictDTO):
@@ -523,6 +551,192 @@ class Roteiro:
             write_file(directory, f"proposal-{candidate_id}.json", candidate)
         return candidate
 
+    def tail_parent(self, doc: Document) -> str:
+        if not doc.adopted or not doc.blocks:
+            raise Conflict("Tail requires an adopted roteiro with complete accepted videos")
+        parent_id = None
+        for index, block in enumerate(doc.blocks):
+            attempts = [a for a in doc.attempts if a.block_id == block.id]
+            if not attempts:
+                raise Conflict("Finish every existing planned block before extending the tail")
+            attempt = attempts[-1]
+            observed = self.observed(attempt)
+            if observed["state"] != "accepted" or observed["run"] is None:
+                raise Conflict("Every latest block attempt must be accepted and proven")
+            if attempt.snapshot.parent_id != parent_id:
+                raise Conflict("Accepted blocks do not form the exact current sequence")
+            self.parent(doc, index + 1, attempt.run_id)
+            parent_id = attempt.run_id
+        return parent_id
+
+    def tail_media(self, parent_id: str) -> dict:
+        manifest, _, _, _, _ = _parent(self.root, parent_id)
+        identity, digest = _file_digest(
+            self.root, (".data", "runs", parent_id, "chunk.mp4"), VIDEO_MAX_BYTES)
+        return {"manifest": manifest, "video_identity": list(identity), "video_sha256": digest}
+
+    def tail_source(self, doc: Document) -> dict:
+        return {"name": doc.name, "idea": doc.idea, "reference": doc.reference.model_dump(),
+                "reference_sha256": doc.reference_sha256}
+
+    def tail_current(self, doc: Document, candidate: dict):
+        if (doc.revision != candidate["source_revision"]
+                or [b.model_dump() for b in doc.blocks] != candidate["prefix_blocks"]
+                or self.tail_source(doc) != candidate["source"]
+                or self.tail_parent(doc) != candidate["parent_id"]
+                or self.tail_media(candidate["parent_id"]) != candidate["parent_proof"]
+                or _file_digest(self.root, _source(self.root, doc.reference)[0],
+                                IMAGE_MAX_BYTES)[1] != doc.reference_sha256):
+            raise Conflict("Tail source, accepted parent or publication changed; preserve proposal")
+
+    def get_tail(self, ident: str, tail_id: str) -> dict:
+        canonical(tail_id)
+        with (_directory(self.root, (".data", "roteiros", canonical(ident))) as directory,
+              locked(directory)):
+            candidate = read_file(directory, f"tail-{tail_id}.json")
+            if candidate.get("id") != tail_id or candidate.get("roteiro_id") != ident:
+                raise ValueError("Tail candidate ownership disagrees with path")
+            doc = self.get(ident)
+            if candidate["state"] == "adopting":
+                combined = candidate["prefix_blocks"] + candidate["adopted_blocks"]
+                if (doc.revision == candidate["source_revision"] + 1
+                        and [b.model_dump() for b in doc.blocks] == combined
+                        and self.tail_source(doc) == candidate["source"]):
+                    candidate["state"] = "adopted"
+                    candidate["adopted_revision"] = doc.revision
+                    write_file(directory, f"tail-{tail_id}.json", candidate)
+                elif doc.revision == candidate["source_revision"]:
+                    candidate["state"] = "proposed"
+                    write_file(directory, f"tail-{tail_id}.json", candidate)
+            candidate["stale"] = doc.revision != candidate.get(
+                "adopted_revision", candidate["source_revision"])
+            if candidate["state"] != "adopted":
+                try:
+                    self.tail_current(doc, candidate)
+                except (Conflict, OSError, ValueError):
+                    candidate["stale"] = True
+            return candidate
+
+    async def propose_tail(self, ident: str, tail_id: str, payload: TailRequest, grok,
+                           *, submission: dict | None = None) -> dict:
+        canonical(tail_id)
+        doc = self.get(ident)
+        self.check_revision(doc, payload.expected_revision)
+        if len(doc.blocks) + payload.count > MAX_BLOCKS:
+            raise Conflict("Tail exceeds the existing 50-block planning budget")
+        parent_id = self.tail_parent(doc)
+        if await self.reference_digest(doc.reference) != doc.reference_sha256:
+            raise Conflict("Original reference changed")
+        async with continuation_frame(self.root, parent_id, doc.reference) as (_, recheck, digest):
+            await asyncio.to_thread(recheck)
+            if digest != doc.reference_sha256:
+                raise Conflict("Tail parent identity disagrees with original reference")
+            parent_proof = await asyncio.to_thread(self.tail_media, parent_id)
+        config = self.script_config()
+        prompt = json.dumps({
+            "task": "Plan only new tail block intentions after the accepted video sequence. "
+                    "Image 1 is original identity; image 2 is the actual final frame of the "
+                    "accepted parent. Future frames are unknown. Preserve the existing prefix. "
+                    "Do not claim exact timing or guaranteed artistic continuity.",
+            "original_idea": doc.idea, "name": doc.name,
+            "accepted_prefix": [b.model_dump(exclude={"seed"}) for b in doc.blocks],
+            "tail_idea": payload.idea, "count": payload.count,
+            "duration_seconds": payload.duration_seconds,
+        }, ensure_ascii=False)
+        candidate = {
+            "id": tail_id, "roteiro_id": doc.id, "source_revision": doc.revision,
+            "parent_id": parent_id, "prefix_block_ids": [b.id for b in doc.blocks],
+            "prefix_blocks": [b.model_dump() for b in doc.blocks],
+            "source": self.tail_source(doc), "parent_proof": parent_proof,
+            "name": doc.name, "blocks": [], "raw_text": "",
+            "state": "uncertain", "stale": False, "request": payload.model_dump(),
+            "config": config, "planning_prompt": prompt,
+        }
+        with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+              locked(directory)):
+            for name in os.listdir(directory):
+                if name == f"tail-{tail_id}.json":
+                    if submission is not None:
+                        submission["reserved"] = True
+                    raise Conflict("Tail ID already exists; GET the same ID without replaying POST")
+                if (name.startswith("tail-") and name.endswith(".json")
+                        and read_file(directory, name).get("state") in {"uncertain", "adopting"}):
+                    raise Conflict("An earlier tail request remains uncertain; recover its ID")
+            self.check_revision(self.get(doc.id), doc.revision)
+            self.tail_current(self.get(doc.id), candidate)
+            if submission is not None:
+                submission["reserved"] = True
+            write_file(directory, f"tail-{tail_id}.json", candidate, exclusive=True)
+        schema = ProposedPlan.model_json_schema()
+        schema["properties"]["blocks"].update(minItems=payload.count, maxItems=payload.count)
+        try:
+            result = await grok.complete(PromptRequest(
+                system_prompt=config["system_prompt"], prompt=prompt, model=config["model"],
+                reference=doc.reference, continuation_parent_id=parent_id),
+                output_schema=schema, schema_name="h3_roteiro")
+        except OAuthError as exc:
+            if 400 <= exc.status < 500:
+                candidate.update(state="invalid", error=exc.code,
+                                 detail="Provider explicitly refused this planning request")
+                with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+                      locked(directory)):
+                    write_file(directory, f"tail-{tail_id}.json", candidate)
+            raise
+        raw = result.get("text") if isinstance(result, dict) else None
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_METADATA_BYTES // 2:
+            raise ValueError("Tail response is missing text or exceeds 512 KiB; not truncated")
+        candidate["raw_text"] = raw
+        try:
+            proposed = ProposedPlan.model_validate(strict_json(raw))
+            if len(proposed.blocks) != payload.count:
+                raise ValueError("Tail proposal count differs from request")
+            candidate["blocks"] = [Block(id=str(uuid4()), seed=payload.seed, **b.model_dump())
+                                   .model_dump() for b in proposed.blocks]
+            candidate["state"] = "proposed"
+        except ValueError:
+            candidate.update(state="invalid", error="invalid_proposal",
+                             detail="Response cannot be converted into strict new tail blocks")
+        with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+              locked(directory)):
+            try:
+                self.tail_current(self.get(doc.id), candidate)
+            except (Conflict, OSError, ValueError):
+                candidate["stale"] = True
+            write_file(directory, f"tail-{tail_id}.json", candidate)
+        return candidate
+
+    async def adopt_tail(self, ident: str, tail_id: str, payload: AdoptTail) -> dict:
+        candidate = self.get_tail(ident, tail_id)
+        if candidate["state"] == "adopted":
+            raise Conflict("Tail already adopted; GET the same ID and reread the roteiro")
+        if candidate["state"] != "proposed":
+            raise Conflict("Only a valid proposed tail may be explicitly adopted")
+        doc = self.get(ident)
+        if await self.reference_digest(doc.reference) != doc.reference_sha256:
+            raise Conflict("Original reference changed")
+        with (_directory(self.root, (".data", "roteiros")) as library, locked(library),
+              _directory(self.root, (".data", "roteiros", canonical(ident))) as directory,
+              locked(directory)):
+            candidate = read_file(directory, f"tail-{canonical(tail_id)}.json")
+            if candidate["state"] != "proposed":
+                raise Conflict("Tail state changed; recover the same ID")
+            doc = self.get(ident)
+            self.check_revision(doc, payload.expected_revision)
+            self.tail_current(doc, candidate)
+            proposed_ids = {b["id"] for b in candidate["blocks"]}
+            if not {b.id for b in payload.blocks} <= proposed_ids:
+                raise Conflict("Adopt only new block IDs belonging to this tail proposal")
+            updated = Document(**{**doc.model_dump(), "revision": doc.revision + 1,
+                                  "blocks": [b.model_dump() for b in doc.blocks + payload.blocks]})
+            encoded_metadata(updated.model_dump())
+            candidate.update(state="adopting", adopted_blocks=[b.model_dump() for b in payload.blocks])
+            # This recovery marker precedes plan publication; same-ID GET proves a partial commit.
+            write_file(directory, f"tail-{tail_id}.json", candidate)
+            write_file(directory, "plan.json", updated.model_dump())
+            candidate.update(state="adopted", adopted_revision=updated.revision, stale=False)
+            write_file(directory, f"tail-{tail_id}.json", candidate)
+        return self.view(updated)
+
     def intent(self, doc: Document, key: str, intent_id: str) -> Intent:
         canonical(key)
         canonical(intent_id)
@@ -798,3 +1012,49 @@ async def generate_block(ident: str, key: str, intent_id: str, request: Request)
 async def get_intent(ident: str, key: str, intent_id: str, request: Request):
     op = operation(request)
     return response(op.observed(op.intent(op.get(ident), key, intent_id)))
+
+
+@router.post("/{ident}/tail/{tail_id}")
+async def propose_tail(ident: str, tail_id: str, request: Request):
+    submission = {"reserved": True}
+    try:
+        op = operation(request)
+        try:
+            with _directory(op.root, (".data", "roteiros", canonical(ident))) as directory:
+                os.stat(f"tail-{canonical(tail_id)}.json", dir_fd=directory,
+                        follow_symlinks=False)
+        except FileNotFoundError:
+            submission["reserved"] = False
+        value = await op.propose_tail(
+            ident, tail_id, await body(request, TailRequest), request.app.state.grok,
+            submission=submission)
+        return response(value, 422 if value.get("error") else 200)
+    except (HTTPException, OAuthError, Conflict, FileNotFoundError, ValueError) as exc:
+        if isinstance(exc, OAuthError):
+            error = {"error": exc.code, "detail": str(exc)}
+            status = exc.status
+        elif isinstance(exc, HTTPException):
+            error, status = {"detail": exc.detail}, exc.status_code
+        else:
+            status = 409 if isinstance(exc, Conflict) else (
+                404 if isinstance(exc, FileNotFoundError) else 400)
+            error = {"detail": str(exc)}
+        if not submission["reserved"]:
+            try:
+                with _directory(op.root, (".data", "roteiros", canonical(ident))) as directory:
+                    os.stat(f"tail-{canonical(tail_id)}.json", dir_fd=directory,
+                            follow_symlinks=False)
+            except FileNotFoundError:
+                error.update(tail_not_submitted=True, id=tail_id, roteiro_id=ident)
+        return response(error, status)
+
+
+@router.get("/{ident}/tail/{tail_id}")
+async def get_tail(ident: str, tail_id: str, request: Request):
+    return response(operation(request).get_tail(ident, tail_id))
+
+
+@router.put("/{ident}/tail/{tail_id}")
+async def adopt_tail(ident: str, tail_id: str, request: Request):
+    return response(await operation(request).adopt_tail(
+        ident, tail_id, await body(request, AdoptTail)))

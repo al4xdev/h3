@@ -157,3 +157,9 @@ html[data-screen-transition=settings-close]::view-transition-new(settings-gear){
 @keyframes settings-return{from{opacity:.35}to{opacity:1}}
 @keyframes settings-gear-open{from{transform:rotate(0)}to{transform:rotate(180deg)}}
 @keyframes settings-gear-close{from{transform:rotate(0)}to{transform:rotate(-180deg)}}
+
+.tail-controls { border-block: 1px solid var(--line); padding-block: 1rem; margin-block: 1rem; }
+.tail-controls summary { font-weight: 650; min-height: 44px; display: flex; align-items: center; }
+.tail-parameters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .75rem; }
+.tail-parameters label { display: grid; gap: .35rem; }
+.tail-recovery:has(#tail-owner:empty) { display: none; }

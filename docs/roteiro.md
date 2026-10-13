@@ -40,6 +40,31 @@ das submissões. Erro, parada, desconexão incerta ou reinício não repetem pro
 estado global sem executar. SSE comunica mudanças de paths e a interface relê
 esses arquivos, sem polling de conclusão. Fechar a página não cancela o lote.
 
+## Continuar roteiro com Tail
+
+Após concluir e aceitar todos os vídeos atuais, abra **Continuar roteiro · Tail**
+abaixo dos blocos. Escreva o que deve acontecer a seguir, escolha a quantidade,
+duração e seed, e peça a proposta ao Grok. O planejamento recebe a identidade
+original e o frame final real do último vídeo aceito, com saída JSON estruturada.
+O limite atual é de 50 blocos no roteiro inteiro, incluindo os existentes.
+
+Edite, reorganize ou remova os novos blocos e confirme a continuação. Essa ação
+acrescenta apenas o trecho novo: preserva os blocos, vídeos e tentativas anteriores
+e não inicia geração. Depois use **Gerar os blocos restantes**. Cada novo bloco
+passa novamente pelo editor com o frame real atualizado do anterior, usando o
+lote descrito acima. O último vídeo exige revisão; a montagem permanece explícita.
+
+A proposta e a adoção usam um UUID conhecido antes do envio e ficam registradas
+em `.data/roteiros/<id>/tail-<UUID>.json`. Consulte o mesmo pedido após perda de
+conexão; não reenvie uma intenção incerta. Mudanças no roteiro ou no vídeo de
+origem invalidam a adoção da proposta antiga. Planejamento mantém o limite de
+20000 tokens; melhoria de cada bloco mantém 12000. A interpolação entre duas
+âncoras continua no backlog.
+
+`POST /roteiros/<id>/tail/<UUID>` planeja; `GET` consulta sem executar;
+`PUT` adota os novos blocos com a revisão de origem. Nenhuma dessas consultas
+gera vídeo. A validação usa clientes falsos e mídia CPU, sem inferência real.
+
 ## Converter Freestyle para roteiro
 
 Em **Operações → Converter para roteiro**, a origem é a sequência completa já aberta,
