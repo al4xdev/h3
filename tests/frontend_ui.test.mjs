@@ -326,7 +326,7 @@ test('draft settings are contextual and never unlock published or uncertain resu
   assert.equal(nativeExecutionBlocked({...ready, assemblyLocked: true, grokBusy: true, grokUncertain: true}), false);
   assert.equal(nativeExecutionBlocked({...ready, mode: 'continue', parent: {state: 'accepted'}}), false);
   for (const state of ['rejected', 'interrupted', 'running', undefined]) assert.equal(nativeExecutionBlocked({...ready, mode: 'continue', parent: {state}}), true);
-  const modeRouting = source.slice(source.indexOf('function setMode(mode)'), source.indexOf('function rememberAssembly'));
+  const modeRouting = source.slice(source.indexOf('function setMode(mode)'), source.indexOf('function storyURL'));
   assert.match(modeRouting, /if \(freshIntent\) draft\(\)\.submitted = false/);
   assert.doesNotMatch(modeRouting, /state\.(?:uncertain|busy|pendingRun|waitController|assemblyUncertain|uploadUncertain|grokUncertain)\s*=/);
   assert.match(source, /\$\('create-fields'\)\.disabled = \$\('generate'\)\.disabled = nativeExecutionBlocked/);

@@ -34,7 +34,7 @@ export function relevantChange(event) {
   if (!event.path || event.path === '.data') return true;
   if (typeof event.path !== 'string') return false;
   const path = event.path.replace(/^\.data\//, '');
-  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
+  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^roteiros\/.+\.json$/.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
 }
 export function canonicalUUID(value) {
   if (typeof value !== 'string' || value.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) throw new Error('ID deve ser um UUID canônico local.');
@@ -280,6 +280,78 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
   };
 }
 
+export function storyLocation(href, {id, block, intent} = {}) {
+  const url = new URL(href); url.pathname = '/roteiro';
+  for (const [key, value] of [['roteiro', id], ['block', block], ['intent', intent]]) if (value) url.searchParams.set(key, canonicalUUID(value));
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+export function standaloneLocation(href) {
+  const url = new URL(href); url.pathname = '/';
+  for (const key of ['roteiro', 'block', 'intent']) url.searchParams.delete(key);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+export function storyPointer(href) {
+  const url = new URL(href), result = {};
+  for (const key of ['roteiro', 'block', 'intent']) { const values = url.searchParams.getAll(key); if (values.length > 1) throw new Error('Ponteiro de roteiro duplicado.'); result[key] = values.length ? canonicalUUID(values[0]) : null; }
+  if (result.intent && (!result.roteiro || !result.block)) throw new Error('Intenção sem roteiro e bloco.');
+  return result;
+}
+export function storyUpdate(doc, blocks = doc.blocks, adopted = doc.adopted) {
+  return {expected_revision: doc.revision, name: doc.name, idea: doc.idea, reference: referenceValue(doc.reference), adopted, blocks: blocks.map(({id, action, duration_seconds, seed, prompt}) => ({id: canonicalUUID(id), action, duration_seconds, seed, prompt}))};
+}
+export function ownedIntentMatchingCurrent(doc, block, intent, owner) {
+  try {
+    for (const value of [doc?.id, block, intent, owner?.id, owner?.block, owner?.intent]) canonicalUUID(value);
+    return doc.id === owner.id && block === owner.block && intent === owner.intent && doc.blocks.some(item => item.id === block);
+  } catch { return false; }
+}
+export async function readOwnedStoryIntent(client, doc, block, intent, owner) {
+  if (!ownedIntentMatchingCurrent(doc, block, intent, owner)) return null;
+  return client.readIntent(owner.id, owner.block, owner.intent);
+}
+export function storyBlockState(doc, block) {
+  const attempts = doc.attempts.filter(item => item.block_id === block.id);
+  return {attempts, accepted: attempts.findLast(item => item.run?.state === 'accepted' && item.run?.output?.path), latest: attempts.at(-1), frozen: attempts.length > 0};
+}
+// A refused admission has no native Run to copy. Validate its durable snapshot
+// against the exact owner and current history before offering a fresh draft.
+export function rejectedStoryDraft(doc, attempt, owner, capabilities) {
+  for (const value of [doc?.id, attempt?.intent_id, attempt?.run_id, attempt?.roteiro_id, attempt?.block_id, owner?.id, owner?.block, owner?.intent]) canonicalUUID(value);
+  if (doc.id !== owner.id || attempt.roteiro_id !== owner.id || attempt.block_id !== owner.block || attempt.intent_id !== owner.intent || attempt.run_id !== owner.intent || attempt.admission !== 'rejected' || attempt.state !== 'not_admitted' || attempt.run !== null || !doc.adopted) throw new Error('Envio recusado não corresponde à intenção própria confirmada.');
+  const block = doc.blocks.find(item => item.id === owner.block), history = block && storyBlockState(doc, block);
+  if (!history || history.latest?.intent_id !== owner.intent || history.latest.admission !== 'rejected' || history.latest.state !== 'not_admitted' || history.latest.run !== null || JSON.stringify(history.latest.snapshot) !== JSON.stringify(attempt.snapshot)) throw new Error('Histórico não confirma este envio recusado como último da posição.');
+  if (!Number.isSafeInteger(attempt.source_revision) || attempt.source_revision < 1 || attempt.source_revision > doc.revision) throw new Error('Revisão da intenção não comprovada.');
+  const snapshot = attempt.snapshot, reference = referenceValue(snapshot?.reference), original = referenceValue(doc.reference);
+  if (!referencePreviewURL(reference) || reference.source_root !== original.source_root || reference.path !== original.path || typeof doc.reference_sha256 !== 'string' || doc.reference_sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(doc.reference_sha256) || snapshot.reference.sha256 !== doc.reference_sha256) throw new Error('Identidade original do envio não comprovada.');
+  const prompt = sceneText(snapshot.prompt), seed = parseSeed(String(snapshot.seed));
+  if (typeof snapshot.seed !== 'number' || typeof snapshot.duration_seconds !== 'number' || parseDuration(String(snapshot.duration_seconds), capabilities) !== snapshot.duration_seconds) throw new Error('Seed ou duração do envio recusado não podem ser copiados.');
+  const index = doc.blocks.indexOf(block), previous = index ? storyBlockState(doc, doc.blocks[index - 1]).accepted?.run : null;
+  if (!index && snapshot.parent_id !== null) throw new Error('Origem do primeiro bloco não comprovada.');
+  if (index) {
+    canonicalUUID(snapshot.parent_id);
+    if (!previous || previous.id !== snapshot.parent_id || previous.state !== 'accepted' || ![`.data/runs/${previous.id}/chunk.mp4`, `runs/${previous.id}/chunk.mp4`].includes(previous.output?.path)) throw new Error('O mesmo pai original precisa permanecer aceito e publicado.');
+    const identity = ownedIdentity(previous); if (identity.source_root !== reference.source_root || identity.path !== reference.path || identity.sha256 !== snapshot.reference.sha256) throw new Error('Identidade original diferente do pai aceito.');
+  }
+  return {key: `not-admitted:${owner.intent}`, sourceIntentId: owner.intent, parentId: snapshot.parent_id, mode: index ? 'continue' : 'new', idea: prompt, chosenPrompt: prompt, proposal: '', seed: String(seed), duration: String(snapshot.duration_seconds), reference, revision: 0, submitted: false, promptOrigin: 'envio recusado confirmado'};
+}
+export function storyContext(doc, blockId, duration, chosenPrompt = null) {
+  const index = doc.blocks.findIndex(block => block.id === blockId), block = doc.blocks[index];
+  if (!block) throw new Error('Bloco ausente do roteiro.');
+  const accepted = doc.blocks.slice(0, index).map(item => { const attempt = storyBlockState(doc, item).accepted; return `${item.action}\nInstrução enviada: ${attempt?.snapshot?.prompt || 'não confirmada'}`; }).join('\n\n');
+  return sceneText(`Roteiro: ${doc.name}\nIdeia geral: ${doc.idea}\n\nIntenção dos blocos aceitos:\n${accepted || 'Primeiro bloco.'}\nEstes textos descrevem intenção; o resultado visual pode diferir.\n\nEste bloco: ${block.action}\nInstrução escolhida: ${chosenPrompt ?? block.prompt}\nDuração solicitada: ${duration} s; ${alignedFrames(Number(duration))} frames.\n\nPróximo bloco planejado: ${doc.blocks[index + 1]?.action || 'Este é o último bloco.'}\nNão repetir o anterior nem antecipar o próximo.\nContexto visual: identidade original e último frame REAL do pai aceito, quando houver.`);
+}
+export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
+  const used = new Set();
+  async function request(path, method = 'GET', body, expectedStatus = null) {
+    const response = await fetcher(path, {method, headers: body === undefined ? {} : {'Content-Type': 'application/json'}, ...(body === undefined ? {} : {body: JSON.stringify(body)})});
+    const result = await response.json(); if (!response.ok) { const error = new HTTPError(response.status, typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail)); error.data = result; throw error; } if (expectedStatus !== null && response.status !== expectedStatus) throw new Error('Resposta inesperada; consulte o mesmo ID.'); return result;
+  }
+  const path = id => `/roteiros/${canonicalUUID(id)}`;
+  const attemptPath = (id, block, intent) => `${path(id)}/blocks/${canonicalUUID(block)}/attempts/${canonicalUUID(intent)}`;
+  return {list: () => request('/roteiros'), read: id => request(path(id)), create: body => request('/roteiros', 'POST', body), save: (id, body) => request(path(id), 'PUT', body), proposal: (id, body) => request(`${path(id)}/proposal`, 'POST', body), editor: () => request('/roteiros/editor'), saveEditor: system_prompt => request('/roteiros/editor', 'PUT', {system_prompt}), readIntent: (id, block, intent) => request(attemptPath(id, block, intent)),
+    async generate(id, block, intent, body) { const key = attemptPath(id, block, intent); if (used.has(key)) throw new Error('Intenção já enviada; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', body, 202); }};
+}
+
 export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 16 : 0;
   const easing = 'cubic-bezier(.2,.8,.2,1)';
@@ -339,7 +411,7 @@ export function createPresentationMotion(document) {
   return {play, changed, enter, busy, stop, destroy, get activeCount() { return active.size; }, get channelCount() { return signatures.size; }};
 }
 
-export function startUI(document, client = createClient()) {
+export function startUI(document, client = createClient(), stories = createStoryClient()) {
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
@@ -349,7 +421,9 @@ export function startUI(document, client = createClient()) {
   catch (error) { pointerError = error.message; }
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
-  const TITLES = {library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
+  const story = {available: false, runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
+  let storyRecovery = null; try { const href = document.defaultView?.location?.href || 'http://local/'; storyRecovery = storyPointer(href); const params = new URL(href).searchParams; if (!storyRecovery.intent && params.has('pending_intent')) { for (const key of ['pending_roteiro', 'pending_block', 'pending_intent']) if (params.getAll(key).length !== 1) throw new Error('Ponteiro de recuperação inválido.'); storyRecovery = {roteiro: canonicalUUID(params.get('pending_roteiro')), block: canonicalUUID(params.get('pending_block')), intent: canonicalUUID(params.get('pending_intent'))}; } } catch (error) { message('notice', error.message, true); }
+  const TITLES = {story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
   const historyViews = new Map(); let historySerial = 0, historyToken = 0;
   function text(id, value) { const node = $(id); node.textContent = value; motion.changed(id, String(value ?? ''), [node]); }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
@@ -373,6 +447,7 @@ export function startUI(document, client = createClient()) {
     const current = draft();
     $('idea').value = current.idea; $('grok-result').value = current.proposal; $('prompt').value = current.chosenPrompt;
     current.promptDisplay = $('prompt').value;
+    story.detailCandidate = current.storyCandidate || null; if (story.detailCandidate) $('story-block-proposal').value = story.detailCandidate.text;
     $('seed').value = current.seed; $('duration').value = current.duration; state.reference = current.reference;
     text('proposal-context', current.proposalContext);
     text('proposal-hint', current.proposalStale ? 'O contexto mudou após este pedido. Confira a imagem e a ideia originais antes de usar esta proposta antiga.' : 'Edite o texto antes de usar. Sua ideia foi mantida.');
@@ -401,8 +476,18 @@ export function startUI(document, client = createClient()) {
     for (const panel of document.querySelectorAll('[data-screen]')) {
       const active = panel.dataset.screen === state.screen;
       panel.hidden = !active; panel.inert = !active;
+      panel.classList.toggle('story-presentation', Boolean(story.doc || story.creating));
     }
-    text('screen-title', state.screen === 'generation' && state.statusOnly ? 'Pedido no PC' : TITLES[state.screen]);
+    $('visual-contexts').classList.toggle('single-context', state.mode !== 'continue' || state.parent?.state !== 'accepted');
+    text('screen-title', state.screen === 'context' && story.creating ? 'Novo roteiro' : state.screen === 'generation' && state.statusOnly ? 'Pedido no PC' : TITLES[state.screen]);
+    $('story-create').hidden = !story.creating;
+    $('story-workbench').hidden = !story.block || state.statusOnly;
+    for (const id of ['use-idea', 'grok-detail', 'grok-context', 'show-proposal']) $(id).hidden = story.creating;
+    $('generation-edit').hidden = Boolean(story.block);
+    $('story-return').hidden = !story.doc;
+    $('story-intent-read').hidden = !ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner);
+    $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
+    if (state.screen === 'story') renderStory();
     text('screen-eyebrow', ['context', 'proposal', 'generation', 'continuation'].includes(state.screen) ? state.mode === 'continue' ? 'CONTINUAÇÃO · RASCUNHO' : 'NOVA CENA · RASCUNHO' : 'ESTÚDIO LOCAL');
     $('back').disabled = state.trail.length === 0;
     $('settings-open').disabled = state.screen === 'settings';
@@ -421,7 +506,7 @@ export function startUI(document, client = createClient()) {
     }
   }
   function viewSnapshot() {
-    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, selectedId: state.selected?.id || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
+    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
   }
   function recordView(snapshot = viewSnapshot(), push = false) {
     const view = document.defaultView;
@@ -446,9 +531,11 @@ export function startUI(document, client = createClient()) {
   }
   async function restoreView(snapshot, trail) {
     const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
+    story.doc = snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
     if (snapshot.selectedId && snapshot.selectedId !== state.selected?.id && !state.busy) await select(snapshot.selectedId);
     if (epoch !== state.navigationEpoch || stopped) return;
     Object.assign(state, {mode: snapshot.mode, draftKey: snapshot.draftKey, parent: snapshot.parent, statusOnly: snapshot.statusOnly, settingsOrigin: snapshot.settingsOrigin, screen: snapshot.screen, trail: [...trail]});
+    story.creating = Boolean(snapshot.storyCreating); story.block = snapshot.storyBlock || null;
     restoreDraft(); state.statusOnly ||= draft().submitted; paintScreen({direction: -1}); controls();
     const node = $(snapshot.focus);
     // Returning to settings' origin never opens a software keyboard by itself.
@@ -457,6 +544,7 @@ export function startUI(document, client = createClient()) {
     recordView();
   }
   function back() {
+    if (state.screen === 'story' && story.editing) { story.pendingEdit = 'back'; $('story-unsaved').hidden = false; return; }
     if (state.trail.length && document.defaultView?.history) document.defaultView.history.back();
     else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
   }
@@ -493,14 +581,31 @@ export function startUI(document, client = createClient()) {
     $('review-decisions').hidden = run?.state !== 'ready_for_review';
     $('review-next').hidden = run?.state !== 'accepted';
     $('continue-mode').disabled = draftNavigationBlocked() || run?.state !== 'accepted';
+    const nextStoryBlock = story.doc?.blocks.find(block => !storyBlockState(story.doc, block).accepted);
+    text('continue-mode', story.doc && story.block ? nextStoryBlock ? `Preparar bloco ${story.doc.blocks.indexOf(nextStoryBlock) + 1}` : 'Preparar montagem' : 'Preparar continuação');
+    const currentStoryIndex = story.doc?.blocks.findIndex(block => block.id === story.block) ?? -1;
+    if (currentStoryIndex >= 0) text('story-block-action', `Bloco ${currentStoryIndex + 1} de ${story.doc.blocks.length} · ${story.doc.blocks[currentStoryIndex].action}`);
+    const ownIntent = ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner);
+    $('story-intent-read').hidden = !ownIntent;
+    $('story-intent-read').disabled = !ownIntent || state.busy;
     $('new-mode').disabled = rootDraftViewBlocked();
-    text('new-mode', retryBlocked() ? 'Reabrir rascunho' : 'Nova cena');
+    text('new-mode', retryBlocked() ? 'Reabrir rascunho' : 'Novo bloco');
+    $('story-new').disabled = !state.config || story.busy || !story.available;
+    $('story-new').hidden = state.config?.roteiro_enabled === false;
+    $('story-propose').disabled = $('story-manual').disabled = story.busy || !state.capabilities;
+    $('story-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || (state.mode === 'continue' && state.lastFrame.state !== 'ready');
+    $('story-block-use').disabled = !story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy;
+    $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
+    $('story-stale-prompt').hidden = !draft().storyPromptStale;
+    $('story-new-send').hidden = !state.statusOnly || !story.rejectedReady || story.rejectedReady.owner.id !== story.doc?.id || story.rejectedReady.owner.block !== story.block || story.rejectedReady.owner.intent !== story.intent;
+    $('story-new-send').disabled = state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
+    text('story-prompt-origin', `Origem: ${draft().promptOrigin || 'roteiro'}`);
     $('create-fields').disabled = $('generate').disabled = nativeExecutionBlocked({...state, submitted: draft().submitted});
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
     $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
     $('upload-file').disabled = $('upload').disabled = !state.config?.reference_library || state.mode === 'continue' || state.uploadBusy || state.uploadUncertain;
-    $('generate').disabled ||= state.uploadBusy;
+    $('generate').disabled ||= state.uploadBusy || Boolean(story.detailCandidate && story.detailCandidate.key === state.draftKey) || Boolean(draft().storyPromptStale);
     $('generate').disabled ||= draft().submitted || state.uploadUncertain || state.retryPreparing;
     $('retry-review').hidden = !['rejected', 'interrupted'].includes(run?.state);
     $('retry-context').hidden = !draft().sourceId;
@@ -544,6 +649,8 @@ export function startUI(document, client = createClient()) {
     const freshIntent = !retryBlocked();
     const origin = viewSnapshot();
     saveDraft();
+    story.creating = false; story.block = null; story.doc = null; story.candidate = null; story.detailCandidate = null;
+    const view = document.defaultView; if (view?.history) view.history.replaceState(view.history.state, '', standaloneLocation(view.location.href));
     state.mode = mode;
     state.parent = mode === 'continue' ? state.selected : null;
     state.draftKey = mode === 'continue' ? state.parent.id : 'new';
@@ -557,6 +664,156 @@ export function startUI(document, client = createClient()) {
     state.statusOnly = Boolean(draft().submitted);
     navigate(mode === 'continue' ? 'continuation' : 'context', {origin});
     controls();
+  }
+  function storyURL() {
+    const view = document.defaultView; if (!view?.history) return;
+    const owner = story.intentOwner, matched = owner?.id === story.doc?.id && owner?.block === story.block;
+    const url = new URL(storyLocation(view.location.href, {id: story.doc?.id, block: story.block, intent: matched ? story.intent : null}), view.location.href);
+    if (!story.doc) url.searchParams.delete('roteiro');
+    if (!story.block) url.searchParams.delete('block');
+    if (!matched) url.searchParams.delete('intent');
+    if (owner) for (const [key, value] of [['pending_roteiro', owner.id], ['pending_block', owner.block], ['pending_intent', owner.intent]]) url.searchParams.set(key, canonicalUUID(value));
+    view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  async function storyLibrary() {
+    if (state.config?.roteiro_enabled === false) { story.available = false; return; }
+    try {
+      const result = await stories.list(); if (!Array.isArray(result.items)) throw new Error('Biblioteca de roteiros inválida.');
+      story.available = true;
+      story.runIDs = new Set(result.items.flatMap(doc => doc.attempts.map(attempt => attempt.run_id).filter(Boolean)));
+      $('story-library').replaceChildren();
+      if (!result.items.length) $('story-library').append(element('p', 'caption', 'Seu primeiro roteiro começa com uma ideia.'));
+      for (const doc of result.items) {
+        const card = element('article', 'story-card'), accepted = doc.blocks.filter(block => storyBlockState(doc, block).accepted).length;
+        const button = element('button', '', 'Abrir roteiro'); button.type = 'button'; button.addEventListener('click', () => openStory(doc.id));
+        card.append(element('h3', '', doc.name || 'Roteiro sem nome'), element('p', 'caption', `${doc.blocks.length} blocos · ${accepted} aceitos`), button); $('story-library').append(card);
+      }
+      message('story-library-status', ''); renderLibrary();
+    } catch (error) { message('story-library-status', `Não foi possível ler os roteiros: ${error.message}. Use Reler biblioteca.`, true); }
+  }
+  async function openStory(id) {
+    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); story.doc = doc; story.creating = false; story.candidate = null; story.block = null; storyURL(); renderStory(); navigate('story'); }
+    catch (error) { message('notice', `Não foi possível abrir o roteiro: ${error.message}`, true); }
+  }
+  function storyBlocks() { return story.candidate?.blocks || story.doc?.blocks || []; }
+  function renderStory() {
+    if (!story.doc) return;
+    const blocks = storyBlocks(), accepted = story.doc.blocks.filter(block => storyBlockState(story.doc, block).accepted).length;
+    $('story-name').value = story.candidate?.name ?? story.doc.name; $('story-candidate-notice').hidden = !story.candidate && story.doc.adopted;
+    text('story-summary', `${story.candidate ? 'Proposta' : 'Salvo no PC'} · ${accepted} de ${blocks.length} blocos aceitos · ${blocks.reduce((sum, block) => sum + block.duration_seconds, 0)} s planejados`);
+    text('story-idea-copy', story.doc.idea); text('story-reference-copy', `${story.doc.reference.source_root} / ${story.doc.reference.path}`);
+    $('story-blocks').replaceChildren();
+    for (const [index, block] of blocks.entries()) {
+      const info = storyBlockState(story.doc, block), li = element('li', 'story-block'); li.dataset.blockId = block.id;
+      const previous = index ? storyBlockState(story.doc, blocks[index - 1]).accepted : true;
+      li.append(element('h3', '', `${index + 1} · ${info.accepted ? 'Aceito' : info.latest ? STATE_LABELS[info.latest.run?.state] || 'Envio incerto' : previous ? 'Próximo' : 'Planejado'}`));
+      if (story.editing === block.id) {
+        const action = element('textarea'); action.value = story.editDraft.action; action.setAttribute('aria-label', 'O que acontece'); action.maxLength = 12000;
+        const duration = element('input'); duration.value = String(story.editDraft.duration_seconds); duration.inputMode = 'decimal'; duration.setAttribute('aria-label', 'Duração do bloco');
+        action.addEventListener('input', () => { story.editDraft.action = action.value; }); duration.addEventListener('input', () => { story.editDraft.durationText = duration.value; });
+        const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
+      } else {
+        li.append(element('p', '', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
+        const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button';
+        edit.addEventListener('click', () => { if (info.latest) void openStoryAttempt(info.accepted || info.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...block}; renderStory(); } }); li.append(edit);
+        if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
+      }
+      if (!info.frozen) {
+        const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
+        for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1], ['Remover bloco', 0]]) {
+          const button = element('button', '', label); button.type = 'button'; button.disabled = delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
+          button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; await saveStoryBlocks(changed); }); organize.append(button);
+        } li.append(organize);
+      }
+      if (info.attempts.length) { const history = element('details'); history.append(element('summary', '', 'Ver tentativas')); for (const attempt of info.attempts) { const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); history.append(button); } li.append(history); }
+      $('story-blocks').append(li);
+    }
+    $('story-adopt').hidden = story.doc.adopted && !story.candidate; $('story-next').hidden = !story.doc.adopted || Boolean(story.candidate);
+    const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted), info = next && storyBlockState(story.doc, next);
+    text('story-next', !next ? 'Preparar montagem' : info.latest ? ['rejected', 'interrupted'].includes(info.latest.run?.state) ? 'Preparar outra tentativa' : info.latest.run?.state === 'ready_for_review' ? 'Revisar bloco' : 'Consultar envio do bloco' : `Preparar bloco ${story.doc.blocks.indexOf(next) + 1}`);
+  }
+  async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
+    if (story.busy) return false; story.busy = true;
+    try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; renderStory(); message('story-status', 'Roteiro salvo no PC.'); return true; }
+    catch (error) { message('story-status', error.status === 409 ? 'O roteiro mudou no PC. Confira a outra versão antes de salvar. Sua edição foi mantida.' : `Não foi possível salvar: ${error.message}`, true); return false; }
+    finally { story.busy = false; }
+  }
+  async function saveStoryEdit() {
+    try { const changed = {...story.editDraft, duration_seconds: parseDuration(story.editDraft.durationText ?? String(story.editDraft.duration_seconds), state.capabilities)}; delete changed.durationText; sceneText(changed.action); const blocks = storyBlocks().map(item => item.id === changed.id ? changed : item);
+      if (story.candidate) { story.candidate.blocks = blocks; story.editing = null; renderStory(); return true; }
+      if (await saveStoryBlocks(blocks)) { story.editing = null; renderStory(); return true; }
+    } catch (error) { message('story-status', error.message, true); } return false;
+  }
+  async function createStory(propose) {
+    if (story.busy || !state.capabilities) return; saveDraft();
+    let count, duration;
+    try { count = parseSeed($('story-count').value); if (count < 1 || count > 50) throw new Error('Escolha entre 1 e 50 blocos.'); duration = parseDuration($('story-duration').value, state.capabilities); sceneText($('idea').value); }
+    catch (error) { message('grok-status', error.message, true); return; }
+    story.busy = true; controls();
+    try {
+      if (!story.doc) story.doc = await stories.create({name: $('story-create-name').value, idea: $('idea').value, reference: contextReference(), adopted: false, blocks: []});
+      storyURL();
+      if (propose) { message('grok-status', 'Dividindo sua ideia em blocos…'); const originID = story.doc.id, revision = story.doc.revision; const candidate = await stories.proposal(originID, {expected_revision: revision, count, duration_seconds: duration, seed: parseSeed($('seed').value)}); if (story.doc?.id !== originID) { story.lateMacro = candidate; message('grok-status', 'Resposta anterior preservada; a tela atual não foi substituída.'); return; } story.candidate = candidate; }
+      else story.candidate = {name: $('story-create-name').value, source_revision: story.doc.revision, blocks: Array.from({length: count}, () => ({id: newAssemblyUUID(document.defaultView.crypto), action: $('idea').value, duration_seconds: duration, seed: parseSeed($('seed').value), prompt: $('idea').value}))};
+      story.creating = false; renderStory(); navigate('story');
+    } catch (error) { if (error.data?.error === 'invalid_proposal') { $('story-invalid').hidden = false; text('story-invalid-text', error.data.raw_text); } message('grok-status', `${error.data?.error === 'invalid_proposal' ? 'A resposta não pôde ser convertida em blocos válidos.' : 'Não foi possível obter a proposta.'} Sua ideia continua aqui. ${error.message}`, true); }
+    finally { story.busy = false; controls(); }
+  }
+  async function openStoryAttempt(attempt) {
+    story.block = attempt.block_id; story.intent = attempt.intent_id; story.intentOwner = {id: story.doc.id, block: story.block, intent: story.intent}; storyURL();
+    if (!attempt.run) { if (!state.uncertain) story.uncertainIntent = attempt.intent_id; state.uncertain = true; state.statusOnly = true; story.rejectedReady = null; navigate('generation'); message('operation', 'Resultado ainda não confirmado. Consulte o mesmo envio.'); if (attempt.admission === 'rejected' && attempt.state === 'not_admitted') await readStoryIntent(); return; }
+    await select(attempt.run.id, attempt.run); navigate('review');
+  }
+  async function prepareStoryBlock(block) {
+    if (!block || !story.doc.adopted) return;
+    const index = story.doc.blocks.indexOf(block), previous = index ? storyBlockState(story.doc, story.doc.blocks[index - 1]).accepted : null;
+    if (index && !previous) { message('story-status', 'Aceite o bloco anterior antes de preparar esta continuação.', true); return; }
+    saveDraft(); story.block = block.id; story.detailCandidate = null; state.mode = previous ? 'continue' : 'new'; state.parent = previous?.run || null; state.reference = story.doc.reference; state.draftKey = `story:${story.doc.id}:${block.id}`;
+    if (!state.drafts.has(state.draftKey)) state.drafts.set(state.draftKey, {idea: block.action, chosenPrompt: block.prompt, proposal: '', seed: String(block.seed), duration: String(block.duration_seconds), reference: story.doc.reference, revision: 0, submitted: false, promptOrigin: 'roteiro'});
+    restoreDraft(); state.statusOnly = draft().submitted; storyURL(); navigate('generation'); text('story-neighbors', storyContext(story.doc, block.id, draft().duration));
+  }
+  async function storyNext() {
+    const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted);
+    if (!next) { const last = storyBlockState(story.doc, story.doc.blocks.at(-1)).accepted; await select(last.run.id, last.run); navigate('assembly'); return; }
+    const latest = storyBlockState(story.doc, next).latest;
+    if (latest) { await openStoryAttempt(latest); if (['rejected', 'interrupted'].includes(latest.run?.state)) await prepareRetry(); } else await prepareStoryBlock(next);
+  }
+  async function readStoryIntent() {
+    if (!ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner) || state.busy) return;
+    const owner = {id: story.doc.id, block: story.block, intent: story.intent}; story.rejectedReady = null;
+    try {
+      const attempt = await readOwnedStoryIntent(stories, story.doc, story.block, story.intent, story.intentOwner), doc = await stories.read(owner.id);
+      if (!ownedIntentMatchingCurrent(story.doc, story.block, story.intent, owner) || !ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner)) return;
+      if (attempt.intent_id !== owner.intent || attempt.roteiro_id !== owner.id || attempt.block_id !== owner.block || attempt.run_id !== owner.intent || doc.id !== owner.id) throw new Error('Intenção ou documento diferente.');
+      if (attempt.admission === 'rejected' && attempt.state === 'not_admitted' && attempt.run === null) {
+        rejectedStoryDraft(doc, attempt, owner, state.capabilities); story.rejectedReady = {attempt, owner};
+        if (story.uncertainIntent === owner.intent) { state.uncertain = false; story.uncertainIntent = null; }
+      } else if (attempt.run?.id === owner.intent && attempt.admission === 'admitted') {
+        if (story.uncertainIntent === owner.intent) { state.uncertain = false; story.uncertainIntent = null; }
+        state.pendingRun = attempt.run; story.doc = doc; await select(attempt.run.id, attempt.run);
+      } else { if (!state.uncertain) story.uncertainIntent = owner.intent; state.uncertain = true; }
+      story.doc = doc; renderStory(); message('operation', `Envio ${owner.intent}: ${attempt.state}. ${story.rejectedReady ? 'Pedido recusado antes da geração. Preparar novo envio copia a instrução; não envia.' : 'Nenhum pedido repetido.'}`); controls();
+    } catch (error) { if (!state.uncertain) story.uncertainIntent = owner.intent; state.uncertain = true; message('operation', `Envio não confirmado: ${error.message}. Consulte o mesmo ID; não reenvie.`, true); controls(); }
+  }
+  function prepareRejectedStory() {
+    if (!story.rejectedReady || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state)) return;
+    try {
+      const {attempt, owner} = story.rejectedReady;
+      if (story.doc?.id !== owner.id || story.block !== owner.block || story.intent !== owner.intent) throw new Error('A origem mudou; consulte o envio novamente.');
+      const copied = rejectedStoryDraft(story.doc, attempt, owner, state.capabilities), index = story.doc.blocks.findIndex(block => block.id === owner.block);
+      saveDraft(); if (!state.drafts.has(copied.key)) state.drafts.set(copied.key, copied);
+      state.draftKey = copied.key; state.mode = copied.mode; state.parent = index ? storyBlockState(story.doc, story.doc.blocks[index - 1]).accepted.run : null; state.statusOnly = false;
+      restoreDraft(); navigate('generation'); message('operation', 'Novo rascunho preparado com a instrução literal do envio recusado. Gerar cria outra intenção; o envio anterior continua no histórico.');
+    } catch (error) { message('operation', error.message, true); }
+  }
+  async function detailStoryBlock() {
+    if (!story.doc || !story.block || state.grokBusy || state.grokUncertain || !state.editorReady || (state.mode === 'continue' && state.lastFrame.state !== 'ready')) return;
+    saveDraft(); const origin = draft(), before = editorDraft(), revision = story.doc.revision;
+    try { before.prompt = storyContext(story.doc, story.block, origin.duration, origin.chosenPrompt); grokPayload(before); } catch (error) { message('story-detail-status', error.message, true); return; }
+    state.grokBusy = true; controls();
+    try { const result = await client.detail(before); let unchanged = false; if (story.doc && before.draftKey === state.draftKey) { const current = editorDraft(); current.prompt = storyContext(story.doc, story.block, draft().duration, draft().chosenPrompt); unchanged = draftMatches(before, current) && revision === story.doc.revision && !origin.submitted; } origin.storyCandidate = {text: result, key: before.draftKey, revision, stale: !unchanged}; if (before.draftKey === state.draftKey) { story.detailCandidate = origin.storyCandidate; $('story-block-proposal').value = result; text('story-block-candidate-context', story.detailCandidate.stale ? 'Resposta de contexto anterior. Confira antes de usar.' : contextLabel()); } }
+    catch (error) { state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500; message('story-detail-status', `Não foi possível detalhar. Sua instrução foi mantida. ${error.message}`, true); }
+    finally { state.grokBusy = false; controls(); }
   }
   function rememberAssembly(record) {
     if (record.id !== state.assemblyId) return;
@@ -706,8 +963,9 @@ export function startUI(document, client = createClient()) {
   }
   function renderLibrary() {
     const list = $('library'); list.replaceChildren();
-    if (!state.items.length) list.append(element('p', 'caption', 'Nenhum bloco nesta página. Prepare uma nova cena.'));
-    for (const run of state.items) {
+    const standalone = state.items.filter(run => !story.runIDs.has(run.id));
+    if (!standalone.length) list.append(element('p', 'caption', 'Nenhum bloco avulso ainda.'));
+    for (const run of standalone) {
       const button = element('button', 'clip-card'); button.type = 'button'; button.setAttribute('aria-current', String(run.id === state.selected?.id));
       button.setAttribute('aria-label', `${label(run)} · ${run.id} · ${run.prompt || 'Sem instrução'}`);
       const top = element('span', 'card-top'); top.append(element('span', '', run.id.slice(0, 8)), element('span', '', `${run.duration_seconds ?? '—'} s`));
@@ -860,7 +1118,9 @@ export function startUI(document, client = createClient()) {
       const run = knownRun || await client.get(`/runs/${encodeURIComponent(id)}`);
       if (epoch !== state.epoch) return;
       if (state.selected?.id !== run.id) { state.sequence = null; message('retry-status', ''); }
-      state.selected = run; renderRun();
+      state.selected = run;
+      if (story.doc) { const attempt = story.doc.attempts.find(item => item.run_id === run.id); story.block = attempt?.block_id || null; if (attempt) story.intent = attempt.intent_id; }
+      renderRun();
       const sequence = await client.get(`/runs/${encodeURIComponent(id)}/sequence`);
       if (epoch !== state.epoch) return;
       if (!Array.isArray(sequence.blocks)) throw new Error('Resposta inválida da cadeia.');
@@ -919,6 +1179,8 @@ export function startUI(document, client = createClient()) {
       if (!state.config) await loadConfig();
       await loadReferences();
       await loadLibrary();
+      await storyLibrary();
+      if (story.doc && !story.busy && !story.editing && !story.candidate) { story.doc = await stories.read(story.doc.id); if (state.screen === 'story') renderStory(); }
       if (!state.busy && selectionEpoch === state.epoch) {
         if (state.selected) await select(state.selected.id);
       }
@@ -936,6 +1198,7 @@ export function startUI(document, client = createClient()) {
       const run = await client.decide(id, action);
       message('review-status', action === 'accept' ? 'Bloco aceito.' : 'Bloco rejeitado. A evidência foi preservada.');
       await syncConfirmedRun(run);
+      if (story.doc) { story.doc = await stories.read(story.doc.id); renderStory(); }
     } catch (error) {
       if (!(error instanceof HTTPError) || error.status >= 500) state.uncertain = true;
       message('review-status', `Decisão não confirmada: ${error.message}. Atualize os metadados antes de agir; não repita uma decisão incerta.`, true);
@@ -950,25 +1213,46 @@ export function startUI(document, client = createClient()) {
     saveDraft();
     try { payload = makePayload({seed: $('seed').value, prompt: draft().chosenPrompt, duration: $('duration').value, capabilities: state.capabilities, reference: state.reference, continuation}); }
     catch (error) { message('operation', error.message, true); return; }
-    const submittedDraft = draft(); submittedDraft.submitted = true;
     const parent = continuation ? state.parent.id : null;
+    let storyIntent = null;
+    if (story.doc && story.block) {
+      if (story.detailCandidate || draft().storyPromptStale || story.busy) return;
+      const frozen = storyBlockState(story.doc, story.doc.blocks.find(block => block.id === story.block)).frozen;
+      if (!frozen) {
+        const blocks = story.doc.blocks.map(block => block.id === story.block ? {...block, prompt: payload.prompt, seed: payload.seed, duration_seconds: payload.duration_seconds} : block);
+        if (!await saveStoryBlocks(blocks)) { message('operation', $('story-status').textContent, true); return; }
+      }
+      try { storyIntent = newAssemblyUUID(document.defaultView.crypto); story.intent = storyIntent; story.intentOwner = {id: story.doc.id, block: story.block, intent: storyIntent}; storyURL(); }
+      catch (error) { message('operation', `Nenhum envio: ${error.message}`, true); return; }
+    }
+    const submittedDraft = draft(); submittedDraft.submitted = true;
     const path = parent ? `/runs/${encodeURIComponent(parent)}/v2v` : '/runs/i2v';
     ++state.epoch; ++libraryEpoch;
     state.busy = true; state.pendingRun = null; state.statusOnly = true; state.waitController = new AbortController(); paintScreen(); controls();
     message('operation', 'Enviando uma solicitação. A admissão ainda não foi confirmada.');
     let admittedID = null;
     try {
-      const run = await client.generate(path, payload, admitted => {
+      const onAdmitted = admitted => {
         admittedID = admitted.id; state.pendingRun = admitted; state.selected = admitted; state.sequence = null;
         renderRun(); message('operation', `Admitido: ${admitted.id}. Aguardando este bloco; HTTP 202 não significa vídeo pronto.`);
-      }, state.waitController.signal);
+      };
+      let run;
+      if (storyIntent) {
+        const attempt = await stories.generate(story.doc.id, story.block, storyIntent, {expected_revision: story.doc.revision, prompt: payload.prompt, seed: payload.seed, duration_seconds: payload.duration_seconds, parent_id: parent});
+        if (attempt.intent_id !== storyIntent || attempt.run_id !== storyIntent || attempt.admission !== 'admitted' || attempt.run?.id !== storyIntent) throw new Error('Vínculo de envio não confirmado. Consulte a mesma intenção.');
+        onAdmitted(attempt.run);
+        run = await client.get(`/runs/${storyIntent}?wait=true`, state.waitController.signal);
+        if (run?.id !== storyIntent || typeof run.state !== 'string') throw new Error('Espera sem resultado válido para esta intenção.');
+        story.doc = await stories.read(story.doc.id);
+      } else run = await client.generate(path, payload, onAdmitted, state.waitController.signal);
       message('operation', `${label(run)} · ${run.id}${run.error ? ` · ${run.error}` : ''}`);
       state.pendingRun = run;
       await syncConfirmedRun(run);
     } catch (error) {
-      // A lost response/5xx can follow durable admission. Never offer another
-      // Generate button as recovery; read-only refresh is the safe next step.
-      state.uncertain = admittedID !== null || !(error instanceof HTTPError) || error.status >= 500;
+      // Story intents are reserved before admission: even 4xx or a duplicate
+      // response needs an own-ID read. Legacy standalone 4xx semantics stay intact.
+      state.uncertain = Boolean(storyIntent) || admittedID !== null || !(error instanceof HTTPError) || error.status >= 500;
+      if (storyIntent && state.uncertain) story.uncertainIntent = storyIntent;
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
     } finally { submittedDraft.submitted = state.uncertain || admittedID !== null; state.busy = false; state.statusOnly = state.uncertain || admittedID !== null; state.waitController = null; paintScreen(); controls(); drainChanges(); }
   }
@@ -1013,10 +1297,36 @@ export function startUI(document, client = createClient()) {
   $('previous').addEventListener('click', () => { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.limit); refresh(); } });
   $('next').addEventListener('click', () => { if (state.offset + state.limit < state.total) { state.offset += state.limit; refresh(); } });
   $('new-mode').addEventListener('click', () => setMode('new'));
-  $('continue-mode').addEventListener('click', () => setMode('continue'));
+  $('continue-mode').addEventListener('click', () => { if (story.doc && story.block) void storyNext(); else setMode('continue'); });
   $('accept').addEventListener('click', () => decide('accept'));
   $('reject').addEventListener('click', () => decide('reject'));
   $('create-form').addEventListener('submit', generate);
+  $('story-new').addEventListener('click', () => {
+    saveDraft(); story.creating = true; story.doc = null; story.block = null; story.candidate = null; state.mode = 'new'; state.parent = null; state.draftKey = 'story:new'; restoreDraft(); $('story-duration').value = String(state.capabilities?.default_requested_seconds ?? ''); storyURL(); navigate('context');
+  });
+  const initialTotal = () => { try { const count = parseSeed($('story-count').value), seconds = parseDuration($('story-duration').value, state.capabilities); if (!count || count > 50) throw new Error('Quantidade entre 1 e 50 blocos.'); message('story-total', `${count} × ${seconds} s = ${count * seconds} s planejados`); } catch (error) { message('story-total', error.message, true); } };
+  for (const id of ['story-count', 'story-duration']) $(id).addEventListener('input', initialTotal);
+  $('story-manual').addEventListener('click', () => createStory(false)); $('story-propose').addEventListener('click', () => createStory(true));
+  $('story-adopt').addEventListener('click', () => { if (story.candidate && story.candidate.source_revision !== story.doc.revision) { message('story-status', 'O roteiro mudou no PC. Confira a proposta antiga antes de salvar.', true); return; } void saveStoryBlocks(storyBlocks(), true); });
+  $('story-add').addEventListener('click', async () => { try { const block = {id: newAssemblyUUID(document.defaultView.crypto), action: 'Descreva a próxima ação.', prompt: 'Descreva a próxima ação.', seed: parseSeed($('seed').value), duration_seconds: state.capabilities.default_requested_seconds}; if (story.candidate) { story.candidate.blocks.push(block); renderStory(); } else await saveStoryBlocks([...story.doc.blocks, block]); } catch (error) { message('story-status', error.message, true); } });
+  $('story-next').addEventListener('click', storyNext);
+  $('story-return').addEventListener('click', () => { renderStory(); navigate('story'); });
+  $('story-intent-read').addEventListener('click', readStoryIntent);
+  const newSend = element('button', 'primary', 'Preparar novo envio'); newSend.id = 'story-new-send'; newSend.type = 'button'; newSend.hidden = true; newSend.addEventListener('click', prepareRejectedStory); $('story-intent-read').after(newSend);
+  $('story-reload').addEventListener('click', async () => { if (story.editing || story.candidate) { message('story-status', 'Sua edição foi mantida. Salve ou descarte antes de reler.', true); return; } await openStory(story.doc.id); });
+  $('story-propose-again').addEventListener('click', async () => { if (story.busy) return; story.busy = true; try { story.candidate = await stories.proposal(story.doc.id, {expected_revision: story.doc.revision, count: story.doc.blocks.length || 3, duration_seconds: state.capabilities.default_requested_seconds, seed: parseSeed($('seed').value)}); renderStory(); } catch (error) { message('story-status', error.message, true); } finally { story.busy = false; } });
+  $('story-detail').addEventListener('click', detailStoryBlock);
+  $('story-block-use').addEventListener('click', () => { if (!story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy) return; try { $('prompt').value = sceneText($('story-block-proposal').value); draft().promptOrigin = 'Grok'; draft().storyPromptRevision = story.detailCandidate.revision; draft().storyPromptStale = story.detailCandidate.revision !== story.doc.revision; ++draft().revision; saveDraft(); draft().storyCandidate = null; story.detailCandidate = null; controls(); } catch (error) { message('story-detail-status', error.message, true); } });
+  $('story-block-keep').addEventListener('click', () => { draft().storyCandidate = null; story.detailCandidate = null; controls(); });
+  $('story-block-proposal').addEventListener('input', () => { if (draft().storyCandidate) draft().storyCandidate.text = $('story-block-proposal').value; });
+  $('story-stale-use').addEventListener('click', () => { draft().storyPromptStale = false; $('story-stale-prompt').hidden = true; controls(); });
+  $('story-base-use').addEventListener('click', () => { const block = story.doc.blocks.find(item => item.id === story.block); $('prompt').value = block.prompt; draft().storyPromptStale = false; draft().promptOrigin = 'roteiro'; saveDraft(); controls(); });
+  $('story-save-continue').addEventListener('click', async () => { if (await saveStoryEdit()) { const target = story.pendingEdit; story.pendingEdit = null; $('story-unsaved').hidden = true; if (target === 'back') { back(); return; } if (target) { story.editing = target; story.editDraft = {...storyBlocks().find(block => block.id === target)}; renderStory(); } } });
+  $('story-discard').addEventListener('click', () => { const target = story.pendingEdit; story.pendingEdit = null; if (target === 'back') { story.editing = null; $('story-unsaved').hidden = true; back(); return; } story.editing = target; story.editDraft = target ? {...storyBlocks().find(block => block.id === target)} : null; $('story-unsaved').hidden = true; renderStory(); });
+  $('story-keep-editing').addEventListener('click', () => { story.pendingEdit = null; $('story-unsaved').hidden = true; });
+  $('story-editor-save').addEventListener('click', async () => { try { await stories.saveEditor($('story-system').value); message('story-editor-status', 'Instruções do roteirista salvas no PC.'); } catch (error) { message('story-editor-status', error.message, true); } });
+  for (const figure of document.querySelectorAll('.visual-card')) { const button = element('button', '', 'Ampliar imagem'); button.type = 'button'; button.addEventListener('click', () => { const expanded = figure.classList.toggle('expanded'); button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Reduzir imagem' : 'Ampliar imagem'; }); figure.append(button); }
+  const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   document.defaultView?.addEventListener('pagehide', () => { motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
@@ -1033,12 +1343,20 @@ export function startUI(document, client = createClient()) {
     loadEditor(),
     loadReferences(),
     loadLibrary(),
+    storyLibrary(),
+    state.config?.roteiro_enabled === false ? Promise.resolve() : stories.editor().then(config => { $('story-system').value = config.system_prompt; $('story-model').value = config.model; $('story-system').disabled = $('story-editor-save').disabled = false; }).catch(error => message('story-editor-status', `Roteirista indisponível: ${error.message}. O editor de blocos continua separado.`, true)),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
     if (state.config?.assembly_enabled && pointer) {
       // Recovery is a view reached from the library, never a command or a dead end.
       navigate('assembly', {focus: false});
       await readAssembly({restoreSelection: true});
     }
+    if (storyRecovery?.roteiro) {
+      await openStory(storyRecovery.roteiro);
+      story.block = storyRecovery.block; story.intent = storyRecovery.intent;
+      if (story.intent) story.intentOwner = {id: storyRecovery.roteiro, block: story.block, intent: story.intent};
+      if (story.intent) { if (!state.uncertain) story.uncertainIntent = story.intent; state.uncertain = true; state.statusOnly = true; navigate('generation', {focus: false}); await readStoryIntent(); }
+    } else if (document.defaultView?.location?.pathname === '/roteiro' && !pointer) { story.creating = true; $('story-duration').value = String(state.capabilities?.default_requested_seconds ?? ''); navigate('context', {focus: false}); }
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     paintScreen(); controls(); refreshActive = false; drainChanges();
