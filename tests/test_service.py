@@ -132,9 +132,9 @@ async def telemetry(comfy, path, stop, **kwargs):
 
 
 def frames(seconds):
-    if seconds > 2.9:
-        raise ValueError("Aligned duration exceeds 3 seconds")
-    return 56
+    from h3_backend.generation.workflow import frames_for_duration
+
+    return frames_for_duration(seconds)
 
 
 def make_service(tmp_path):
@@ -244,7 +244,7 @@ async def test_paths_and_duration_rejected_before_job(tmp_path):
         with pytest.raises(ValueError):
             await service.create(RunRequest(seed=1, image=name))
     with pytest.raises(ValueError):
-        await service.create(RunRequest(seed=1, duration_seconds=3))
+        await service.create(RunRequest(seed=1, duration_seconds=10.01))
     assert not service.comfy.submitted
     await service.shutdown()
 

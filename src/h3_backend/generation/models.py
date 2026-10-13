@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
+from .workflow import DEFAULT_DURATION_SECONDS, MAX_DURATION_SECONDS
+
 PROMPT_ROOT = Path(__file__).resolve().parents[3] / "prompts"
 DEFAULT_PROMPT = (PROMPT_ROOT / "initial.md").read_text(encoding="utf-8")
 CONTINUATION_PROMPT = (PROMPT_ROOT / "continuation.md").read_text(encoding="utf-8")
@@ -65,7 +67,9 @@ class RunRequest(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=8)
     references: list[ImageReference] = Field(default_factory=list, max_length=8)
     prompt: str = Field(default=DEFAULT_PROMPT, min_length=1, max_length=12000)
-    duration_seconds: float = Field(default=2.3, gt=0, le=3, allow_inf_nan=False)
+    duration_seconds: float = Field(
+        default=DEFAULT_DURATION_SECONDS, gt=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False,
+    )
 
     @model_validator(mode="after")
     def exclusive_references(self) -> RunRequest:
@@ -78,7 +82,9 @@ class ContinueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: StrictInt = Field(ge=0, le=2**53 - 1)
     prompt: str | None = Field(default=None, min_length=1, max_length=12000)
-    duration_seconds: float = Field(default=2.3, gt=0, le=3, allow_inf_nan=False)
+    duration_seconds: float = Field(
+        default=DEFAULT_DURATION_SECONDS, gt=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False,
+    )
     reference_tail_seconds: Literal[2, 3] = 3
     include_audio: bool = True
 

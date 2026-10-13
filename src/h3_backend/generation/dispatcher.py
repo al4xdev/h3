@@ -16,6 +16,7 @@ from time import monotonic
 from ..infrastructure.comfy import ComfyClient, ExecutionInterrupted
 from ..infrastructure.store import Store, contained, timestamp
 from .models import ContinueRequest, Run, RunRequest, Settings
+from .workflow import DURATION_FPS, FRAME_BASE, FRAME_STRIDE, MAX_DURATION_FRAMES
 
 
 class Conflict(ValueError):
@@ -29,8 +30,14 @@ def verify_video(info: dict, expected_frames: int) -> None:
     video = videos[0]
     duration = float(video.get("duration", info.get("format", {}).get("duration", "nan")))
     fps = Fraction(video.get("avg_frame_rate", "0"))
-    if not math.isfinite(duration) or not 0 < duration <= 3:
-        raise ValueError("Output duration exceeds the strict three-second limit")
+    if (not FRAME_BASE <= expected_frames <= MAX_DURATION_FRAMES
+            or (expected_frames - FRAME_BASE) % FRAME_STRIDE):
+        raise ValueError("Expected frame count exceeds the aligned operational duration budget")
+    # Alignment may exceed the requested seconds (10s -> 243 frames / 10.125s).
+    # Allow one frame of container timestamp rounding, as in assembly validation.
+    if (not math.isfinite(duration) or duration <= 0
+            or abs(duration - expected_frames / DURATION_FPS) > 1 / DURATION_FPS):
+        raise ValueError("Output duration does not match aligned expected frame count")
     if (video.get("width"), video.get("height")) != (480, 864) or fps != 24:
         raise ValueError("Output does not match baseline 480x864 at 24 fps")
     if int(video.get("nb_read_frames", video.get("nb_frames", -1))) != expected_frames:

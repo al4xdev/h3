@@ -57,7 +57,14 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
         assert config == {"default_prompt": DEFAULT_PROMPT, "continuation_prompt": CONTINUATION_PROMPT,
                           "reference_image": "dance_reference.png", "duration_seconds": 2.3,
                           "workflow_output_profile": "baseline", "filesystem_events": True,
-                          "reference_library": True, "assembly_enabled": True}
+                          "reference_library": True, "assembly_enabled": True,
+                          "duration_capabilities": {
+                              "default_requested_seconds": 2.3, "min_requested_seconds": 0,
+                              "min_exclusive": True, "max_requested_seconds": 10,
+                              "input_step": 0.01, "fps": 24, "frame_base": 5,
+                              "frame_stride": 17, "rounding": "half_even", "max_frames": 243,
+                              "max_actual_seconds": 10.125,
+                          }}
         assert (await http.get("/runs")).json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
         refs = (await http.get("/inputs")).json()
         assert refs["total"] == 1 and refs["items"][0]["source_root"] == "assets"

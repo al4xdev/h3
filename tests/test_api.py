@@ -70,7 +70,7 @@ async def test_http_validation_gate_and_video(tmp_path):
             {},
             {"seed": "7"},
             {"seed": True},
-            {"seed": 7, "duration_seconds": 4},
+            {"seed": 7, "duration_seconds": 10.01},
             {"seed": 7, "parent_id": "hidden"},
         ):
             assert (await client.post("/runs", json=payload)).status_code == 422

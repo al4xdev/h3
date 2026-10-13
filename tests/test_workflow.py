@@ -31,11 +31,15 @@ def build(builder, **overrides):
     return builder.build(**(arguments | overrides))
 
 
-def test_duration_preserves_original_rounding_with_strict_cap():
+def test_duration_preserves_original_rounding_with_operational_cap():
     assert frames_for_duration(2.3) == 56
     assert frames_for_duration(56 / 24) == 56
     assert frames_for_duration(0.1) == 5
-    for seconds in (0, -1, 3, 8, float("nan"), float("inf")):
+    assert frames_for_duration(2.8) == 73
+    assert frames_for_duration(3) == 73
+    assert frames_for_duration(5) == 124
+    assert frames_for_duration(10) == 243
+    for seconds in (0, -1, 10.01, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             frames_for_duration(seconds)
 

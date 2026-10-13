@@ -34,14 +34,41 @@ OutputProfile = Literal["baseline", "final_only"]
 PREVIEW_NODES = ("18", "176", "177")
 
 
+DEFAULT_DURATION_SECONDS = 2.3
+# Operational request budget, not a checkpoint maximum or proof of GPU/RAM safety.
+MAX_DURATION_SECONDS = 10.0
+DURATION_FPS = 24
+FRAME_BASE = 5
+FRAME_STRIDE = 17
+
+
+def _aligned_frames(seconds: float) -> int:
+    # Match the frozen graph exactly, including Python's half-even round.
+    requested = max(FRAME_BASE, round(seconds * DURATION_FPS))
+    return requested + (FRAME_BASE - requested % FRAME_STRIDE) % FRAME_STRIDE
+
+
+MAX_DURATION_FRAMES = _aligned_frames(MAX_DURATION_SECONDS)
+
+
 def frames_for_duration(seconds: float) -> int:
-    if not math.isfinite(seconds) or not 0 < seconds <= 3:
-        raise ValueError("Baseline duration must be positive and at most three seconds")
-    requested = max(5, round(seconds * 24))
-    frames = requested + (5 - requested % 17) % 17
-    if frames / 24 > 3:
-        raise ValueError("The original graph rounds this duration above three seconds; use 2.3")
+    if not math.isfinite(seconds) or not 0 < seconds <= MAX_DURATION_SECONDS:
+        raise ValueError("Requested duration must be finite, positive and at most ten seconds")
+    frames = _aligned_frames(seconds)
+    if frames > MAX_DURATION_FRAMES:
+        raise ValueError("Aligned frame count exceeds the operational duration budget")
     return frames
+
+
+def duration_capabilities() -> dict[str, Any]:
+    return {
+        "default_requested_seconds": DEFAULT_DURATION_SECONDS,
+        "min_requested_seconds": 0, "min_exclusive": True,
+        "max_requested_seconds": MAX_DURATION_SECONDS, "input_step": 0.01,
+        "fps": DURATION_FPS, "frame_base": FRAME_BASE, "frame_stride": FRAME_STRIDE,
+        "rounding": "half_even", "max_frames": MAX_DURATION_FRAMES,
+        "max_actual_seconds": MAX_DURATION_FRAMES / DURATION_FPS,
+    }
 
 
 def _media_entry(reference: dict[str, Any]) -> dict[str, Any]:

@@ -16,6 +16,7 @@ from .generation.dispatcher import Conflict, RunService
 from .generation.i2v import router as i2v_router
 from .generation.models import CONTINUATION_PROMPT, DEFAULT_PROMPT, Run, Settings
 from .generation.v2v import router as v2v_router
+from .generation.workflow import duration_capabilities
 from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import sha256_file, verify_image
@@ -112,6 +113,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
             "default_prompt": DEFAULT_PROMPT, "continuation_prompt": CONTINUATION_PROMPT,
             "reference_image": "dance_reference.png", "duration_seconds": 2.3,
             "workflow_output_profile": current.workflow_output_profile,
+            "duration_capabilities": duration_capabilities(),
             "filesystem_events": getattr(backend(), "watcher", None) is not None,
             "reference_library": True, "assembly_enabled": True,
         }
