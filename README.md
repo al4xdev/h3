@@ -27,13 +27,14 @@ No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não
 
 - Selecione uma referência da biblioteca ou **Envie imagem ao PC**; upload não gera vídeo. Imagens próprias ficam em `.data/inputs/`, com bytes originais preservados.
 - Descreva a cena e clique **Gerar** explicitamente. Assista ao bloco antes de aceitar/rejeitar; apenas um pai aceito permite continuar.
-- **Detalhar ideia e imagem** envia explicitamente sua ideia e a referência selecionada ao Grok, recebendo uma proposta de texto editável. **Usar esta proposta** e **Gerar** são ações separadas; nenhuma gera vídeo automaticamente. System prompt segue editável, mas o modelo está fixo em `.data/grok/editor.json`: `grok-4.20-0309-non-reasoning`. Credenciais OAuth ficam separadas; disponibilidade na conta ainda não foi testada. Veja [Grok](docs/grok.md); abrir/reconectar a página não chama o provider.
-- Cada bloco permite duração solicitada até10s, com default2.3 preservado. O alinhamento nativo24fps/5+17k produz, por exemplo,3s→73frames/3.042s,5s→124frames/5.167s e10s→243frames/10.125s. A interface distingue solicitado, alinhado e verificado.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga para estas correções.
+- **Detalhar ideia e imagem** envia explicitamente sua ideia e a referência selecionada ao Grok. Na continuação, você vê e envia **identidade original + último frame do pai aceito**, para distinguir identidade de pose/roupa atual. O preview do frame é CPU, não geração. **Usar esta proposta** e **Gerar** são ações separadas. System prompt é editável nos Ajustes, mas o modelo continua fixo: `grok-4.20-0309-non-reasoning`. Credenciais ficam separadas; uma chamada real autorizada com duas imagens respondeu200, mas limites/cota e obediência integral da proposta não estão certificados. Veja [Grok](docs/grok.md); abrir/reconectar não chama o provider.
+- A engrenagem abre **Ajustes**: seed/duração pertencem ao rascunho do bloco ainda não enviado, não alteram resultados nem viram preset global. Duração solicitada até10s, default2.3; alinhamento nativo24fps/5+17k:3s→73frames/3.042s,5s→124frames/5.167s,10s→243frames/10.125s.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga.
+- Blocos **recusados/interrompidos** conservam seu **prompt final enviado**, inclusive o melhorado pelo Grok se usado. **Preparar nova tentativa** abre geração já preenchida, sem voltar ao começo ou chamar Grok de novo. Só Gerar cria outro pedido; a tentativa antiga não é reaberta e a nova exige revisão. Continuação usa o mesmo pai original aceito. Sem metadados seguros, a cópia é bloqueada com motivo, não substituída por defaults.
 - Atualização de arquivos chega por SSE; reconectar ou atualizar a biblioteca só relê metadados, nunca repete geração. Resultado incerto exige consulta do ID conhecido, não novo POST cego.
 
 **Montar sequência** concatena a cadeia selecionada, sem gerar novos blocos: todos os pais devem estar aceitos e o fim pode estar aceito ou pronto para revisão. Assista/baixe o resultado no painel próprio. Montar não aceita o fim: a prévia mantém a revisão pendente. Após aceitar o fim, um novo clique explícito pode publicar uma montagem da sequência aceita. Se a resposta for perdida, use **Reler montagem** no ID conhecido; não reenvie às cegas.
 
-No celular, o estúdio mostra uma tela principal por vez: **Biblioteca → Referência e ideia → Proposta → Preparar geração → Revisão → Continuação → Montagem**. Grok é opcional; **Usar minha instrução** pula o editor. **Voltar** preserva o rascunho da cena/parent, imagem, seed e duração durante essa sessão. Recarregar a página relê os arquivos do PC e não repete operações; os rascunhos ainda não enviados não são persistidos no navegador.
+No celular, uma tela principal por vez e um topo compacto **Voltar · título · engrenagem**. Biblioteca/Nova cena não ficam como abas permanentes; listas, ancestrais e ações acompanham a única rolagem da página, sem rodapé/docks fixos. Grok é opcional. Voltar/Ajustes preservam o rascunho, referência, seed e duração durante a sessão. Recarregar relê os arquivos do PC sem repetir operações; rascunhos ainda não enviados não são persistidos no navegador.
 
 O fluxo tem microanimações curtas de entrada, toque, seleção e confirmação, principalmente no mobile. Elas não atrasam cliques nem movem os vídeos/controles fixos; respeitam a preferência **reduzir movimento** do aparelho. Loading é feedback do estado real, sem progresso inventado ou operações disparadas pela animação.
 
@@ -47,7 +48,7 @@ src/h3_backend/
 │   ├── __init__.py
 │   ├── i2v.py             # I2VPipe: fluxo completo de imagem → chunk
 │   ├── v2v.py             # V2VPipe: fluxo completo de continuação → chunk
-│   ├── dispatcher.py      # dispatcher único: slot, RAM, worker e lifecycle
+│   ├── dispatcher.py      # slot único, worker e lifecycle dos pedidos; RAM só telemetria
 │   ├── workflow.py        # builder único + WorkflowConfig imutável
 │   └── models.py          # requests, settings e Run da geração
 └── infrastructure/        # adaptadores compartilhados existentes
@@ -76,7 +77,7 @@ Cada operação concentra sua composição fluente, estado, router e etapas sequ
 
 `POST /runs/i2v` e `POST /runs/{parent_id}/v2v` retornam **202**. A continuação exige parent aceito e usa seu último frame, a identidade original e a cauda recente. Os aliases `/runs` e `/runs/{parent_id}/continue` continuam válidos. Aceitar um run não gera automaticamente o próximo.
 
-`GET /runs/{id}/sequence` lista somente a cadeia de manifests até esse run; não lê vídeos nem concatena. `POST /assemblies/{UUID}` com `{end_run_id}` aguarda a montagem CPU e devolve200; ela vive em `.data/assemblies/<UUID>/` separada dos runs. GET do mesmo ID e vídeo próprio/Range permitem redescobrir o resultado sem executar novamente. A reserva CPU compartilha slot/RAM/leases com geração; não altera decisões dos runs. O helper FFmpeg mantém ordem/contagem e áudio preenchido, sem trim/crossfade; CRF18 não promete pixels RGB ou MP4 byte-exact. A extração do último frame e da cauda do parent pertence ao `V2VPipe`; geração continua restrita ao pedido explícito.
+`GET /runs/{id}/sequence` lista somente a cadeia de manifests até esse run; não lê vídeos nem concatena. `POST /assemblies/{UUID}` com `{end_run_id}` aguarda a montagem CPU e devolve200; ela vive em `.data/assemblies/<UUID>/` separada dos runs. GET do mesmo ID e vídeo próprio/Range permitem redescobrir o resultado sem executar novamente. A reserva CPU compartilha slot/leases com geração; não altera decisões dos runs. RAM é só telemetria: o app não rejeita/cancela por memória livre nem gerencia o ComfyUI, cujo ciclo de vida pertence ao script externo do dono. O helper FFmpeg mantém ordem/contagem e áudio preenchido, sem trim/crossfade; CRF18 não promete pixels RGB ou MP4 byte-exact. A extração do último frame e da cauda do parent pertence ao `V2VPipe`; geração continua restrita ao pedido explícito.
 
 ## O que preservar
 

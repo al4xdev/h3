@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration, motionSpec, createPresentationMotion} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration, motionSpec, createPresentationMotion, lastFrameURL, referencePreviewURL, draftSettingsAllowed, nativeExecutionBlocked} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
@@ -298,4 +298,69 @@ test('busy is a real-state presentation attribute, not a progress value or actio
   motion.busy(target, true); assert.equal(target.dataset.busy, 'true'); assert.equal(target.attrs['aria-busy'], 'true');
   motion.busy(target, false); assert.equal(target.dataset.busy, 'false'); assert.equal(f.calls.length, 0);
   motion.destroy();
+});
+
+test('draft settings are contextual and never unlock published or uncertain results', () => {
+  for (const screen of ['context', 'proposal', 'generation', 'continuation']) {
+    assert.equal(draftSettingsAllowed({screen}), true);
+    assert.equal(draftSettingsAllowed({screen: 'settings', originScreen: screen}), true);
+    for (const field of ['statusOnly', 'submitted', 'busy', 'uncertain', 'uploadBusy', 'uploadUncertain', 'assemblyBusy', 'assemblyUncertain']) assert.equal(draftSettingsAllowed({screen, [field]: true}), false, `${screen}: ${field}`);
+  }
+  for (const screen of ['library', 'review', 'assembly', 'settings', undefined]) assert.equal(draftSettingsAllowed({screen}), false);
+  const ready = {config: {}, mode: 'new'};
+  assert.equal(nativeExecutionBlocked(ready), false);
+  assert.equal(nativeExecutionBlocked({}), true);
+  for (const field of ['statusOnly', 'submitted', 'busy', 'uncertain', 'uploadBusy', 'uploadUncertain', 'assemblyBusy', 'assemblyUncertain', 'retryPreparing']) assert.equal(nativeExecutionBlocked({...ready, [field]: true}), true, field);
+  for (const state of ['queued', 'running']) assert.equal(nativeExecutionBlocked({...ready, pendingRun: {state}}), true);
+  for (const state of ['accepted', 'ready_for_review', 'rejected', 'interrupted', 'failed']) assert.equal(nativeExecutionBlocked({...ready, pendingRun: {state}}), false);
+  assert.equal(nativeExecutionBlocked({...ready, assemblyLocked: true, grokBusy: true, grokUncertain: true}), false);
+  assert.equal(nativeExecutionBlocked({...ready, mode: 'continue', parent: {state: 'accepted'}}), false);
+  for (const state of ['rejected', 'interrupted', 'running', undefined]) assert.equal(nativeExecutionBlocked({...ready, mode: 'continue', parent: {state}}), true);
+  const modeRouting = source.slice(source.indexOf('function setMode(mode)'), source.indexOf('function rememberAssembly'));
+  assert.match(modeRouting, /if \(freshIntent\) draft\(\)\.submitted = false/);
+  assert.doesNotMatch(modeRouting, /state\.(?:uncertain|busy|pendingRun|waitController|assemblyUncertain|uploadUncertain|grokUncertain)\s*=/);
+  assert.match(source, /\$\('create-fields'\)\.disabled = \$\('generate'\)\.disabled = nativeExecutionBlocked/);
+  assert.match(source, /state\.screen !== 'generation' \|\| nativeExecutionBlocked/);
+});
+test('continuation Grok has one canonical parent and never accepts an arbitrary frame path', () => {
+  const id = '11111111-1111-4111-8111-111111111111', reference = {source_root: 'assets', path: 'dance_reference.png'};
+  const base = {prompt: '  a pose muda\n vestido vermelho ', system_prompt: 'instruções locais', model: 'grok-4.20-0309-non-reasoning', reference};
+  assert.deepEqual(grokPayload({...base, continuation_parent_id: id, last_frame_path: '/private/image.png'}), {...base, continuation_parent_id: id});
+  assert.equal(Object.hasOwn(grokPayload(base), 'continuation_parent_id'), false);
+  assert.equal(lastFrameURL(id), `/grok/continuation/${id}/last-frame`);
+  assert.throws(() => grokPayload({...base, reference: null, continuation_parent_id: id}));
+  for (const bad of [id.toUpperCase().replace('1111', 'AAAA'), 'http://remote/frame.png', '../frame', id.replaceAll('-', ''), null, undefined]) assert.throws(() => lastFrameURL(bad));
+});
+test('explicit own identity can be previewed without depending on the current catalog page', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  assert.equal(referencePreviewURL({source_root: 'assets', path: 'folder/rosto novo.jpg'}), '/assets/image?path=folder%2Frosto%20novo.jpg');
+  assert.equal(referencePreviewURL({source_root: 'inputs', path: 'phone.png'}), '/inputs/image?path=phone.png');
+  for (const name of ['initial_frame', 'last_frame']) assert.equal(referencePreviewURL({source_root: 'runs', path: `.data/runs/${id}/${name}.png`}), `/runs/${id}/image?name=${name}.png`);
+  for (const value of [{source_root: 'private', path: 'x.png'}, {source_root: 'inputs', path: '.private/x.png'}, {source_root: 'inputs', path: '../x.png'}, {source_root: 'runs', path: `runs/${id}/guessed.png`}, {source_root: 'runs', path: 'last_frame.png'}]) assert.equal(referencePreviewURL(value), null);
+});
+test('same image and idea cannot make an old-parent Grok response current', () => {
+  const before = {continuationParentId: '11111111-1111-4111-8111-111111111111'};
+  assert.equal(draftMatches(before, {...before}), true);
+  assert.equal(draftMatches(before, {continuationParentId: '22222222-2222-4222-8222-222222222222'}), false);
+  assert.equal(draftMatches(before, {continuationParentId: null}), false);
+});
+test('app navigation has unique settings fields, one top Back and no global Library/New tabs', async () => {
+  const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const id of ['back', 'settings-open', 'settings-done', 'seed', 'duration', 'grok-system', 'grok-model', 'run-prompt', 'retry-mode', 'last-frame-preview']) assert.ok(ids.includes(id), id);
+  assert.match(html, /<header class="topbar">.*id="back".*id="screen-title".*id="settings-open"/);
+  assert.doesNotMatch(html + source, /nav-library|nav-new|<footer/);
+  const form = html.match(/<form id="create-form"[^]*?<\/form>/)[0];
+  assert.doesNotMatch(form, /id="(?:duration|seed)"/);
+  assert.match(form, /id="block-summary"/);
+  assert.ok(html.indexOf('data-screen="settings"') < html.indexOf('id="duration"'));
+  assert.match(html, /Prompt enviado nesta tentativa/);
+  const recovery = source.slice(source.indexOf('if (state.config?.assembly_enabled && pointer)'));
+  assert.match(recovery, /navigate\('assembly', \{focus: false\}\);[^]*?await readAssembly\(\{restoreSelection: true\}\)/);
+  assert.doesNotMatch(recovery, /navigate\('assembly', \{remember: false/);
+  const css = await readFile(new URL('../src/h3_backend/web/app.css', import.meta.url), 'utf8');
+  for (const rule of css.matchAll(/\.screen-actions\{([^}]*)\}/g)) assert.doesNotMatch(rule[1], /position:(?:fixed|sticky)/);
+  assert.match(css, /\.task-panel \.clip-list\{[^}]*max-height:none;overflow:visible/);
+  assert.match(css, /\.task-panel \.film-strip\{display:grid;[^}]*overflow:visible/);
 });

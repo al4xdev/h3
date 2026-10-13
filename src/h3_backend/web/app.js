@@ -118,21 +118,87 @@ export function makePayload({seed, prompt, duration = '2.3', capabilities = null
   if (image !== 'dance_reference.png') throw new Error('Use a referência original disponível.');
   return {...base, image};
 }
+// Retrying is a new draft, not a lifecycle transition or a replay of old requests.
+export function ownedIdentity(run) {
+  if (!Array.isArray(run?.references)) throw new Error('Referências registradas ausentes. Nenhuma imagem será escolhida por suposição.');
+  const identities = [];
+  for (const ref of run.references) {
+    if (ref?.type === 'image' && ref.role === 'initial_frame' || ref?.type === 'video' && ref.role === 'motion_video') continue;
+    if (ref?.type !== 'image' || ![undefined, null, 'identity'].includes(ref.role)) throw new Error('Papel de referência não suportado.');
+    const value = referenceValue({source_root: ref.source_root, path: ref.source});
+    if (typeof ref.sha256 !== 'string' || ref.sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(ref.sha256)) throw new Error('Hash da identidade original ausente ou inválido.');
+    if (value.path.length > 1024 || !/\.(png|jpe?g|webp)$/i.test(value.path)) throw new Error('Imagem registrada não suportada.');
+    if (value.source_root === 'runs') {
+      const match = /^(?:\.data\/)?runs\/([a-f0-9-]{36})\/(initial_frame|last_frame)\.png$/.exec(value.path);
+      if (!match) throw new Error('Imagem de run sem path próprio suportado.');
+      canonicalUUID(match[1]);
+    } else if (value.path.split('/').some(part => part.startsWith('.'))) throw new Error('Imagem privada ou temporária não suportada.');
+    identities.push({...value, sha256: ref.sha256});
+  }
+  if (identities.length !== 1) throw new Error('É necessária uma única identidade registrada; referências múltiplas ou ausentes não são suportadas.');
+  return identities[0];
+}
+export function retryDraft(run, parent = null, capabilities = null) {
+  canonicalUUID(run?.id);
+  if (!['rejected', 'interrupted'].includes(run.state)) throw new Error('Somente uma tentativa rejeitada ou interrompida pode preparar este rascunho.');
+  const seed = parseSeed(String(run.seed));
+  if (typeof run.seed !== 'number' || seed !== run.seed) throw new Error('Seed registrada ausente ou inválida.');
+  if (typeof run.prompt !== 'string' || !run.prompt.trim() || run.prompt.length > 12000) throw new Error('Prompt efetivamente enviado ausente ou fora do limite deste formulário. Nenhum texto será inventado ou truncado.');
+  if (typeof run.duration_seconds !== 'number' || !Number.isFinite(run.duration_seconds)) throw new Error('Duração solicitada registrada ausente.');
+  const duration = String(run.duration_seconds);
+  if (parseDuration(duration, capabilities) !== run.duration_seconds) throw new Error('Precisão da duração não pode ser copiada sem alteração.');
+  const reference = ownedIdentity(run), info = run.input_info;
+  if (!info || typeof info !== 'object') throw new Error('Metadados da operação ausentes.');
+  const continuation = run.parent_id !== null;
+  if (!continuation) {
+    if (info.operation !== 'i2v' || info.mode !== 'normal' || info.continuation !== null || run.references.some(ref => ref.type !== 'image' || ![undefined, null, 'identity'].includes(ref.role))) throw new Error('Operação de origem não suportada para cópia automática.');
+  } else {
+    canonicalUUID(run.parent_id);
+    if (info.operation !== 'v2v' || info.mode !== 'continuation') throw new Error('Operação de continuação não comprovada.');
+    const snapshot = info.continuation, fields = ['seed', 'prompt', 'duration_seconds', 'reference_tail_seconds', 'include_audio'];
+    if (!snapshot || typeof snapshot !== 'object' || Object.keys(snapshot).length !== fields.length || fields.some(key => !Object.hasOwn(snapshot, key))) throw new Error('Snapshot completo da continuação ausente.');
+    if (snapshot.seed !== run.seed || snapshot.prompt !== run.prompt || snapshot.duration_seconds !== run.duration_seconds || snapshot.reference_tail_seconds !== 3 || snapshot.include_audio !== true) throw new Error('Parâmetros históricos incompatíveis: prompt literal, tail de 3 s e áudio habilitado precisam coincidir.');
+    if (!parent || parent.id !== run.parent_id || parent.state !== 'accepted' || ![`.data/runs/${parent.id}/chunk.mp4`, `runs/${parent.id}/chunk.mp4`].includes(parent.output?.path)) throw new Error('O mesmo pai original precisa continuar aceito, com seu vídeo próprio publicado.');
+    const original = ownedIdentity(parent);
+    if (['source_root', 'path', 'sha256'].some(key => reference[key] !== original[key])) throw new Error('Identidade registrada diferente do pai original.');
+  }
+  return {key: `retry:${run.id}`, sourceId: run.id, parentId: continuation ? run.parent_id : null, mode: continuation ? 'continue' : 'new', idea: run.prompt, chosenPrompt: run.prompt, proposal: '', seed: String(seed), duration, reference, revision: 0, proposalStale: false, proposalContext: '', lateProposal: null, submitted: false};
+}
+export function lastFrameURL(parentId) { return `/grok/continuation/${canonicalUUID(parentId)}/last-frame`; }
+export function referencePreviewURL(reference) {
+  try {
+    const value = referenceValue(reference);
+    if (value.source_root === 'runs') {
+      const match = /^(?:\.data\/)?runs\/([a-f0-9-]{36})\/(initial_frame|last_frame)\.png$/.exec(value.path);
+      if (!match) return null;
+      return imageURL(`/runs/${canonicalUUID(match[1])}/image?name=${match[2]}.png`);
+    }
+    if (value.path.split('/').some(part => part.startsWith('.'))) return null;
+    return imageURL(`/${value.source_root}/image?path=${encodeURIComponent(value.path)}`);
+  } catch { return null; }
+}
+export function draftSettingsAllowed({screen, originScreen = screen, statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain}) {
+  return ['context', 'proposal', 'generation', 'continuation'].includes(originScreen) && ![statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain].some(Boolean);
+}
+export function nativeExecutionBlocked({config, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted, pendingRun, mode, parent}) {
+  return !config || [statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted].some(Boolean) || ['queued', 'running'].includes(pendingRun?.state) || (mode === 'continue' && parent?.state !== 'accepted');
+}
 export function editorPayload({system_prompt, model = ''}) {
   if (typeof system_prompt !== 'string' || !system_prompt.trim() || system_prompt.length > 100000 || typeof model !== 'string' || model.length > 256 || (model && !model.trim())) throw new Error('Configuração Grok inválida: system prompt até 100000 caracteres e ID do modelo até 256.');
   return {system_prompt, model};
 }
-export function grokPayload({prompt, system_prompt, model = '', reference = null}) {
+export function grokPayload({prompt, system_prompt, model = '', reference = null, continuation_parent_id = null}) {
   const config = editorPayload({system_prompt, model});
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma ideia de 1 a 12000 caracteres.');
-  return {system_prompt: config.system_prompt, prompt, ...(model ? {model} : {}), ...(reference ? {reference: referenceValue(reference)} : {})};
+  if (continuation_parent_id !== null && !reference) throw new Error('Continuação Grok exige a identidade original registrada.');
+  return {system_prompt: config.system_prompt, prompt, ...(model ? {model} : {}), ...(reference ? {reference: referenceValue(reference)} : {}), ...(continuation_parent_id === null ? {} : {continuation_parent_id: canonicalUUID(continuation_parent_id)})};
 }
 export function sceneText(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw new Error('Grok não devolveu uma cena válida de até 12000 caracteres. O rascunho foi mantido, sem truncar.');
   return value;
 }
 export function draftMatches(before, after) {
-  return ['revision', 'mode', 'selected', 'prompt', 'proposal', 'system_prompt', 'model', 'duration', 'referenceKey', 'draftKey'].every(key => before[key] === after[key]);
+  return ['revision', 'mode', 'selected', 'prompt', 'proposal', 'system_prompt', 'model', 'duration', 'referenceKey', 'draftKey', 'continuationParentId'].every(key => before[key] === after[key]);
 }
 export function playableURL(run, summary, block) {
   if (!run || !PLAYABLE.has(run.state)) return null;
@@ -274,14 +340,15 @@ export function createPresentationMotion(document) {
 export function startUI(document, client = createClient()) {
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
-  let paintedKey = '', pendingDecision = null;
+  let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
   let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0, assemblyEpoch = 0;
   let pointer = null, pointerError = null;
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
-  Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false});
-  const TITLES = {library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme'};
+  Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
+  const TITLES = {library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
+  const historyViews = new Map(); let historySerial = 0, historyToken = 0;
   function text(id, value) { const node = $(id); node.textContent = value; motion.changed(id, String(value ?? ''), [node]); }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
@@ -290,17 +357,20 @@ export function startUI(document, client = createClient()) {
   function draft() {
     if (!state.drafts.has(state.draftKey)) {
       const idea = state.mode === 'continue' ? state.config?.continuation_prompt || '' : state.config?.default_prompt || '';
-      state.drafts.set(state.draftKey, {idea, proposal: '', chosenPrompt: idea, reference: state.reference, seed: '2026101205', duration: '2.3', revision: 0, proposalStale: false, proposalContext: '', lateProposal: null});
+      state.drafts.set(state.draftKey, {idea, proposal: '', chosenPrompt: idea, reference: state.reference, seed: '2026101205', duration: '2.3', revision: 0, proposalStale: false, proposalContext: '', lateProposal: null, submitted: false});
     }
     return state.drafts.get(state.draftKey);
   }
   function saveDraft() {
     if (!state.config) return;
-    Object.assign(draft(), {idea: $('idea').value, proposal: $('grok-result').value, chosenPrompt: $('prompt').value, seed: $('seed').value, duration: $('duration').value, reference: state.reference});
+    const current = draft();
+    const chosenPrompt = $('prompt').value === current.promptDisplay ? current.chosenPrompt : $('prompt').value;
+    Object.assign(current, {idea: $('idea').value, proposal: $('grok-result').value, chosenPrompt, seed: $('seed').value, duration: $('duration').value, reference: state.reference});
   }
   function restoreDraft() {
     const current = draft();
     $('idea').value = current.idea; $('grok-result').value = current.proposal; $('prompt').value = current.chosenPrompt;
+    current.promptDisplay = $('prompt').value;
     $('seed').value = current.seed; $('duration').value = current.duration; state.reference = current.reference;
     text('proposal-context', current.proposalContext);
     text('proposal-hint', current.proposalStale ? 'O contexto mudou após este pedido. Confira a imagem e a ideia originais antes de usar esta proposta antiga.' : 'Edite o texto antes de usar. Sua ideia foi mantida.');
@@ -321,8 +391,9 @@ export function startUI(document, client = createClient()) {
   function durationPreview() {
     try {
       const seconds = parseDuration($('duration').value, state.capabilities), frames = alignedFrames(seconds);
-      message('duration-preview', `Solicitada ${secondsLabel(seconds)} s → ${frames} frames → ${secondsLabel(frames / 24)} s efetivos a 24 fps.`);
-    } catch (error) { message('duration-preview', error.message, true); }
+      const summary = `Solicitada ${secondsLabel(seconds)} s → ${frames} frames → ${secondsLabel(frames / 24)} s efetivos a 24 fps.`;
+      message('duration-preview', summary); message('block-summary', `Seed ${$('seed').value} · ${summary}`);
+    } catch (error) { message('duration-preview', error.message, true); message('block-summary', error.message, true); }
   }
   function paintScreen({focus = false, direction = 1} = {}) {
     for (const panel of document.querySelectorAll('[data-screen]')) {
@@ -332,13 +403,14 @@ export function startUI(document, client = createClient()) {
     text('screen-title', state.screen === 'generation' && state.statusOnly ? 'Pedido no PC' : TITLES[state.screen]);
     text('screen-eyebrow', ['context', 'proposal', 'generation', 'continuation'].includes(state.screen) ? state.mode === 'continue' ? 'CONTINUAÇÃO · RASCUNHO' : 'NOVA CENA · RASCUNHO' : 'ESTÚDIO LOCAL');
     $('back').disabled = state.trail.length === 0;
-    $('nav-library').setAttribute('aria-current', String(state.screen === 'library'));
-    $('nav-new').setAttribute('aria-current', String(state.mode === 'new' && ['context', 'proposal', 'generation'].includes(state.screen)));
+    $('settings-open').disabled = state.screen === 'settings';
     $('create-form').hidden = state.statusOnly; $('generation-status').hidden = !state.statusOnly;
     if (state.screen !== 'review') $('player').pause();
     if (state.screen !== 'assembly') $('assembly-player').pause();
     if (state.screen === 'review') renderRun();
     if (state.screen === 'assembly') renderAssembly();
+    const visualSlot = $(state.screen === 'generation' && !state.statusOnly ? 'generation-visual-slot' : 'context-visual-slot');
+    if ($('visual-contexts').parentElement !== visualSlot) visualSlot.append($('visual-contexts'));
     if (focus) { $('screen-title').focus({preventScroll: true}); document.defaultView?.scrollTo({top: 0, behavior: 'instant'}); }
     const key = `${state.screen}:${state.statusOnly}:${state.draftKey}:${state.selected?.id || ''}`;
     if (key !== paintedKey) {
@@ -346,20 +418,68 @@ export function startUI(document, client = createClient()) {
       motion.enter(document.querySelector(`[data-screen="${state.screen}"]`), document.querySelector('[data-motion="heading"]'), direction);
     }
   }
-  function navigate(screen, {remember = true, focus = true, direction = 1} = {}) {
+  function viewSnapshot() {
+    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, selectedId: state.selected?.id || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
+  }
+  function recordView(snapshot = viewSnapshot(), push = false) {
+    const view = document.defaultView;
+    if (!view?.history) return;
+    if (push) historyToken = ++historySerial;
+    historyViews.set(historyToken, {snapshot, trail: [...state.trail]});
+    const url = new URL(state.assemblyId ? assemblyLocation(view.location.href, state.assemblyId) : view.location.href, view.location.href); url.searchParams.set('screen', state.screen);
+    view.history[push ? 'pushState' : 'replaceState']({...view.history.state, h3View: historyToken}, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  function navigate(screen, {remember = true, focus = true, direction = 1, origin = null} = {}) {
     if (!TITLES[screen] || (screen === 'assembly' && !state.config?.assembly_enabled)) return;
+    ++state.navigationEpoch; ++state.retryEpoch;
     saveDraft();
-    if (remember && screen !== state.screen) state.trail.push(state.screen);
+    const previous = origin || viewSnapshot(), changing = screen !== previous.screen || previous.selectedId !== (state.selected?.id || null);
+    if (remember && changing) {
+      historyViews.set(historyToken, {snapshot: previous, trail: [...state.trail]});
+      state.trail.push(previous);
+    }
     state.screen = screen;
     paintScreen({focus, direction}); controls();
-    const view = document.defaultView;
-    // A view pointer is never a persisted command. Preserve the assembly UUID and hash.
-    if (view?.history) {
-      const url = new URL(view.location.href); url.searchParams.set('screen', screen);
-      view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    }
+    recordView(viewSnapshot(), remember && changing);
   }
-  function back() { const screen = state.trail.pop() || 'library'; navigate(screen, {remember: false, direction: -1}); }
+  async function restoreView(snapshot, trail) {
+    const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
+    if (snapshot.selectedId && snapshot.selectedId !== state.selected?.id && !state.busy) await select(snapshot.selectedId);
+    if (epoch !== state.navigationEpoch || stopped) return;
+    Object.assign(state, {mode: snapshot.mode, draftKey: snapshot.draftKey, parent: snapshot.parent, statusOnly: snapshot.statusOnly, settingsOrigin: snapshot.settingsOrigin, screen: snapshot.screen, trail: [...trail]});
+    restoreDraft(); state.statusOnly ||= draft().submitted; paintScreen({direction: -1}); controls();
+    const node = $(snapshot.focus);
+    // Returning to settings' origin never opens a software keyboard by itself.
+    const target = node && !node.disabled && !node.closest('[hidden],[inert]') && !node.matches(':disabled,input,select,textarea,[contenteditable]') ? node : $('screen-title');
+    target.focus({preventScroll: true}); document.defaultView?.scrollTo({top: snapshot.scroll, behavior: 'instant'});
+    recordView();
+  }
+  function back() {
+    if (state.trail.length && document.defaultView?.history) document.defaultView.history.back();
+    else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
+  }
+  function openSettings(event) {
+    if (state.screen === 'settings') return;
+    const origin = viewSnapshot(), pointer = settingsPointerOrigin; settingsPointerOrigin = null;
+    // Pointer defaults focus the gear before click; keyboard activation rightly keeps it.
+    if (pointer && event.detail > 0 && (event.pointerId === undefined || event.pointerId === pointer.pointerId) && pointer.screen === origin.screen && pointer.draftKey === origin.draftKey) Object.assign(origin, {focus: pointer.focus, scroll: pointer.scroll});
+    state.settingsOrigin = origin;
+    navigate('settings', {origin});
+  }
+  function retryBlocked(ignorePreparation = false) {
+    return !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyReading || state.assemblyUncertain || state.grokBusy || state.grokUncertain || state.editorSaving || (!ignorePreparation && state.retryPreparing) || ['queued', 'running'].includes(state.pendingRun?.state);
+  }
+  function settingsEditable() {
+    return Boolean(state.config) && (state.mode !== 'continue' || state.parent?.state === 'accepted') && draftSettingsAllowed({...state, originScreen: state.screen === 'settings' ? state.settingsOrigin?.screen : state.screen, submitted: draft().submitted});
+  }
+  function draftNavigationBlocked() {
+    // Another draft may be described during Grok's request; its response stays with its origin.
+    return !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
+  }
+  function rootDraftViewBlocked() {
+    // An uncertain result fences execution, not access to the cached root draft.
+    return !state.config || state.busy || state.uploadBusy || state.assemblyBusy || state.retryPreparing;
+  }
   function controls() {
     const run = state.selected;
     // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
@@ -370,24 +490,34 @@ export function startUI(document, client = createClient()) {
     $('accept').disabled = $('reject').disabled = state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
     $('review-decisions').hidden = run?.state !== 'ready_for_review';
     $('review-next').hidden = run?.state !== 'accepted';
-    $('continue-mode').disabled = state.busy || state.uncertain || run?.state !== 'accepted';
-    $('new-mode').disabled = $('nav-new').disabled = !state.config || state.busy || state.uploadBusy;
-    $('create-fields').disabled = !state.config || state.busy || state.uncertain;
-    $('generate').disabled = !state.config || state.busy || state.assemblyBusy || state.uncertain || (state.mode === 'continue' && state.parent?.state !== 'accepted');
+    $('continue-mode').disabled = draftNavigationBlocked() || run?.state !== 'accepted';
+    $('new-mode').disabled = rootDraftViewBlocked();
+    text('new-mode', retryBlocked() ? 'Reabrir rascunho' : 'Nova cena');
+    $('create-fields').disabled = $('generate').disabled = nativeExecutionBlocked({...state, submitted: draft().submitted});
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
     $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
     $('upload-file').disabled = $('upload').disabled = !state.config?.reference_library || state.mode === 'continue' || state.uploadBusy || state.uploadUncertain;
     $('generate').disabled ||= state.uploadBusy;
+    $('generate').disabled ||= draft().submitted || state.uploadUncertain || state.retryPreparing;
+    $('retry-review').hidden = !['rejected', 'interrupted'].includes(run?.state);
+    $('retry-context').hidden = !draft().sourceId;
+    text('retry-context', draft().sourceId ? `Nova tentativa baseada no bloco ${draft().sourceId}. A tentativa anterior permanece no histórico, com seu registro e decisão preservados.` : '');
+    $('retry-mode').disabled = retryBlocked() || !['rejected', 'interrupted'].includes(run?.state);
+    text('retry-mode', state.retryPreparing ? 'Conferindo os registros…' : 'Preparar nova tentativa');
+    $('settings-draft-fields').disabled = !settingsEditable();
+    $('duration').readOnly = !state.capabilities || !settingsEditable();
+    $('duration').setAttribute('aria-readonly', String($('duration').readOnly));
+    text('settings-draft-note', settingsEditable() ? state.mode === 'continue' ? `Próximo bloco · rascunho com pai aceito ${state.parent.id}. Duração e seed não alteram o pai publicado.` : `Ajustes apenas do novo bloco · rascunho ${state.draftKey}. Não mudam um vídeo já publicado.` : 'Duração e seed pertencem a um bloco ainda não enviado. Prepare um rascunho para editá-los; resultados publicados permanecem intactos.');
     $('upload').textContent = state.uploadBusy ? 'Enviando ao PC…' : 'Enviar imagem ao PC';
     $('continuation-note').hidden = state.mode !== 'continue';
     text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar novo bloco');
     text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${state.parent?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
-    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference();
+    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference() || (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready'));
     $('grok-save').disabled = !state.editorReady || state.editorSaving;
     $('grok-system').disabled = $('grok-model').disabled = !state.editorReady;
     text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar ideia e imagem');
-    text('grok-context', `No seu clique, Grok receberá: ${contextLabel()}. Saída somente texto.`);
+    text('grok-context', `No seu clique, Grok receberá: ${contextLabel()}${state.mode === 'continue' ? ' + último frame do mesmo pai aceito (pose e roupa atuais)' : ''}. Saída somente texto.`);
     text('generation-context', `${contextLabel()} · 480 × 864 · parâmetros nativos preservados.`);
     text('continuation-parent', `Pai aceito: ${state.parent?.id || '—'} · ${contextLabel()}`);
     text('assembly-chain', (state.sequence?.blocks || []).map((block, index) => `${index + 1}. ${block.id.slice(0, 8)} · ${label(block)}`).join(' → ') || 'Nenhuma sequência selecionada.');
@@ -398,7 +528,8 @@ export function startUI(document, client = createClient()) {
     $('late-proposal').value = draft().lateProposal?.text || '';
     text('late-proposal-context', draft().lateProposal?.context || '');
     $('show-proposal').hidden = !draft().proposal;
-    $('nav-status').hidden = !state.pendingRun && !state.uncertain;
+    $('nav-status').hidden = !state.uncertain && !['queued', 'running'].includes(state.pendingRun?.state);
+    text('nav-status', state.uncertain ? 'Consultar pedido com resultado incerto · não reenviar' : `Pedido no PC · ${state.pendingRun?.id?.slice(0, 8) || 'aguardando ID'}`);
     text('status-state', state.pendingRun ? label(state.pendingRun) : state.uncertain ? 'Admissão incerta' : 'Sem pedido');
     text('status-id', state.pendingRun?.id || 'ID não confirmado. Não envie novamente.');
     $('status-review').disabled = !state.pendingRun || state.busy;
@@ -407,17 +538,22 @@ export function startUI(document, client = createClient()) {
     for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
-    if (state.busy || state.uploadBusy || !state.config || (mode === 'continue' && state.selected?.state !== 'accepted')) return;
+    if (mode === 'new' ? rootDraftViewBlocked() : draftNavigationBlocked() || state.selected?.state !== 'accepted') return;
+    const freshIntent = !retryBlocked();
+    const origin = viewSnapshot();
     saveDraft();
     state.mode = mode;
     state.parent = mode === 'continue' ? state.selected : null;
     state.draftKey = mode === 'continue' ? state.parent.id : 'new';
     if (!state.drafts.has(state.draftKey)) {
-      const identity = state.parent?.references?.find(ref => ref.type === 'image' && [undefined, null, 'identity'].includes(ref.role));
-      state.reference = mode === 'continue' ? identity ? {source_root: identity.source_root || 'assets', path: identity.source} : null : null;
+      try { state.reference = mode === 'continue' ? ownedIdentity(state.parent) : null; }
+      catch { state.reference = null; }
     }
-    restoreDraft(); state.statusOnly = false;
-    navigate(mode === 'continue' ? 'continuation' : 'context');
+    restoreDraft();
+    // Revisiting an uncertain/admitted intent cannot remove its submission taint.
+    if (freshIntent) draft().submitted = false;
+    state.statusOnly = Boolean(draft().submitted);
+    navigate(mode === 'continue' ? 'continuation' : 'context', {origin});
     controls();
   }
   function rememberAssembly(record) {
@@ -467,6 +603,7 @@ export function startUI(document, client = createClient()) {
     try {
       const record = assemblyRecord(await client.get(`/assemblies/${canonicalUUID(id)}`), id);
       if (stopped) return;
+      if (record.state === 'completed' && !assemblyURL(record, record.end_run_id)) throw new Error('Montagem declarada concluída sem prova completa de publicação do arquivo próprio.');
       rememberAssembly(record);
       if (restoreSelection && selectionEpoch === state.epoch && state.selected?.id !== record.end_run_id) await select(record.end_run_id);
       if (state.selected?.id === record.end_run_id && (restoreSelection || selectionEpoch === state.epoch)) state.assembly = record;
@@ -476,7 +613,7 @@ export function startUI(document, client = createClient()) {
       // A missing or unreadable known ID is not permission to create another intent.
       if (id === state.assemblyId) state.assemblyUncertain = true;
       message('assembly-status', `Montagem ${id} não confirmada: ${error.message}. Use Reler montagem; não repita o pedido.`, true);
-      await loadAssemblies();
+      // Do not let a catalog fallback clear uncertainty from this failed own-ID read.
     } finally { state.assemblyReading = false; controls(); }
   }
   async function assemble() {
@@ -505,7 +642,7 @@ export function startUI(document, client = createClient()) {
   function editorDraft() {
     saveDraft();
     const reference = contextReference();
-    return {revision: draft().revision, proposal: draft().proposal, mode: state.mode, selected: state.parent?.id ?? null, draftKey: state.draftKey, duration: $('duration').value, referenceKey: JSON.stringify(reference), reference, prompt: $('idea').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
+    return {revision: draft().revision, proposal: draft().proposal, mode: state.mode, selected: state.parent?.id ?? null, continuationParentId: state.mode === 'continue' ? state.parent?.id ?? null : null, continuation_parent_id: state.mode === 'continue' ? state.parent?.id ?? null : null, draftKey: state.draftKey, duration: $('duration').value, referenceKey: JSON.stringify(reference), reference, prompt: $('idea').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
   }
   async function loadEditor() {
     try {
@@ -529,6 +666,7 @@ export function startUI(document, client = createClient()) {
   }
   async function detailScene() {
     if (state.screen !== 'context' || !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy) return;
+    if (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready')) { message('grok-status', 'O último frame do pai não está disponível. Grok precisa dos dois contextos; usar sua própria instrução continua separado.', true); return; }
     const before = editorDraft();
     try { grokPayload(before); } catch (error) { message('grok-status', error.message, true); return; }
     if (!before.reference) { message('grok-status', 'A identidade original não foi comprovada. Nenhuma imagem foi enviada.', true); return; }
@@ -576,7 +714,7 @@ export function startUI(document, client = createClient()) {
       const stamp = Number.isNaN(created.getTime()) ? 'Data indisponível' : new Intl.DateTimeFormat('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(created);
       const date = element('span', 'card-created', `Criado ${stamp}`); date.title = run.created_at || '';
       button.append(top, element('span', 'card-prompt', run.prompt || 'Sem instrução'), bottom, date);
-      button.addEventListener('click', async () => { await select(run.id); if (state.selected?.id === run.id) navigate('review'); }); list.append(button);
+      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); list.append(button);
     }
     text('library-count', `${state.total} blocos`);
     text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
@@ -593,7 +731,7 @@ export function startUI(document, client = createClient()) {
       const seconds = Number(block.duration_seconds);
       button.append(element('span', 'shot-number', String(index + 1).padStart(2, '0')), element('span', 'shot-id', block.id.slice(0, 8)), element('span', 'shot-time', `${elapsed.toFixed(2)} → ${(elapsed + seconds).toFixed(2)} s`), element('span', 'shot-time', label(block)));
       button.setAttribute('aria-label', `Bloco ${index + 1}, ${label(block)}, ${block.id}`);
-      button.addEventListener('click', async () => { await select(block.id); if (state.selected?.id === block.id) navigate('review'); }); li.append(button); $('sequence').append(li); elapsed += seconds;
+      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(block.id); if (navigation === state.navigationEpoch && state.selected?.id === block.id) navigate('review', {origin}); }); li.append(button); $('sequence').append(li); elapsed += seconds;
     }
     text('sequence-message', blocks.length ? `${blocks.length} bloco(s) nesta cadeia · tempos de cada bloco, sem montagem automática.` : 'A cadeia segue os pais do bloco, sem misturar ramificações.');
     motion.changed('sequence', blocks.map(block => `${block.id}:${block.state}`).join('|'), [$('sequence').querySelector('[aria-current="true"] .shot-number')], 'confirm');
@@ -625,9 +763,10 @@ export function startUI(document, client = createClient()) {
     const selected = contextReference();
     const item = state.reference?.image_url ? state.reference : state.references.find(item => item.source_root === selected?.source_root && item.path === selected?.path);
     text('reference-path', selected ? `${selected.source_root} / ${selected.path}` : 'Identidade original indisponível');
-    const url = imageURL(item?.image_url);
+    const url = imageURL(item?.image_url) || (selected ? referencePreviewURL(selected) : null);
     $('reference-preview').hidden = !url;
     if (url) { if ($('reference-preview').getAttribute('src') !== url) $('reference-preview').src = url; } else $('reference-preview').removeAttribute('src');
+    loadLastFrame();
   }
   async function loadReferences() {
     if (!state.config?.reference_library) return;
@@ -659,6 +798,47 @@ export function startUI(document, client = createClient()) {
       message('upload-status', `Upload não confirmado: ${error.message}. ${state.uploadUncertain ? 'Consulte o catálogo; não envie novamente nesta sessão.' : 'Corrija o arquivo antes de enviar.'}`, true);
     } finally { state.uploadBusy = false; controls(); drainChanges(); }
   }
+  function loadLastFrame() {
+    const continuing = state.mode === 'continue' && state.parent?.state === 'accepted';
+    $('continuation-visuals').hidden = !continuing;
+    if (!continuing) {
+      state.lastFrame = {parentId: null, state: 'none'}; $('last-frame-preview').hidden = true; $('last-frame-preview').removeAttribute('src');
+      return;
+    }
+    const parentId = state.parent.id;
+    if (state.lastFrame.parentId === parentId) return;
+    state.lastFrame = {parentId, state: 'loading'};
+    let url;
+    try { if (!contextReference()) throw new Error('Identidade original não comprovada.'); url = lastFrameURL(parentId); }
+    catch (error) { state.lastFrame.state = 'error'; message('last-frame-status', `${error.message} Grok exige os dois contextos.`, true); return; }
+    const image = document.createElement('img'); image.id = 'last-frame-preview'; image.className = 'reference-preview'; image.alt = 'Último frame do pai aceito: pose e roupa atuais'; image.hidden = true;
+    $('last-frame-preview').replaceWith(image);
+    const current = () => !stopped && state.mode === 'continue' && state.parent?.id === parentId && state.lastFrame.parentId === parentId && $('last-frame-preview') === image;
+    image.onload = () => { if (current()) { state.lastFrame.state = 'ready'; image.hidden = false; message('last-frame-status', `Frame final do pai ${parentId}. Prévia CPU; nenhuma geração ou chamada ao Grok.`); controls(); } };
+    image.onerror = () => { if (current()) { state.lastFrame.state = 'error'; image.hidden = true; message('last-frame-status', 'Último frame não pôde ser validado ou exibido. Grok bloqueado sem fallback; sua instrução e a geração nativa continuam ações separadas.', true); controls(); } };
+    message('last-frame-status', 'Lendo o último frame do vídeo próprio aceito…'); image.src = url;
+  }
+  async function prepareRetry() {
+    if (state.screen !== 'review' || retryBlocked() || !['rejected', 'interrupted'].includes(state.selected?.state)) return;
+    saveDraft(); const origin = viewSnapshot(), sourceId = state.selected.id, epoch = ++state.retryEpoch, selection = state.epoch, revision = state.draftRevision;
+    state.retryPreparing = true; controls(); message('retry-status', 'Conferindo prompt final, referência e parâmetros registrados…');
+    try {
+      const run = await client.get(`/runs/${encodeURIComponent(sourceId)}`);
+      const parent = run.parent_id ? await client.get(`/runs/${encodeURIComponent(canonicalUUID(run.parent_id))}`) : null;
+      if (epoch !== state.retryEpoch || selection !== state.epoch || revision !== state.draftRevision || state.screen !== 'review' || state.selected?.id !== sourceId || retryBlocked(true)) {
+        if (state.selected?.id === sourceId) message('retry-status', 'Conferência descartada: a origem ou o estado mudou. Nenhuma solicitação foi enviada.');
+        return;
+      }
+      if (run.id !== sourceId) throw new Error('O detalhe recebido não corresponde à tentativa selecionada.');
+      const copied = retryDraft(run, parent, state.capabilities);
+      // Seed exactly once; revisiting the same source resumes deliberate edits.
+      if (!state.drafts.has(copied.key)) state.drafts.set(copied.key, copied);
+      state.selected = run; state.mode = copied.mode; state.parent = parent; state.draftKey = copied.key; state.statusOnly = false; draft().submitted = false;
+      restoreDraft(); message('retry-status', 'Novo rascunho preparado; o registro antigo permaneceu intacto.');
+      navigate('generation', {origin}); message('operation', 'Prompt final recuperado. Confira e clique Gerar para criar outro pedido, com um novo ID e revisão própria.');
+    } catch (error) { if (epoch === state.retryEpoch && state.selected?.id === sourceId) message('retry-status', `Não foi possível copiar esta tentativa: ${error.message} Nenhum pedido foi enviado.`, true); }
+    finally { state.retryPreparing = false; controls(); }
+  }
   async function loadLibrary() {
     const epoch = ++libraryEpoch;
     $('library').setAttribute('aria-busy', 'true');
@@ -677,7 +857,7 @@ export function startUI(document, client = createClient()) {
     try {
       const run = knownRun || await client.get(`/runs/${encodeURIComponent(id)}`);
       if (epoch !== state.epoch) return;
-      if (state.selected?.id !== run.id) state.sequence = null;
+      if (state.selected?.id !== run.id) { state.sequence = null; message('retry-status', ''); }
       state.selected = run; renderRun();
       const sequence = await client.get(`/runs/${encodeURIComponent(id)}/sequence`);
       if (epoch !== state.epoch) return;
@@ -760,13 +940,14 @@ export function startUI(document, client = createClient()) {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.screen !== 'generation' || state.statusOnly || state.busy || state.assemblyBusy || state.uploadBusy || state.uncertain || !state.config) return;
+    if (state.screen !== 'generation' || nativeExecutionBlocked({...state, submitted: draft().submitted})) return;
     const continuation = state.mode === 'continue';
     if (continuation && state.parent?.state !== 'accepted') return;
     let payload;
-    try { payload = makePayload({seed: $('seed').value, prompt: $('prompt').value, duration: $('duration').value, capabilities: state.capabilities, reference: state.reference, continuation}); }
-    catch (error) { message('operation', error.message, true); return; }
     saveDraft();
+    try { payload = makePayload({seed: $('seed').value, prompt: draft().chosenPrompt, duration: $('duration').value, capabilities: state.capabilities, reference: state.reference, continuation}); }
+    catch (error) { message('operation', error.message, true); return; }
+    const submittedDraft = draft(); submittedDraft.submitted = true;
     const parent = continuation ? state.parent.id : null;
     const path = parent ? `/runs/${encodeURIComponent(parent)}/v2v` : '/runs/i2v';
     ++state.epoch; ++libraryEpoch;
@@ -786,17 +967,22 @@ export function startUI(document, client = createClient()) {
       // Generate button as recovery; read-only refresh is the safe next step.
       state.uncertain = admittedID !== null || !(error instanceof HTTPError) || error.status >= 500;
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
-    } finally { state.busy = false; state.statusOnly = state.uncertain || admittedID !== null; state.waitController = null; paintScreen(); controls(); drainChanges(); }
+    } finally { submittedDraft.submitted = state.uncertain || admittedID !== null; state.busy = false; state.statusOnly = state.uncertain || admittedID !== null; state.waitController = null; paintScreen(); controls(); drainChanges(); }
   }
   for (const id of ['idea', 'prompt', 'grok-result', 'seed', 'duration', 'grok-system']) $(id).addEventListener('input', () => { ++draft().revision; saveDraft(); if (id === 'duration') durationPreview(); if (id === 'grok-result') message('proposal-error', ''); });
   // Only the visible generation submit is an execution action. Enter in metadata,
   // seed, duration, editor settings or navigation cannot accidentally submit video.
   $('create-form').addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.tagName === 'INPUT') event.preventDefault(); });
-  $('nav-library').addEventListener('click', () => navigate('library'));
-  $('nav-new').addEventListener('click', () => setMode('new'));
+  $('settings-open').addEventListener('pointerdown', event => {
+    settingsPointerOrigin = event.isPrimary !== false && event.button === 0 ? {focus: document.activeElement?.id || null, scroll: document.defaultView?.scrollY || 0, screen: state.screen, draftKey: state.draftKey, pointerId: event.pointerId} : null;
+  });
+  $('settings-open').addEventListener('pointercancel', () => { settingsPointerOrigin = null; });
+  $('settings-open').addEventListener('click', openSettings);
+  $('settings-done').addEventListener('click', back);
+  $('retry-mode').addEventListener('click', prepareRetry);
   $('back').addEventListener('click', back);
   $('nav-status').addEventListener('click', () => { state.statusOnly = true; navigate('generation'); });
-  $('status-review').addEventListener('click', async () => { if (!state.pendingRun || state.busy) return; await select(state.pendingRun.id); navigate('review'); });
+  $('status-review').addEventListener('click', async () => { if (!state.pendingRun || state.busy) return; const origin = viewSnapshot(), navigation = state.navigationEpoch, id = state.pendingRun.id; await select(id); if (navigation === state.navigationEpoch && state.selected?.id === id) navigate('review', {origin}); });
   $('use-idea').addEventListener('click', useIdea);
   $('show-proposal').addEventListener('click', () => { restoreDraft(); navigate('proposal'); });
   $('use-late-proposal').addEventListener('click', () => {
@@ -830,18 +1016,26 @@ export function startUI(document, client = createClient()) {
   $('create-form').addEventListener('submit', generate);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   document.defaultView?.addEventListener('pagehide', () => { motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
-  document.defaultView?.addEventListener('popstate', () => {
-    const screen = new URL(document.defaultView.location.href).searchParams.get('screen');
-    if (TITLES[screen] && !(['review', 'assembly'].includes(screen) && !state.selected)) navigate(screen, {remember: false});
+  document.defaultView?.addEventListener('popstate', event => {
+    historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
+    const remembered = historyViews.get(event.state?.h3View);
+    if (remembered) { historyToken = event.state.h3View; void restoreView(remembered.snapshot, remembered.trail); }
+    else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
     else navigate('library', {remember: false});
   });
+  if (document.defaultView?.history) document.defaultView.history.scrollRestoration = 'manual';
+  recordView();
   refreshActive = true;
   const ready = loadConfig().then(() => Promise.allSettled([
     loadEditor(),
     loadReferences(),
     loadLibrary(),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
-    if (state.config?.assembly_enabled && pointer) { await readAssembly({restoreSelection: true}); navigate('assembly', {remember: false, focus: false}); }
+    if (state.config?.assembly_enabled && pointer) {
+      // Recovery is a view reached from the library, never a command or a dead end.
+      navigate('assembly', {focus: false});
+      await readAssembly({restoreSelection: true});
+    }
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     paintScreen(); controls(); refreshActive = false; drainChanges();
