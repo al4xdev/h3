@@ -44,6 +44,37 @@ async def test_native_fd_and_metadata_only_initial_scan(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_roteiro_and_batch_changes_notify_without_generation(tmp_path):
+    candidates = []
+    watcher = FileWatcher(tmp_path, on_request=candidates.append)
+    watcher.start()
+    stream = watcher.events()
+    await anext(stream)
+    try:
+        batch_root = tmp_path / ".data" / "roteiro-batches"
+        batch_root.mkdir()
+        await hint(stream, ".data/roteiro-batches")
+        (batch_root / "active.json").write_text('{"state":"active"}')
+        await hint(stream, ".data/roteiro-batches/active.json")
+        story_root = tmp_path / ".data" / "roteiros"
+        story_root.mkdir()
+        await hint(stream, ".data/roteiros")
+        ident = str(uuid4())
+        directory = story_root / ident
+        directory.mkdir()
+        await hint(stream, f".data/roteiros/{ident}")
+        (directory / "plan.json").write_text('{"blocks":[]}')
+        await hint(stream, f".data/roteiros/{ident}/plan.json")
+        assert candidates == []
+        watcher.recover()
+        await hint(stream, ".data")
+        assert candidates == []
+    finally:
+        await stream.aclose()
+        watcher.close()
+
+
+@pytest.mark.asyncio
 async def test_register_new_directory_before_immediate_request_scan(tmp_path):
     candidates = []
     watcher = FileWatcher(tmp_path, on_request=candidates.append)

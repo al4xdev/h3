@@ -23,6 +23,8 @@ from .infrastructure.media import sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
 from .library import router as library_router
 from .roteiro import router as roteiro_router
+from .roteiro_batch import RoteiroBatch
+from .roteiro_batch import router as roteiro_batch_router
 
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_INPUT_BYTES = 32 * 1024**2
@@ -51,19 +53,27 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.service = service or RunService(settings or Settings.from_env())
+        app.state.roteiro_batch = (RoteiroBatch(app.state.service)
+                                  if hasattr(app.state.service, "store") else None)
         await app.state.service.startup()
         try:
+            if app.state.roteiro_batch is not None:
+                await app.state.roteiro_batch.startup()
             yield
         finally:
+            if app.state.roteiro_batch is not None:
+                await app.state.roteiro_batch.shutdown()
             await app.state.service.shutdown()
 
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
     app.include_router(roteiro_router)
+    app.include_router(roteiro_batch_router)
     app.include_router(library_router)
     app.include_router(assembly_router)
     if service is not None:
         app.state.service = service
+        app.state.roteiro_batch = RoteiroBatch(service) if hasattr(service, "store") else None
 
     def backend() -> RunService:
         return app.state.service
@@ -106,7 +116,8 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
 
     @app.get("/ui/{filename}")
     def ui_asset(filename: str):
-        types = {"app.css": "text/css", "app.js": "text/javascript"}
+        types = {"app.css": "text/css", "app.js": "text/javascript",
+                 "stop-confirmation.css": "text/css", "stop-confirmation.js": "text/javascript"}
         if filename not in types:
             raise FileNotFoundError(filename)
         return FileResponse(safe_path(WEB_ROOT, filename), media_type=types[filename])
@@ -123,6 +134,12 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
             "reference_library": True, "assembly_enabled": True,
             "roteiro_enabled": True,
         }
+
+    @app.get("/roteiro-batches/current")
+    def current_roteiro_batch():
+        if app.state.roteiro_batch is None:
+            raise HTTPException(503, "Native generator is unavailable")
+        return app.state.roteiro_batch.current()
 
     @app.get("/runs")
     def list_runs(limit: str = Query(default="50", max_length=5), offset: str = Query(default="0", max_length=5)):
@@ -237,6 +254,17 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     @app.post("/runs/{run_id}/accept", response_model=Run)
     async def accept_run(run_id: str):
         return await backend().decide(run_id, True)
+
+    @app.post("/runs/{run_id}/stop", response_model=Run)
+    async def stop_run(run_id: str, request: Request):
+        payload = bytearray()
+        async for chunk in request.stream():
+            if len(payload) + len(chunk) > 2:
+                raise ValueError("Stop accepts only an empty object")
+            payload.extend(chunk)
+        if bytes(payload) not in {b"", b"{}"}:
+            raise ValueError("Stop accepts only an empty object")
+        return await backend().stop_run(run_id)
 
     @app.post("/runs/{run_id}/reject", response_model=Run)
     async def reject_run(run_id: str):

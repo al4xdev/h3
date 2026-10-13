@@ -12,9 +12,22 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 COMMAND_TIMEOUT = 120
 STDOUT_LIMIT = 8 * 1024**2
 STDERR_LIMIT = 2000
+
+
+async def await_thread(operation, *arguments):
+    """Join owned disk operations before cancellation releases the runtime slot."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *arguments))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 def sha256_file(path: Path) -> str:

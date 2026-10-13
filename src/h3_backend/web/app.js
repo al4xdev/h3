@@ -34,7 +34,8 @@ export function relevantChange(event) {
   if (!event.path || event.path === '.data') return true;
   if (typeof event.path !== 'string') return false;
   const path = event.path.replace(/^\.data\//, '');
-  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^roteiros\/.+\.json$/.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
+  if (path === 'roteiros' || path === 'roteiro-batches' || /^roteiros\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(path)) return true;
+  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^roteiros\/.+\.json$/.test(path) || /^roteiro-batches\/(?:active|[0-9a-f-]+)\.json$/.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
 }
 export function canonicalUUID(value) {
   if (typeof value !== 'string' || value.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) throw new Error('ID deve ser um UUID canônico local.');
@@ -182,8 +183,8 @@ export function referencePreviewURL(reference) {
 export function draftSettingsAllowed({screen, originScreen = screen, statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain}) {
   return ['context', 'proposal', 'generation', 'continuation'].includes(originScreen) && ![statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain].some(Boolean);
 }
-export function nativeExecutionBlocked({config, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted, pendingRun, mode, parent}) {
-  return !config || [statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted].some(Boolean) || ['queued', 'running'].includes(pendingRun?.state) || (mode === 'continue' && parent?.state !== 'accepted');
+export function nativeExecutionBlocked({config, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted, pendingRun, mode, parent, batchUncertain, batchRecord, conversionUncertain, conversionBusy, batchDiscoveryUncertain, globalBatchRecord, stopBusy, stopUncertain}) {
+  return !config || [stopBusy, stopUncertain, batchDiscoveryUncertain, globalBatchRecord?.state === 'active', batchUncertain, batchRecord?.state === 'active', conversionUncertain, conversionBusy, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted].some(Boolean) || ['queued', 'running'].includes(pendingRun?.state) || (mode === 'continue' && parent?.state !== 'accepted');
 }
 export function editorPayload({system_prompt, model = ''}) {
   if (typeof system_prompt !== 'string' || !system_prompt.trim() || system_prompt.length > 100000 || typeof model !== 'string' || model.length > 256 || (model && !model.trim())) throw new Error('Configuração Grok inválida: system prompt até 100000 caracteres e ID do modelo até 256.');
@@ -263,6 +264,7 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
       } finally { uploading = false; }
     },
     get: (path, signal) => request(path, {signal}),
+    stopRun: id => request(`/runs/${canonicalUUID(id)}/stop`, {method: 'POST', body: {}}),
     remove: id => request(`/runs/${canonicalUUID(id)}`, {method: 'DELETE'}),
     decide: (id, action) => request(`/runs/${encodeURIComponent(id)}/${action}`, {method: 'POST'}),
     async generate(path, payload, onAdmitted, signal) {
@@ -296,6 +298,44 @@ export function storyPointer(href) {
   for (const key of ['roteiro', 'block', 'intent']) { const values = url.searchParams.getAll(key); if (values.length > 1) throw new Error('Ponteiro de roteiro duplicado.'); result[key] = values.length ? canonicalUUID(values[0]) : null; }
   if (result.intent && (!result.roteiro || !result.block)) throw new Error('Intenção sem roteiro e bloco.');
   return result;
+}
+export function batchPointer(href) {
+  const params = new URL(href).searchParams;
+  if (!params.has('batch') && !params.has('batch_roteiro')) return null;
+  if (params.getAll('batch').length !== 1 || params.getAll('batch_roteiro').length !== 1) throw new Error('Ponteiro de geração em sequência inválido.');
+  return {id: canonicalUUID(params.get('batch')), roteiro: canonicalUUID(params.get('batch_roteiro'))};
+}
+export function remainingStoryBlocks(doc) {
+  if (!doc?.adopted || !Array.isArray(doc.blocks) || !doc.blocks.length || !Array.isArray(doc.attempts)) return [];
+  let pending = false; const remaining = [];
+  for (const block of doc.blocks) {
+    const info = storyBlockState(doc, block);
+    if (!pending && info.accepted) continue;
+    pending = true;
+    if (info.attempts.length) return [];
+    remaining.push(block);
+  }
+  return remaining;
+}
+export function savedEditorMatches(saved, current, saving = false) {
+  return !saving && Boolean(saved) && saved.system_prompt === current.system_prompt && saved.model === current.model;
+}
+export function batchDraftsClean(doc, drafts) {
+  return remainingStoryBlocks(doc).every(block => {
+    const cached = drafts?.get(`story:${doc.id}:${block.id}`);
+    return !cached || (!cached.submitted && !cached.storyCandidate && !cached.storyPromptStale && cached.chosenPrompt === block.prompt && cached.idea === block.action && cached.seed === String(block.seed) && Number(String(cached.duration).replace(',', '.')) === block.duration_seconds);
+  });
+}
+export function verifiedBatch(value, owner) {
+  if (!value || value.id !== owner.id || value.roteiro_id !== owner.roteiro || !Number.isSafeInteger(value.source_revision) || value.source_revision < 1 || !['active', 'ready_for_review', 'interrupted', 'stopped'].includes(value.state) || !Array.isArray(value.blocks) || !Array.isArray(value.completed_block_ids) || value.enhance_with_grok !== true || !Number.isSafeInteger(value.expected_current_revision) || value.expected_current_revision < value.source_revision || !Array.isArray(value.enhancement_ids) || ![null, 'improving', 'generating', 'accepting'].includes(value.phase) || typeof value.stop_requested !== 'boolean') throw new Error('Estado de geração em sequência não corresponde ao pedido.');
+  for (const id of [...value.completed_block_ids, ...value.enhancement_ids]) canonicalUUID(id);
+  if (value.current_block_id) canonicalUUID(value.current_block_id);
+  if (value.current_run_id) canonicalUUID(value.current_run_id);
+  return value;
+}
+export function freestyleConversionEnd(end, sequence, selectedId) {
+  canonicalUUID(end); validateBranchSequence(sequence, end, selectedId);
+  return end;
 }
 export function storyUpdate(doc, blocks = doc.blocks, adopted = doc.adopted) {
   return {expected_revision: doc.revision, name: doc.name, idea: doc.idea, reference: referenceValue(doc.reference), adopted, blocks: blocks.map(({id, action, duration_seconds, seed, prompt}) => ({id: canonicalUUID(id), action, duration_seconds, seed, prompt}))};
@@ -371,11 +411,39 @@ export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
     const result = await response.json(); if (!response.ok) { const error = new HTTPError(response.status, typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail)); error.data = result; throw error; } if (expectedStatus !== null && response.status !== expectedStatus) throw new Error('Resposta inesperada; consulte o mesmo ID.'); return result;
   }
   const path = id => `/roteiros/${canonicalUUID(id)}`;
+  const batchPath = (id, batch) => `${path(id)}/batches/${canonicalUUID(batch)}`;
   const attemptPath = (id, block, intent) => `${path(id)}/blocks/${canonicalUUID(block)}/attempts/${canonicalUUID(intent)}`;
   return {list: () => request('/roteiros'), read: id => request(path(id)), create: body => request('/roteiros', 'POST', body), save: (id, body) => request(path(id), 'PUT', body), remove: (id, revision) => request(path(id), 'DELETE', {expected_revision: revision}), proposal: (id, body) => request(`${path(id)}/proposal`, 'POST', body), editor: () => request('/roteiros/editor'), saveEditor: system_prompt => request('/roteiros/editor', 'PUT', {system_prompt}), readIntent: (id, block, intent) => request(attemptPath(id, block, intent)),
+    async convertFreestyle(end, id) { const key = `/roteiros/from-freestyle/${canonicalUUID(end)}`; canonicalUUID(id); if (used.has(`${key}:${id}`)) throw new Error('Conversão já enviada; consulte o mesmo roteiro.'); used.add(`${key}:${id}`); return request(key, 'POST', {roteiro_id: id}, 201); },
+    stopBatch: (id, batch) => request(`${batchPath(id, batch)}/stop`, 'POST', {}),
+    readBatch: (id, batch) => request(batchPath(id, batch)),
+    async startBatch(id, batch, revision) { const key = batchPath(id, batch); if (used.has(key)) throw new Error('Pedido já enviado; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', {expected_revision: revision, auto_accept_intermediate: true, enhance_with_grok: true}, 202); },
     async generate(id, block, intent, body) { const key = attemptPath(id, block, intent); if (used.has(key)) throw new Error('Intenção já enviada; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', body, 202); }};
 }
 
+export function createBackSwipe(document, {back, canGoBack, navigationEpoch}) {
+  let gesture = null;
+  const excluded = 'video,audio,input,textarea,select,button,a,summary,[contenteditable],.film-strip,.topbar,[data-no-swipe]';
+  const down = event => {
+    if (gesture || event.isPrimary === false) { gesture = null; return; }
+    if (event.pointerType !== 'touch' || event.clientX > 24 || !canGoBack() || event.target?.closest?.(excluded)) return;
+    gesture = {id: event.pointerId, x: event.clientX, y: event.clientY, epoch: navigationEpoch()};
+  };
+  const move = event => {
+    if (!gesture || event.pointerId !== gesture.id) return;
+    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+    if (dx < -12 || (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx))) gesture = null;
+  };
+  const up = event => {
+    const own = gesture; gesture = null;
+    if (!own || event.pointerId !== own.id || own.epoch !== navigationEpoch() || !canGoBack()) return;
+    const dx = event.clientX - own.x, dy = Math.abs(event.clientY - own.y);
+    if (dx >= 72 && dy <= 40 && dx > dy * 1.6) back();
+  };
+  const cancel = () => { gesture = null; };
+  for (const [name, handler] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', cancel]]) document.addEventListener(name, handler, {passive: true});
+  return {destroy() { cancel(); for (const [name, handler] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', cancel]]) document.removeEventListener(name, handler); }};
+}
 export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 16 : 0;
   const easing = 'cubic-bezier(.2,.8,.2,1)';
@@ -395,7 +463,7 @@ export function createPresentationMotion(document) {
     if (disposed || preference?.matches || document.hidden || !node || node.isConnected === false || typeof node.animate !== 'function' || node.closest?.('[hidden], [inert]')) return false;
     // Transforming a fixed action's ancestor changes its containing block. Native
     // media and editable controls also keep their browser-owned interaction surface.
-    if (node.matches?.('video, input, textarea, select, form, fieldset, .task-panel, .stage, .studio, body, .screen-actions') || node.querySelector?.('video, .screen-actions')) return false;
+    if (node.matches?.('video, input, textarea, select, form, fieldset, .task-panel, .stage, .studio, body, .screen-actions') || node.querySelector?.('video, .screen-actions') || node.querySelector?.('.stop-confirmation:not([hidden])')) return false;
     const focused = document.activeElement;
     if (focused?.matches?.('input, textarea, select') && node.contains?.(focused)) return false;
     active.get(node)?.cancel();
@@ -439,14 +507,19 @@ export function startUI(document, client = createClient(), stories = createStory
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
+  const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
+  let stopFactory = null;
   let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0, assemblyEpoch = 0;
   let pointer = null, pointerError = null;
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
-  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
-  Object.assign(state, {screen: 'library', branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
+  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  Object.assign(state, {screen: 'library', stopBusy: false, stopUncertain: false, stopOwner: null, batchOwner: null, batchRecord: null, globalBatchRecord: null, batchDiscoveryUncertain: true, batchDiscoveryEpoch: 0, batchUncertain: false, batchReading: false, batchEpoch: 0, conversionBusy: false, conversionUncertain: false, conversionEnd: null, conversionId: null, branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
   const story = {available: false, runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
   let storyRecovery = null; try { const href = document.defaultView?.location?.href || 'http://local/'; storyRecovery = storyPointer(href); const params = new URL(href).searchParams; if (!storyRecovery.intent && params.has('pending_intent')) { for (const key of ['pending_roteiro', 'pending_block', 'pending_intent']) if (params.getAll(key).length !== 1) throw new Error('Ponteiro de recuperação inválido.'); storyRecovery = {roteiro: canonicalUUID(params.get('pending_roteiro')), block: canonicalUUID(params.get('pending_block')), intent: canonicalUUID(params.get('pending_intent'))}; } } catch (error) { message('notice', error.message, true); }
+  try { state.batchOwner = batchPointer(document.defaultView?.location?.href || 'http://local/'); state.batchUncertain = Boolean(state.batchOwner); } catch (error) { state.batchUncertain = true; message('notice', error.message, true); }
+  try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('conversion_roteiro') || params.has('conversion_end')) { if (params.getAll('conversion_roteiro').length !== 1 || params.getAll('conversion_end').length !== 1) throw new Error('Ponteiro de conversão inválido.'); state.conversionId = canonicalUUID(params.get('conversion_roteiro')); state.conversionEnd = canonicalUUID(params.get('conversion_end')); state.conversionUncertain = true; } } catch (error) { state.conversionUncertain = true; message('notice', error.message, true); }
+  try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('stop_id')) { if (params.getAll('stop_id').length !== 1 || params.getAll('stop_kind').length !== 1 || !['run', 'batch'].includes(params.get('stop_kind'))) throw new Error('Ponteiro de parada inválido.'); state.stopOwner = {kind: params.get('stop_kind'), id: canonicalUUID(params.get('stop_id'))}; if (state.stopOwner.kind === 'batch') { if (params.getAll('stop_roteiro').length !== 1) throw new Error('Roteiro da parada não confirmado.'); state.stopOwner.roteiro = canonicalUUID(params.get('stop_roteiro')); } submittedStops.add(`${state.stopOwner.kind}:${state.stopOwner.id}`); state.stopUncertain = true; } } catch (error) { state.stopUncertain = true; message('notice', error.message, true); }
   const TITLES = {story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
   const historyViews = new Map(); let historySerial = 0, historyToken = 0;
   function text(id, value) { const node = $(id); node.textContent = value; motion.changed(id, String(value ?? ''), [node]); }
@@ -589,11 +662,172 @@ export function startUI(document, client = createClient(), stories = createStory
     state.settingsOrigin = origin;
     navigate('settings', {origin});
   }
+  function stopURL() {
+    const view = document.defaultView; if (!view?.history) return;
+    const url = new URL(view.location.href);
+    for (const key of ['stop_id', 'stop_kind', 'stop_roteiro']) url.searchParams.delete(key);
+    if (state.stopOwner) { url.searchParams.set('stop_id', state.stopOwner.id); url.searchParams.set('stop_kind', state.stopOwner.kind); if (state.stopOwner.roteiro) url.searchParams.set('stop_roteiro', state.stopOwner.roteiro); }
+    view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  async function readStopOwner() {
+    const owner = state.stopOwner; if (!owner || state.stopBusy || !state.stopUncertain) return;
+    try {
+      const result = owner.kind === 'batch' ? verifiedBatch(await stories.readBatch(owner.roteiro, owner.id), {id: owner.id, roteiro: owner.roteiro}) : await client.get(`/runs/${owner.id}`);
+      if (state.stopOwner?.id !== owner.id || result.id !== owner.id) throw new Error('O estado recebido pertence a outro pedido.');
+      const terminal = owner.kind === 'batch' ? result.state !== 'active' : ['interrupted', 'failed', 'ready_for_review', 'accepted', 'rejected'].includes(result.state);
+      if (terminal) { state.stopUncertain = false; state.stopOwner = null; stopURL(); }
+      if (owner.kind === 'batch' && state.batchOwner?.id === owner.id) state.batchRecord = result;
+      if (owner.kind === 'run' && state.pendingRun?.id === owner.id) state.pendingRun = result;
+    } catch (error) { message('notice', `Parada ainda não confirmada: ${error.message}. Consulte os metadados do mesmo ID.`, true); }
+    finally { controls(); }
+  }
+  function syncStopViews() {
+    if (stopFactory) for (const [kind, cardId] of [['run', 'pending-run-card'], ['batch', 'batch-card'], ['batchLibrary', 'batch-library-card']]) {
+      const key = kind === 'run' ? state.pendingRun?.id || '' : state.batchOwner?.id || '';
+      if (noticeStopKeys.get(kind) !== key) { stopViews[kind]?.destroy(); stopViews[kind] = stopFactory({document, card: $(cardId), onConfirm: () => stopOwned(kind), label: 'Parar'}); stopViews[kind].stopButton.setAttribute('aria-label', kind === 'run' ? 'Parar geração deste pedido' : 'Parar esta sequência de blocos'); noticeStopKeys.set(kind, key); }
+    }
+    const runAllowed = !state.uncertain && !state.stopUncertain && ['queued', 'running'].includes(state.pendingRun?.state) && Boolean(state.pendingRun?.id);
+    const batchAllowed = !state.batchUncertain && !state.stopUncertain && state.batchRecord?.state === 'active' && state.batchOwner?.id === state.batchRecord.id;
+    for (const [kind, view] of Object.entries(stopViews)) { const allowed = kind === 'run' ? runAllowed : batchAllowed; view.updateBusy(state.stopBusy); view.stopButton.disabled = !allowed || state.stopBusy; }
+    for (const {view, owner} of libraryStops.values()) { view.updateBusy(state.stopBusy); view.stopButton.disabled = state.stopBusy || state.stopUncertain || state.uncertain || (owner.kind === 'batch' ? !batchAllowed : !state.items.some(run => run.id === owner.id && ['queued', 'running'].includes(run.state))); }
+  }
+  async function stopOwned(kind, explicit = null) {
+    if (state.stopBusy || state.stopUncertain) return {requested: false, status: 'A parada anterior ainda não foi confirmada. Consulte o mesmo pedido.'};
+    if (!['run', 'batch', 'batchLibrary'].includes(kind)) return {requested: false, status: 'A operação de parada não foi identificada.'};
+    const batch = kind !== 'run';
+    const ownRun = explicit ? state.items.find(run => run.id === explicit.id) || (state.pendingRun?.id === explicit.id ? state.pendingRun : null) : state.pendingRun;
+    if (!batch && state.globalBatchRecord?.state === 'active' && state.globalBatchRecord.current_run_id === ownRun?.id) return stopOwned('batch', {kind: 'batch', id: state.globalBatchRecord.id, roteiro: state.globalBatchRecord.roteiro_id});
+    const batchRecord = explicit && state.globalBatchRecord?.id === explicit.id ? state.globalBatchRecord : state.batchRecord;
+    if (batch ? batchRecord?.state !== 'active' || (state.batchUncertain && !explicit) : state.uncertain || !['queued', 'running'].includes(ownRun?.state)) return {requested: false, status: 'Não há uma geração ativa confirmada para parar.'};
+    try { canonicalUUID(batch ? batchRecord.id : ownRun.id); if (batch) canonicalUUID(batchRecord.roteiro_id); } catch { return {requested: false, status: 'O ID da geração ativa não foi confirmado.'}; }
+    const owner = batch ? {kind: 'batch', id: batchRecord.id, roteiro: batchRecord.roteiro_id} : {kind: 'run', id: canonicalUUID(ownRun.id)};
+    if (explicit && (explicit.id !== owner.id || explicit.kind !== owner.kind || (batch && explicit.roteiro !== owner.roteiro))) return {requested: false, status: 'O pedido mudou. Consulte o estado atual antes de parar.'};
+    const key = `${owner.kind}:${owner.id}`; if (submittedStops.has(key)) return {requested: false, status: 'Este pedido de parada já foi enviado. Consulte o mesmo ID.'}; submittedStops.add(key);
+    state.stopOwner = owner; stopURL(); state.stopBusy = true; state.stopUncertain = true; controls();
+    try {
+      let stoppedState;
+      if (batch) {
+        const result = verifiedBatch(await stories.stopBatch(owner.roteiro, owner.id), {id: owner.id, roteiro: owner.roteiro});
+        stoppedState = result.state;
+        if (result.state === 'active') throw new Error('O pedido ainda não confirmou a interrupção.');
+        if (state.batchOwner?.id === owner.id) { state.batchRecord = result; state.batchUncertain = false; }
+        if (state.globalBatchRecord?.id === owner.id) state.globalBatchRecord = result;
+      } else {
+        const run = await client.stopRun(owner.id); stoppedState = run.state;
+        if (run.id !== owner.id || !['interrupted', 'failed', 'ready_for_review', 'accepted', 'rejected'].includes(run.state)) throw new Error('O bloco ainda não confirmou um estado terminal.');
+        state.items = state.items.map(item => item.id === owner.id ? {...item, ...run} : item);
+        if (state.pendingRun?.id === owner.id) state.pendingRun = run;
+        if (state.selected?.id === owner.id) { state.selected = run; renderRun(); }
+      }
+      state.stopUncertain = false; state.stopOwner = null; stopURL();
+      const status = ['interrupted', 'stopped'].includes(stoppedState) ? 'Parada confirmada no PC.' : 'O pedido já terminou; o estado publicado foi preservado.';
+      for (const view of Object.values(stopViews)) view.setStatus(status);
+      message('notice', `${status} Os arquivos e o histórico foram preservados.`);
+      return {requested: true, status};
+    } catch (error) { const status = `Parada não confirmada: ${error.message}. Consulte o mesmo ID; não repita.`; for (const view of Object.values(stopViews)) view.setStatus(status); message('notice', status, true); return {requested: true, status}; }
+    finally { state.stopBusy = false; controls(); }
+  }
+  async function loadStopViews() {
+    const {createStopConfirmation} = await import('/ui/stop-confirmation.js'); stopFactory = createStopConfirmation;
+    renderLibrary(); syncStopViews();
+  }
+  function libraryStop(run, card) {
+    if (!stopFactory) return;
+    const active = ['queued', 'running'].includes(run.state);
+    const shared = state.globalBatchRecord?.state === 'active' && state.globalBatchRecord.current_run_id === run.id ? state.globalBatchRecord : null;
+    const owner = shared ? {kind: 'batch', id: shared.id, roteiro: shared.roteiro_id} : {kind: 'run', id: run.id};
+    const key = `${owner.kind}:${owner.id}`, existing = libraryStops.get(run.id);
+    if (existing && (!active || existing.key !== key)) { existing.view.destroy(); libraryStops.delete(run.id); }
+    if (active && !libraryStops.has(run.id)) {
+      card.setAttribute('data-no-swipe', '');
+      const view = stopFactory({document, card, label: 'Parar', onConfirm: () => stopOwned(owner.kind, owner)});
+      view.stopButton.setAttribute('aria-label', shared ? 'Parar toda esta sequência de blocos' : 'Parar geração deste vídeo');
+      libraryStops.set(run.id, {view, key, owner});
+    }
+  }
+  function conversionURL() {
+    const view = document.defaultView; if (!view?.history) return;
+    const url = new URL(view.location.href);
+    if (state.conversionId) { url.searchParams.set('conversion_roteiro', state.conversionId); url.searchParams.set('conversion_end', state.conversionEnd); } else { url.searchParams.delete('conversion_roteiro'); url.searchParams.delete('conversion_end'); }
+    view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  async function useConvertedStory(doc, id, navigation) {
+    if (doc?.id !== id || !Array.isArray(doc.blocks) || !Array.isArray(doc.attempts)) throw new Error('A conversão não confirmou o roteiro solicitado.');
+    state.conversionUncertain = false; state.conversionId = null; state.conversionEnd = null; conversionURL();
+    await storyLibrary();
+    if (navigation !== state.navigationEpoch || stopped) { message('notice', 'Freestyle convertido. Abra o roteiro pela biblioteca.'); return; }
+    saveDraft(); story.doc = doc; story.block = null; story.candidate = null; story.creating = false; storyURL(); renderStory(); navigate('story');
+    message('story-status', 'Freestyle convertido em roteiro. Vídeos e decisões existentes foram preservados.');
+  }
+  async function readConversion() {
+    if (!state.conversionId || state.conversionBusy) return;
+    const id = state.conversionId, navigation = state.navigationEpoch;
+    state.conversionBusy = true; controls();
+    try { const doc = await stories.read(id); if (id === state.conversionId) await useConvertedStory(doc, id, navigation); }
+    catch (error) { state.conversionUncertain = true; message('conversion-status', `Conversão ainda não confirmada: ${error.message}. Consulte o mesmo roteiro; não envie outra conversão.`, true); }
+    finally { state.conversionBusy = false; controls(); }
+  }
+  async function convertFreestyle() {
+    if ($('convert-story').disabled || state.conversionUncertain || state.conversionBusy || batchBlocked()) return;
+    let end; try { end = freestyleConversionEnd(state.openedBranchEnd, state.branchSequence, state.selected?.id); } catch (error) { message('conversion-status', error.message, true); return; }
+    const count = state.branchSequence.blocks.length;
+    if (!document.defaultView.confirm(`Converter a sequência Freestyle completa de ${count} blocos, terminando em ${end.slice(0, 8)}, para roteiro? Os vídeos e decisões existentes serão preservados. Não gera vídeos nem chama o Grok.`)) return;
+    const id = newAssemblyUUID(document.defaultView.crypto), navigation = state.navigationEpoch;
+    state.conversionId = id; state.conversionEnd = end; state.conversionUncertain = true; state.conversionBusy = true; conversionURL(); saveDraft(); controls();
+    try { const doc = await stories.convertFreestyle(end, id); if (id === state.conversionId) await useConvertedStory(doc, id, navigation); }
+    catch (error) { message('conversion-status', `Conversão ${id} não confirmada: ${error.message}. Consulte o mesmo roteiro; não repita.`, true); }
+    finally { state.conversionBusy = false; controls(); }
+  }
+  function batchBlocked() { return state.stopBusy || state.stopUncertain || state.batchDiscoveryUncertain || state.globalBatchRecord?.state === 'active' || state.batchUncertain || state.batchRecord?.state === 'active'; }
+  async function discoverBatch() {
+    const epoch = ++state.batchDiscoveryEpoch;
+    try {
+      const result = await client.get('/roteiro-batches/current');
+      if (!result || !Object.hasOwn(result, 'batch')) throw new Error('Estado global da geração em sequência inválido.');
+      const value = result.batch === null ? null : verifiedBatch(result.batch, {id: canonicalUUID(result.batch.id), roteiro: canonicalUUID(result.batch.roteiro_id)});
+      if (epoch !== state.batchDiscoveryEpoch || stopped) return;
+      state.globalBatchRecord = value; state.batchDiscoveryUncertain = false;
+      if (value && (!state.batchOwner || (!state.batchUncertain && state.batchRecord?.state !== 'active') || state.batchOwner.id === value.id)) {
+        state.batchOwner = {id: value.id, roteiro: value.roteiro_id}; state.batchRecord = value; state.batchUncertain = false; batchURL();
+      }
+    } catch (error) { if (epoch === state.batchDiscoveryEpoch) { state.batchDiscoveryUncertain = true; message('notice', `Não foi possível confirmar a geração em sequência no PC: ${error.message}. Atualize os metadados antes de gerar.`, true); } }
+    finally { controls(); }
+  }
+  function batchURL() {
+    const view = document.defaultView; if (!view?.history) return;
+    const url = new URL(view.location.href);
+    if (state.batchOwner) { url.searchParams.set('batch', state.batchOwner.id); url.searchParams.set('batch_roteiro', state.batchOwner.roteiro); }
+    view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  async function readBatch() {
+    if (!state.batchOwner || state.batchReading) return;
+    const owner = {...state.batchOwner}, epoch = ++state.batchEpoch;
+    state.batchReading = true; controls();
+    try {
+      const result = verifiedBatch(await stories.readBatch(owner.roteiro, owner.id), owner);
+      if (epoch !== state.batchEpoch || state.batchOwner?.id !== owner.id || stopped) return;
+      state.batchRecord = result; state.batchUncertain = false;
+      if (state.stopOwner?.kind === 'batch' && state.stopOwner.id === owner.id && result.state !== 'active') { state.stopUncertain = false; state.stopOwner = null; stopURL(); }
+      if (story.doc?.id === owner.roteiro && !story.editing && !story.candidate) { const doc = await stories.read(owner.roteiro); if (doc.id !== owner.roteiro) throw new Error('O roteiro recebido pertence a outro pedido.'); if (epoch === state.batchEpoch && story.doc?.id === owner.roteiro && !story.editing && !story.candidate) { story.doc = doc; renderStory(); } }
+    } catch (error) { if (epoch === state.batchEpoch && state.batchOwner?.id === owner.id) { state.batchUncertain = true; message('notice', `Geração em sequência não confirmada: ${error.message}. Consulte o mesmo pedido; não reenvie.`, true); } }
+    finally { if (epoch === state.batchEpoch) state.batchReading = false; controls(); }
+  }
+  async function startBatch() {
+    if (!story.doc || !state.editorReady || !savedEditorMatches(state.editorSnapshot, {system_prompt: $('grok-system').value, model: $('grok-model').value}, state.editorSaving) || state.batchReading || $('story-batch').disabled || retryBlocked() || story.editing || story.candidate || $('story-name').value !== story.doc.name || !batchDraftsClean(story.doc, state.drafts)) return;
+    const remaining = remainingStoryBlocks(story.doc); if (!remaining.length) return;
+    if (!document.defaultView.confirm(`Gerar ${remaining.length} blocos restantes em ordem? Os blocos intermediários gerados serão aceitos tecnicamente apenas para continuar, sem aprovação artística. Cada bloco chama o Grok (provider pago) para melhorar o prompt e usa a proposta automaticamente antes de gerar, sem fallback para o texto bruto. O último bloco exige sua revisão. O pedido continua no PC se você fechar a página.`)) return;
+    const owner = {id: newAssemblyUUID(document.defaultView.crypto), roteiro: story.doc.id}, revision = story.doc.revision;
+    state.batchOwner = owner; state.batchRecord = null; state.batchUncertain = true; ++state.batchEpoch;
+    batchURL(); saveDraft(); controls();
+    try { const result = verifiedBatch(await stories.startBatch(owner.roteiro, owner.id, revision), owner); if (state.batchOwner?.id === owner.id) { state.batchRecord = result; state.batchUncertain = false; } }
+    catch (error) { message('notice', `Envio ${owner.id} não confirmado: ${error.message}. Consulte o mesmo ID; não repita o envio.`, true); }
+    finally { controls(); }
+  }
   function retryBlocked(ignorePreparation = false) {
-    return deleting || !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyReading || state.assemblyUncertain || state.grokBusy || state.grokUncertain || state.editorSaving || (!ignorePreparation && state.retryPreparing) || ['queued', 'running'].includes(state.pendingRun?.state);
+    return batchBlocked() || state.conversionBusy || state.conversionUncertain || deleting || !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyReading || state.assemblyUncertain || state.grokBusy || state.grokUncertain || state.editorSaving || (!ignorePreparation && state.retryPreparing) || ['queued', 'running'].includes(state.pendingRun?.state);
   }
   function settingsEditable() {
-    return Boolean(state.config) && (state.mode !== 'continue' || state.parent?.state === 'accepted') && draftSettingsAllowed({...state, originScreen: state.screen === 'settings' ? state.settingsOrigin?.screen : state.screen, submitted: draft().submitted});
+    return !batchBlocked() && Boolean(state.config) && (state.mode !== 'continue' || state.parent?.state === 'accepted') && draftSettingsAllowed({...state, originScreen: state.screen === 'settings' ? state.settingsOrigin?.screen : state.screen, submitted: draft().submitted});
   }
   function draftNavigationBlocked() {
     // Another draft may be described during Grok's request; its response stays with its origin.
@@ -607,10 +841,23 @@ export function startUI(document, client = createClient(), stories = createStory
     const run = state.selected;
     // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
     const reviewedPreview = state.assembly?.id === state.assemblyId && state.assembly?.state === 'completed' && state.assemblyMode === 'preview' && run?.state === 'accepted';
-    $('assemble').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyUncertain || state.busy || !canAssemble(run, state.sequence) || (state.assemblyLocked && state.assemblyEnd === run?.id && !reviewedPreview);
+    $('story-batch').hidden = !story.doc?.adopted || Boolean(story.candidate);
+    const savedBatchEditor = state.editorReady && savedEditorMatches(state.editorSnapshot, {system_prompt: $('grok-system').value, model: $('grok-model').value}, state.editorSaving);
+    $('story-batch-editor-note').hidden = !story.doc?.adopted || savedBatchEditor;
+    text('story-batch-editor-note', state.editorSaving ? 'Aguarde a confirmação do salvamento das instruções do Grok.' : 'Salve o prompt de Vídeos sequenciais em Ajustes antes de gerar os blocos restantes. Esta opção usa as instruções salvas no PC.');
+    $('story-batch').disabled = !savedBatchEditor || state.batchReading || batchBlocked() || retryBlocked() || story.busy || Boolean(story.editing) || Boolean(story.candidate) || (story.doc && $('story-name').value !== story.doc.name) || !batchDraftsClean(story.doc, state.drafts) || !remainingStoryBlocks(story.doc).length;
+    $('batch-read').hidden = !state.batchOwner; $('batch-read').disabled = state.batchReading;
+    $('batch-open').hidden = !state.batchOwner;
+    text('batch-status', state.batchOwner ? `Pedido ${state.batchOwner.id.slice(0, 8)} · ${state.batchUncertain ? 'resultado incerto: consulte o mesmo ID' : state.batchRecord?.state === 'active' ? `blocos em ordem no PC · ${state.batchRecord.phase === 'improving' ? 'Grok melhorando o prompt' : state.batchRecord.phase === 'accepting' ? 'aceitação técnica intermediária' : state.batchRecord.phase === 'generating' ? 'gerando o vídeo' : 'pedido admitido, aguardando etapa'}` : state.batchRecord?.state === 'ready_for_review' ? 'último bloco pronto para revisão' : state.batchRecord?.state || 'aguardando leitura'}${state.batchRecord?.error ? ` · ${state.batchRecord.error}` : ''}` : '');
+    for (const button of document.querySelectorAll('.delete-item')) button.disabled = deleting || batchBlocked() || state.conversionBusy || state.conversionUncertain;
+    $('run-delete').disabled = batchBlocked() || state.busy || state.uncertain || state.conversionBusy || state.conversionUncertain;
+    $('conversion-read').hidden = !state.conversionId; $('conversion-read').disabled = state.conversionBusy;
+    $('convert-story').hidden = Boolean(story.runIDs.has(state.selected?.id));
+    $('convert-story').disabled = retryBlocked() || state.conversionBusy || state.conversionUncertain || !state.openedBranchEnd || !state.branchSequence;
+    $('assemble').disabled = batchBlocked() || state.conversionBusy || state.conversionUncertain || !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyUncertain || state.busy || !canAssemble(run, state.sequence) || (state.assemblyLocked && state.assemblyEnd === run?.id && !reviewedPreview);
     $('assembly-refresh').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading || (!state.assemblyId && !state.assembly);
     text('assemble', state.assemblyBusy ? 'Montando no PC…' : 'Montar sequência');
-    $('accept').disabled = $('reject').disabled = state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
+    $('accept').disabled = $('reject').disabled = batchBlocked() || state.conversionBusy || state.conversionUncertain || state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
     $('review-decisions').hidden = run?.state !== 'ready_for_review';
     $('review-next').hidden = run?.state !== 'accepted';
     $('continue-mode').disabled = draftNavigationBlocked() || run?.state !== 'accepted';
@@ -622,23 +869,25 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-intent-read').hidden = !ownIntent;
     $('story-intent-read').disabled = !ownIntent || state.busy;
     $('new-mode').disabled = rootDraftViewBlocked();
-    text('new-mode', retryBlocked() ? 'Reabrir rascunho' : 'Novo bloco');
-    $('story-new').disabled = !state.config || story.busy || !story.available;
+    text('new-mode', retryBlocked() ? 'Reabrir Freestyle' : 'Freestyle');
+    $('story-new').disabled = batchBlocked() || !state.config || story.busy || !story.available;
     $('story-new').hidden = state.config?.roteiro_enabled === false;
-    $('story-propose').disabled = $('story-manual').disabled = story.busy || !state.capabilities;
-    $('story-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || (state.mode === 'continue' && state.lastFrame.state !== 'ready');
+    $('story-propose').disabled = $('story-manual').disabled = batchBlocked() || story.busy || !state.capabilities;
+    $('story-detail').disabled = batchBlocked() || !state.editorReady || state.grokBusy || state.grokUncertain || (state.mode === 'continue' && state.lastFrame.state !== 'ready');
     $('story-block-use').disabled = !story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy;
     $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
     $('story-stale-prompt').hidden = !draft().storyPromptStale;
     $('story-new-send').hidden = !state.statusOnly || !story.rejectedReady || story.rejectedReady.owner.id !== story.doc?.id || story.rejectedReady.owner.block !== story.block || story.rejectedReady.owner.intent !== story.intent;
-    $('story-new-send').disabled = state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
+    $('story-new-send').disabled = batchBlocked() || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
+    for (const id of ['story-add', 'story-adopt', 'story-propose-again', 'story-delete']) $(id).disabled = batchBlocked() || story.busy;
+    $('story-name').disabled = batchBlocked();
     text('story-prompt-origin', `Origem: ${draft().promptOrigin || 'roteiro'}`);
     $('create-fields').disabled = $('generate').disabled = nativeExecutionBlocked({...state, submitted: draft().submitted});
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
     $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
     $('upload-file').disabled = $('upload').disabled = !state.config?.reference_library || state.mode === 'continue' || state.uploadBusy || state.uploadUncertain;
-    $('generate').disabled ||= state.uploadBusy || Boolean(story.detailCandidate && story.detailCandidate.key === state.draftKey) || Boolean(draft().storyPromptStale);
+    $('generate').disabled ||= batchBlocked() || state.uploadBusy || Boolean(story.detailCandidate && story.detailCandidate.key === state.draftKey) || Boolean(draft().storyPromptStale);
     $('generate').disabled ||= draft().submitted || state.uploadUncertain || state.retryPreparing;
     $('retry-review').hidden = !['rejected', 'interrupted'].includes(run?.state);
     $('retry-context').hidden = !draft().sourceId;
@@ -651,9 +900,9 @@ export function startUI(document, client = createClient(), stories = createStory
     text('settings-draft-note', settingsEditable() ? state.mode === 'continue' ? `Próximo bloco · rascunho com pai aceito ${state.parent.id}. Duração e seed não alteram o pai publicado.` : `Ajustes apenas do novo bloco · rascunho ${state.draftKey}. Não mudam um vídeo já publicado.` : 'Duração e seed pertencem a um bloco ainda não enviado. Prepare um rascunho para editá-los; resultados publicados permanecem intactos.');
     $('upload').textContent = state.uploadBusy ? 'Enviando ao PC…' : 'Enviar imagem ao PC';
     $('continuation-note').hidden = state.mode !== 'continue';
-    text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar novo bloco');
+    text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar Freestyle');
     text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${state.parent?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
-    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference() || (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready'));
+    $('grok-detail').disabled = batchBlocked() || !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference() || (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready'));
     $('grok-save').disabled = !state.editorReady || state.editorSaving;
     $('grok-system').disabled = $('grok-model').disabled = !state.editorReady;
     text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar ideia e imagem');
@@ -668,6 +917,10 @@ export function startUI(document, client = createClient(), stories = createStory
     $('late-proposal').value = draft().lateProposal?.text || '';
     text('late-proposal-context', draft().lateProposal?.context || '');
     $('show-proposal').hidden = !draft().proposal;
+    $('pending-run-card').hidden = !state.uncertain && !['queued', 'running'].includes(state.pendingRun?.state);
+    $('batch-library-card').hidden = !state.batchOwner;
+    $('batch-card').hidden = !state.batchOwner || story.doc?.id !== state.batchOwner.roteiro;
+    syncStopViews();
     $('nav-status').hidden = !state.uncertain && !['queued', 'running'].includes(state.pendingRun?.state);
     text('nav-status', state.uncertain ? 'Consultar pedido com resultado incerto · não reenviar' : `Pedido no PC · ${state.pendingRun?.id?.slice(0, 8) || 'aguardando ID'}`);
     text('status-state', state.pendingRun ? label(state.pendingRun) : state.uncertain ? 'Admissão incerta' : 'Sem pedido');
@@ -715,7 +968,7 @@ export function startUI(document, client = createClient(), stories = createStory
     button.disabled = deleting; button.addEventListener('click', action); return button;
   }
   async function removeLibraryItem(kind, item) {
-    if (!item || deleting || story.busy || state.busy || state.uncertain || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.grokBusy || state.grokUncertain) return;
+    if (!item || batchBlocked() || state.conversionBusy || state.conversionUncertain || deleting || story.busy || state.busy || state.uncertain || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.grokBusy || state.grokUncertain) return;
     const isStory = kind === 'story', status = isStory ? 'story-library-status' : 'notice';
     const question = isStory ? 'Apagar este roteiro e seus vídeos e montagens? As mídias próprias serão movidas para /tmp. Registros de segurança serão preservados. Referências compartilhadas serão preservadas.' : 'Apagar este bloco e seus arquivos de mídia? As mídias serão movidas para /tmp. Registros de segurança serão preservados. Se houver continuação, roteiro ou montagem dependente, a operação será bloqueada.';
     if (!document.defaultView.confirm(question)) return;
@@ -779,14 +1032,14 @@ export function startUI(document, client = createClient(), stories = createStory
         const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
       } else {
         li.append(element('p', '', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
-        const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button';
-        edit.addEventListener('click', () => { if (info.latest) void openStoryAttempt(info.accepted || info.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...block}; renderStory(); } }); li.append(edit);
+        const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
+        edit.addEventListener('click', () => { if (batchBlocked() && !info.latest) return; if (info.latest) void openStoryAttempt(info.accepted || info.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...block}; renderStory(); } }); li.append(edit);
         if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
       }
       if (!info.frozen) {
-        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.disabled = story.busy;
+        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.disabled = story.busy || batchBlocked();
         remove.addEventListener('click', async () => {
-          if (story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
+          if (batchBlocked() || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
           const changed = storyBlocks().filter(item => item.id !== block.id);
           if (story.candidate) { story.candidate.blocks = changed; story.editing = null; renderStory(); }
           else if (await saveStoryBlocks(changed, changed.length ? story.doc.adopted : false)) { story.editing = null; renderStory(); }
@@ -795,8 +1048,8 @@ export function startUI(document, client = createClient(), stories = createStory
       if (!info.frozen) {
         const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
         for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
-          const button = element('button', '', label); button.type = 'button'; button.disabled = delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
-          button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; await saveStoryBlocks(changed); }); organize.append(button);
+          const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked() || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
+          if (!card) button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; await saveStoryBlocks(changed); }); organize.append(button);
         } li.append(organize);
       }
       if (info.attempts.length) { const history = element('details'); history.append(element('summary', '', 'Ver tentativas')); for (const attempt of info.attempts) { const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); history.append(button); } li.append(history); }
@@ -807,7 +1060,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('story-next', !next ? 'Preparar montagem' : info.latest ? ['rejected', 'interrupted'].includes(info.latest.run?.state) ? 'Preparar outra tentativa' : info.latest.run?.state === 'ready_for_review' ? 'Revisar bloco' : 'Consultar envio do bloco' : `Preparar bloco ${story.doc.blocks.indexOf(next) + 1}`);
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
-    if (story.busy) return false; story.busy = true;
+    if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true;
     try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; renderStory(); message('story-status', 'Roteiro salvo no PC.'); return true; }
     catch (error) { message('story-status', error.status === 409 ? 'O roteiro mudou no PC. Confira a outra versão antes de salvar. Sua edição foi mantida.' : `Não foi possível salvar: ${error.message}`, true); return false; }
     finally { story.busy = false; }
@@ -819,7 +1072,7 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { message('story-status', error.message, true); } return false;
   }
   async function createStory(propose) {
-    if (story.busy || !state.capabilities) return; saveDraft();
+    if (batchBlocked() || story.busy || !state.capabilities) return; saveDraft();
     let count, duration;
     try { count = parseSeed($('story-count').value); if (count < 1 || count > 50) throw new Error('Escolha entre 1 e 50 blocos.'); duration = parseDuration($('story-duration').value, state.capabilities); sceneText($('idea').value); }
     catch (error) { message('grok-status', error.message, true); return; }
@@ -982,7 +1235,7 @@ export function startUI(document, client = createClient(), stories = createStory
     try {
       const config = editorPayload(await client.get('/grok/editor'));
       $('grok-system').value = config.system_prompt; $('grok-model').value = config.model;
-      state.editorReady = true;
+      state.editorSnapshot = {...config}; state.editorReady = true;
       message('grok-config-status', 'Configuração local carregada. Nenhuma chamada ao Grok foi feita.');
     } catch (error) { message('grok-config-status', `Configuração Grok indisponível: ${error.message}. A geração de vídeo continua separada.`, true); }
     controls();
@@ -993,7 +1246,7 @@ export function startUI(document, client = createClient(), stories = createStory
     try { config = editorPayload(editorDraft()); } catch (error) { message('grok-config-status', error.message, true); return; }
     state.editorSaving = true; controls();
     try {
-      await client.saveEditor(config);
+      state.editorSnapshot = editorPayload(await client.saveEditor(config));
       message('grok-config-status', 'Configuração salva em .data/grok/editor.json no PC. Autenticação não foi alterada.');
     } catch (error) { message('grok-config-status', `Configuração não confirmada: ${error.message}. Nenhuma repetição automática.`, true); }
     finally { state.editorSaving = false; controls(); }
@@ -1039,9 +1292,10 @@ export function startUI(document, client = createClient(), stories = createStory
   function renderLibrary() {
     const list = $('library'); list.replaceChildren();
     const standalone = state.items.filter(run => !story.runIDs.has(run.id));
-    if (!standalone.length) list.append(element('p', 'caption', 'Nenhum bloco avulso ainda.'));
+    if (!standalone.length) list.append(element('p', 'caption', 'Nenhum Freestyle ainda.'));
     for (const run of standalone) {
-      const button = element('button', 'clip-card'); button.type = 'button'; button.setAttribute('aria-current', String(run.id === state.selected?.id));
+      let card = libraryCards.get(run.id);
+      const button = card?.querySelector('.clip-card') || element('button', 'clip-card'); button.replaceChildren(); button.type = 'button'; button.setAttribute('aria-current', String(run.id === state.selected?.id));
       button.setAttribute('aria-label', `${label(run)} · ${run.id} · ${run.prompt || 'Sem instrução'}`);
       const top = element('span', 'card-top'); top.append(element('span', '', run.id.slice(0, 8)), element('span', '', `${run.duration_seconds ?? '—'} s`));
       const bottom = element('span', 'card-bottom'); bottom.append(element('span', '', label(run)), element('span', 'mono', `seed ${run.seed}`));
@@ -1049,8 +1303,10 @@ export function startUI(document, client = createClient(), stories = createStory
       const stamp = Number.isNaN(created.getTime()) ? 'Data indisponível' : new Intl.DateTimeFormat('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(created);
       const date = element('span', 'card-created', `Criado ${stamp}`); date.title = run.created_at || '';
       button.append(top, element('span', 'card-prompt', run.prompt || 'Sem instrução'), bottom, date);
-      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); const card = element('article', 'library-item'); card.append(button, deleteButton('Apagar bloco', () => removeLibraryItem('run', run))); list.append(card);
+      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); if (!card) { card = element('article', 'library-item'); card.append(button, deleteButton('Apagar bloco', () => removeLibraryItem('run', run))); libraryCards.set(run.id, card); } libraryStop(run, card); list.append(card);
     }
+    for (const [id, existing] of libraryStops) if (!standalone.some(run => run.id === id)) { existing.view.destroy(); libraryStops.delete(id); libraryCards.delete(id); }
+    for (const id of libraryCards.keys()) if (!standalone.some(run => run.id === id)) libraryCards.delete(id);
     text('library-count', `${state.total} blocos`);
     text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
     motion.changed('library', `${state.offset}:${state.items.map(run => `${run.id}:${run.state}`).join('|')}`, [...list.children], 'enter');
@@ -1085,7 +1341,7 @@ export function startUI(document, client = createClient(), stories = createStory
       player.hidden = false; $('screen-message').hidden = true;
     } else {
       player.pause(); if (player.hasAttribute('src')) { player.removeAttribute('src'); player.load(); } player.hidden = true; $('screen-message').hidden = false;
-      $('screen-message').replaceChildren(element('span', 'frame-mark', '[ H3 ]'), element('p', '', run ? `${label(run)}. ${run.error || (PLAYABLE.has(run.state) ? 'Nenhum vídeo publicado disponível para este bloco.' : 'O vídeo não está disponível. Atualizar consulta apenas os metadados.')}` : 'Selecione um bloco para assistir ou prepare uma nova cena.'));
+      $('screen-message').replaceChildren(element('span', 'frame-mark', '[ H3 ]'), element('p', '', run ? `${label(run)}. ${run.error || (PLAYABLE.has(run.state) ? 'Nenhum vídeo publicado disponível para este bloco.' : 'O vídeo não está disponível. Atualizar consulta apenas os metadados.')}` : 'Selecione um vídeo para assistir ou prepare um Freestyle.'));
     }
     text('review-hint', run?.state === 'ready_for_review' ? 'Assista antes de decidir. Aceitar permite continuar.' : run?.state === 'accepted' ? 'Bloco aceito. A continuação exige um novo envio explícito.' : 'Somente blocos prontos podem ser aceitos ou rejeitados.');
     const metadata = $('metadata'); metadata.replaceChildren();
@@ -1127,7 +1383,7 @@ export function startUI(document, client = createClient(), stories = createStory
     state.uploadBusy = true; controls(); message('upload-status', 'Enviando arquivo ao PC. Nenhuma geração será iniciada.');
     try {
       state.reference = await client.upload(file); ++draft().revision; saveDraft(); showReference();
-      message('upload-status', 'Imagem salva no PC e escolhida para uma nova cena.');
+      message('upload-status', 'Imagem salva no PC e escolhida para um Freestyle.');
       try { await loadReferences(); } catch (error) { message('upload-status', `Imagem publicada; catálogo indisponível: ${error.message}`, true); }
     } catch (error) {
       state.uploadUncertain = !(error instanceof HTTPError) || error.status >= 500;
@@ -1198,6 +1454,7 @@ export function startUI(document, client = createClient(), stories = createStory
       canonicalUUID(run.id);
       if (state.selected?.id !== run.id) { state.sequence = null; message('retry-status', ''); }
       state.selected = run; state.openedBranchEnd = end;
+      if (state.stopOwner?.kind === 'run' && state.stopOwner.id === run.id && !['queued', 'running'].includes(run.state)) { state.stopUncertain = false; state.stopOwner = null; stopURL(); }
       if (state.branchSequence?.end_run_id !== end) state.branchSequence = null;
       if (story.doc) { const attempt = story.doc.attempts.find(item => item.run_id === run.id); story.block = attempt?.block_id || null; if (attempt) story.intent = attempt.intent_id; }
       renderRun();
@@ -1263,6 +1520,9 @@ export function startUI(document, client = createClient(), stories = createStory
       await loadReferences();
       await loadLibrary();
       await storyLibrary();
+      await discoverBatch();
+      await readStopOwner();
+      if (state.batchOwner) await readBatch();
       if (story.doc && !story.busy && !story.editing && !story.candidate) { story.doc = await stories.read(story.doc.id); if (state.screen === 'story') renderStory(); }
       if (!state.busy && selectionEpoch === state.epoch) {
         if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true});
@@ -1272,6 +1532,7 @@ export function startUI(document, client = createClient(), stories = createStory
     finally { refreshActive = false; drainChanges(); }
   }
   async function decide(action) {
+    if (batchBlocked() || state.conversionBusy || state.conversionUncertain) return;
     if (state.screen !== 'review' || state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
     ++state.epoch; ++libraryEpoch;
     pendingDecision = {action, id: state.selected.id};
@@ -1339,7 +1600,7 @@ export function startUI(document, client = createClient(), stories = createStory
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
     } finally { submittedDraft.submitted = state.uncertain || admittedID !== null; state.busy = false; state.statusOnly = state.uncertain || admittedID !== null; state.waitController = null; paintScreen(); controls(); drainChanges(); }
   }
-  for (const id of ['idea', 'prompt', 'grok-result', 'seed', 'duration', 'grok-system']) $(id).addEventListener('input', () => { ++draft().revision; saveDraft(); if (id === 'duration') durationPreview(); if (id === 'grok-result') message('proposal-error', ''); });
+  for (const id of ['idea', 'prompt', 'grok-result', 'seed', 'duration', 'grok-system']) $(id).addEventListener('input', () => { ++draft().revision; saveDraft(); if (id === 'duration') durationPreview(); if (id === 'grok-result') message('proposal-error', ''); if (id === 'grok-system') controls(); });
   // Only the visible generation submit is an execution action. Enter in metadata,
   // seed, duration, editor settings or navigation cannot accidentally submit video.
   $('create-form').addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.tagName === 'INPUT') event.preventDefault(); });
@@ -1366,6 +1627,8 @@ export function startUI(document, client = createClient(), stories = createStory
   $('generation-edit').addEventListener('click', () => navigate('context'));
   $('continue-idea').addEventListener('click', () => { if (state.parent?.state === 'accepted') navigate('context'); });
   $('open-assembly').addEventListener('click', () => navigate('assembly'));
+  $('convert-story').addEventListener('click', convertFreestyle);
+  $('conversion-read').addEventListener('click', readConversion);
   $('assemble').addEventListener('click', assemble);
   $('assembly-refresh').addEventListener('click', () => readAssembly());
   $('assembly-result').addEventListener('toggle', renderAssembly);
@@ -1392,15 +1655,19 @@ export function startUI(document, client = createClient(), stories = createStory
   for (const id of ['story-count', 'story-duration']) $(id).addEventListener('input', initialTotal);
   $('story-manual').addEventListener('click', () => createStory(false)); $('story-propose').addEventListener('click', () => createStory(true));
   $('story-adopt').addEventListener('click', () => { if (story.candidate && story.candidate.source_revision !== story.doc.revision) { message('story-status', 'O roteiro mudou no PC. Confira a proposta antiga antes de salvar.', true); return; } void saveStoryBlocks(storyBlocks(), true); });
-  $('story-add').addEventListener('click', async () => { try { const block = {id: newAssemblyUUID(document.defaultView.crypto), action: 'Descreva a próxima ação.', prompt: 'Describe the next action.', seed: parseSeed($('seed').value), duration_seconds: state.capabilities.default_requested_seconds}; if (story.candidate) { story.candidate.blocks.push(block); renderStory(); } else await saveStoryBlocks([...story.doc.blocks, block]); } catch (error) { message('story-status', error.message, true); } });
+  $('story-add').addEventListener('click', async () => { if (batchBlocked()) return; try { const block = {id: newAssemblyUUID(document.defaultView.crypto), action: 'Descreva a próxima ação.', prompt: 'Describe the next action.', seed: parseSeed($('seed').value), duration_seconds: state.capabilities.default_requested_seconds}; if (story.candidate) { story.candidate.blocks.push(block); renderStory(); } else await saveStoryBlocks([...story.doc.blocks, block]); } catch (error) { message('story-status', error.message, true); } });
   $('story-delete').addEventListener('click', () => removeLibraryItem('story', story.doc));
   $('run-delete').addEventListener('click', () => removeLibraryItem('run', state.selected));
+  $('story-name').addEventListener('input', controls);
+  $('story-batch').addEventListener('click', startBatch);
+  $('batch-read').addEventListener('click', readBatch);
+  $('batch-open').addEventListener('click', async () => { if (!state.batchOwner) return; await openStory(state.batchOwner.roteiro); await readBatch(); });
   $('story-next').addEventListener('click', storyNext);
   $('story-return').addEventListener('click', () => { renderStory(); navigate('story'); });
   $('story-intent-read').addEventListener('click', readStoryIntent);
   const newSend = element('button', 'primary', 'Preparar novo envio'); newSend.id = 'story-new-send'; newSend.type = 'button'; newSend.hidden = true; newSend.addEventListener('click', prepareRejectedStory); $('story-intent-read').after(newSend);
   $('story-reload').addEventListener('click', async () => { if (story.editing || story.candidate) { message('story-status', 'Sua edição foi mantida. Salve ou descarte antes de reler.', true); return; } await openStory(story.doc.id); });
-  $('story-propose-again').addEventListener('click', async () => { if (story.busy) return; story.busy = true; try { story.candidate = await stories.proposal(story.doc.id, {expected_revision: story.doc.revision, count: story.doc.blocks.length || 3, duration_seconds: state.capabilities.default_requested_seconds, seed: parseSeed($('seed').value)}); renderStory(); } catch (error) { message('story-status', error.message, true); } finally { story.busy = false; } });
+  $('story-propose-again').addEventListener('click', async () => { if (batchBlocked() || story.busy) return; story.busy = true; try { story.candidate = await stories.proposal(story.doc.id, {expected_revision: story.doc.revision, count: story.doc.blocks.length || 3, duration_seconds: state.capabilities.default_requested_seconds, seed: parseSeed($('seed').value)}); renderStory(); } catch (error) { message('story-status', error.message, true); } finally { story.busy = false; } });
   $('story-detail').addEventListener('click', detailStoryBlock);
   $('story-block-use').addEventListener('click', () => { if (!story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy) return; try { $('prompt').value = sceneText($('story-block-proposal').value); draft().promptOrigin = 'Grok'; draft().storyPromptRevision = story.detailCandidate.revision; draft().storyPromptStale = story.detailCandidate.revision !== story.doc.revision; ++draft().revision; saveDraft(); draft().storyCandidate = null; story.detailCandidate = null; controls(); } catch (error) { message('story-detail-status', error.message, true); } });
   $('story-block-keep').addEventListener('click', () => { draft().storyCandidate = null; story.detailCandidate = null; controls(); });
@@ -1414,11 +1681,11 @@ export function startUI(document, client = createClient(), stories = createStory
   for (const figure of document.querySelectorAll('.visual-card')) { const button = element('button', '', 'Ampliar imagem'); button.type = 'button'; button.addEventListener('click', () => { const expanded = figure.classList.toggle('expanded'); button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Reduzir imagem' : 'Ampliar imagem'; }); figure.append(button); }
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
-  document.defaultView?.addEventListener('pagehide', () => { motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  const swipeBack = createBackSwipe(document, {back, canGoBack: () => state.trail.length > 0, navigationEpoch: () => state.navigationEpoch});
+  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
-    if (remembered && state.screen === 'story' && remembered.snapshot.screen === 'story' && story.doc?.id === remembered.snapshot.storyDoc?.id) { document.defaultView.history.go(event.state.h3View > historyToken ? 1 : -1); return; }
     if (remembered) { historyToken = event.state.h3View; void restoreView(remembered.snapshot, remembered.trail); }
     else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
     else navigate('library', {remember: false});
@@ -1431,6 +1698,7 @@ export function startUI(document, client = createClient(), stories = createStory
     loadReferences(),
     loadLibrary(),
     storyLibrary(),
+    discoverBatch(),
     state.config?.roteiro_enabled === false ? Promise.resolve() : stories.editor().then(config => { $('story-system').value = config.system_prompt; $('story-model').value = config.model; $('story-system').disabled = $('story-editor-save').disabled = false; }).catch(error => message('story-editor-status', `Roteirista indisponível: ${error.message}. O editor de blocos continua separado.`, true)),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
     if (state.config?.assembly_enabled && pointer) {
@@ -1444,6 +1712,10 @@ export function startUI(document, client = createClient(), stories = createStory
       if (story.intent) story.intentOwner = {id: storyRecovery.roteiro, block: story.block, intent: story.intent};
       if (story.intent) { if (!state.uncertain) story.uncertainIntent = story.intent; state.uncertain = true; state.statusOnly = true; navigate('generation', {focus: false}); await readStoryIntent(); }
     } else if (document.defaultView?.location?.pathname === '/roteiro' && !pointer) { story.creating = true; $('story-duration').value = String(state.capabilities?.default_requested_seconds ?? ''); navigate('context', {focus: false}); }
+    await loadStopViews().catch(error => message('notice', `Controle de parada indisponível: ${error.message}`, true));
+    await readStopOwner();
+    if (state.batchOwner) await readBatch();
+    if (state.conversionId) await readConversion();
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     paintScreen(); controls(); refreshActive = false; drainChanges();

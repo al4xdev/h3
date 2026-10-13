@@ -117,6 +117,12 @@ class UpdatePlan(PlanFields):
     expected_revision: StrictInt = Field(ge=1)
 
 
+class ConvertFreestyle(StrictDTO):
+    roteiro_id: str
+
+    _id = field_validator("roteiro_id")(Block.key.__func__)
+
+
 class RemovePlan(StrictDTO):
     expected_revision: StrictInt = Field(ge=1)
 
@@ -150,6 +156,21 @@ class Generate(StrictDTO):
     _parent = field_validator("parent_id")(Snapshot.parent.__func__)
 
 
+class MediaProof(StrictDTO):
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    size: StrictInt = Field(gt=0)
+    device: StrictInt = Field(ge=0)
+    inode: StrictInt = Field(ge=0)
+    mtime_ns: StrictInt
+    ctime_ns: StrictInt
+
+
+class ImportedSource(StrictDTO):
+    projection: dict
+    manifest: dict
+    media: MediaProof | None
+
+
 class Intent(StrictDTO):
     intent_id: str
     run_id: str
@@ -157,6 +178,8 @@ class Intent(StrictDTO):
     block_id: str
     source_revision: StrictInt = Field(ge=1)
     snapshot: Snapshot
+    origin: Literal["native", "freestyle"] = "native"
+    source: ImportedSource | None = None
     admission: Literal["uncertain", "admitted", "rejected"] = "uncertain"
     error: str | None = Field(default=None, max_length=256)
 
@@ -164,6 +187,8 @@ class Intent(StrictDTO):
     def identity(self):
         for value in (self.intent_id, self.run_id, self.roteiro_id, self.block_id):
             canonical(value)
+        if (self.origin == "freestyle") != (self.source is not None):
+            raise ValueError("Imported attempt requires explicit source evidence")
         if self.intent_id != self.run_id:
             raise ValueError("Intent and native Run IDs must be identical")
         return self
@@ -367,12 +392,15 @@ class Roteiro:
             self.service.store.get(run_id)
 
     async def create(self, payload: CreatePlan) -> dict:
+        from .roteiro_batch import assert_batch_available
+        assert_batch_available(self.service)
         digest = await self.reference_digest(payload.reference)
         doc = Document(**payload.model_dump(), id=str(uuid4()), revision=1,
                        reference_sha256=digest)
         encoded_metadata(doc.model_dump())  # Reject aggregate overflow before directory reservation.
         with (_directory(self.root, (".data", "roteiros"), create=True) as library,
               locked(library)):
+            assert_batch_available(self.service)
             self.reference_available(payload.reference)
             with (_directory(self.root, (".data", "roteiros", doc.id), create=True) as directory,
                   locked(directory)):
@@ -380,12 +408,17 @@ class Roteiro:
         return self.view(doc)
 
     def check_revision(self, doc: Document, expected: int):
+        from .roteiro_batch import assert_batch_available
+
+        assert_batch_available(self.service)
         if self.removed(doc.id):
             raise Conflict("Roteiro removed from library; history is read-only")
         if doc.revision != expected:
             raise Conflict("Roteiro revision changed; preserve the local draft and reread")
 
     async def update(self, ident: str, payload: UpdatePlan) -> dict:
+        from .roteiro_batch import assert_batch_available
+        assert_batch_available(self.service)
         original = self.get(ident)
         self.check_revision(original, payload.expected_revision)
         digest = await self.reference_digest(payload.reference)
@@ -429,6 +462,8 @@ class Roteiro:
         return {**payload.model_dump(), "model": current["model"]}
 
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
+        from .roteiro_batch import assert_batch_available
+        assert_batch_available(self.service)
         doc = self.get(ident)
         self.check_revision(doc, payload.expected_revision)
         digest = await self.reference_digest(doc.reference)
@@ -507,6 +542,12 @@ class Roteiro:
         if intent.admission == "rejected":
             return value
         try:
+            if intent.origin == "freestyle":
+                from .roteiro_conversion import observe_import
+                current = observe_import(self, intent)
+                value.update(admission="admitted", state=current.state, run=current.model_dump())
+                value["error"] = None
+                return value
             with _directory(self.root, (".data", "roteiros", ".locks")) as directory:
                 marker = Intent.model_validate(read_file(directory, f"{intent.intent_id}.json"))
             if marker.model_dump(exclude={"admission", "error"}) != intent.model_dump(
@@ -519,7 +560,7 @@ class Roteiro:
                 raise ValueError("Native manifest changed its immutable input")
             value.update(admission="admitted", state=current.state, run=current.model_dump())
             value["error"] = None
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, Conflict):
             # Missing/corrupt request after in-flight is uncertainty, never permission to POST again.
             value["admission"] = "uncertain"
         return value
@@ -569,6 +610,8 @@ class Roteiro:
         # observed(prior) recursively proves that parent's original owned ancestry as well.
 
     def reserve(self, doc: Document, key: str, intent_id: str, payload: Generate) -> Intent:
+        from .roteiro_batch import assert_batch_available
+        assert_batch_available(self.service)
         canonical(intent_id)
         canonical(key)
         with _directory(self.root, (".data", "roteiros", doc.id)) as directory:  # noqa: SIM117
@@ -715,6 +758,13 @@ async def script_editor(request: Request):
 @router.put("/editor")
 async def update_script_editor(request: Request):
     return response(operation(request).save_script(await body(request, ScriptConfig)))
+
+
+@router.post("/from-freestyle/{end_id}", status_code=201)
+async def convert_freestyle(end_id: str, request: Request):
+    payload = await body(request, ConvertFreestyle)
+    from .roteiro_conversion import convert
+    return response(await convert(operation(request), end_id, payload.roteiro_id), 201)
 
 
 @router.get("/{ident}")

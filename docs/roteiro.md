@@ -1,4 +1,4 @@
-# Roteiro — planejar o conjunto, gerar um bloco por vez
+# Roteiro — planejar o conjunto e gerar em sequência
 
 **Implementado conforme o plano41.** Especificação aprovada: [telas v2](design/roteiro-telas.md), [fluxo e crítica](design/roteiro-fluxo.md) e [contrato JSON](design/roteiro-contrato.md). Validação fake/CPU e mobile emulado descrita abaixo; não foi feita nova inferência real.
 
@@ -9,11 +9,66 @@
 3. **Propor roteiro com Grok** ou **Escrever os blocos manualmente**. A proposta preenche ação, duração e instrução-base de todos os blocos; ainda não existem vídeos/pais/frames futuros.
 4. Conferir/editar no próprio cartão e **Usar este roteiro**. Salva plano no PC, não gera.
 5. **Preparar blocoN**: conferir identidade e, na continuação, o último frame REAL da tentativa aceita doN−1. Instrução-base já preenchida. **Detalhar** é opcional; candidato do Grok só entra no texto escolhido ao **Usar esta proposta**.
-6. **Gerar** salva o rascunho escolhido e envia exatamente aquela instrução/duração/seed/pai. Status e revisão são os mesmos do modo avulso.
+6. **Gerar** salva o rascunho escolhido e envia exatamente aquela instrução/duração/seed/pai. Status e revisão são os mesmos do modo Freestyle.
 7. Aceitar/recusar explicitamente. Aceitar libera o próximo, mas não o prepara/gera sozinho. Recusado/interrompido tem retry com prompt FINAL literal e mesmo pai original; a tentativa antiga fica intacta.
 8. Todos aceitos →**Preparar montagem** →**Montar** explicitamente. Montagem usa a cadeia real, não os cartões planejados.
 
-**Novo bloco** mantém o modo avulso, sem roteiro obrigatório. Não há um segundo motor de vídeo, dispatcher/fila ou outra implementação de revisão/montagem. Os mesmos painéis e handlers são compartilhados; apenas contexto e admissão de roteiro são acrescentados.
+**Novo freestyle** mantém o modo Freestyle, sem roteiro obrigatório. Não há um segundo motor de vídeo, dispatcher/fila ou outra implementação de revisão/montagem. Os mesmos painéis e handlers são compartilhados; apenas contexto e admissão de roteiro são acrescentados.
+
+## Gerar os blocos restantes
+
+Abaixo da lista, **Gerar os blocos restantes** aparece para um roteiro salvo e
+adotado com um prefixo aceito e um restante nunca enviado. Rascunhos não salvos,
+revisões pendentes, tentativas recusadas/interrompidas ou resultados incertos
+precisam ser resolvidos explicitamente antes de autorizar o lote.
+
+A confirmação autoriza uma chamada ao Grok antes de cada bloco, o uso automático
+do texto melhorado e a aceitação técnica dos intermediários para encadear o próximo.
+Essa aceitação não certifica qualidade artística. O último fica pronto para revisão;
+a montagem continua sendo uma ação explícita separada.
+
+O lote congela as instruções do editor sequencial e os blocos-base. Para cada etapa,
+registra a intenção do editor, envia identidade e, nas continuações, o último frame
+real do pai aceito; salva a resposta usada, atualiza apenas o prompt do bloco e gera
+com seed, duração e parâmetros registrados. Não envia texto cru como fallback.
+Intenções e respostas ficam em `.data/roteiro-batches/`, com IDs conhecidos antes
+das submissões. Erro, parada, desconexão incerta ou reinício não repetem provider/GPU.
+
+`POST /roteiros/<id>/batches/<UUID>` exige `expected_revision`,
+`auto_accept_intermediate: true` e `enhance_with_grok: true`; responde 202.
+`GET` no mesmo endereço consulta o lote; `GET /roteiro-batches/current` descobre o
+estado global sem executar. SSE comunica mudanças de paths e a interface relê
+esses arquivos, sem polling de conclusão. Fechar a página não cancela o lote.
+
+## Converter Freestyle para roteiro
+
+Em **Operações → Converter para roteiro**, a origem é a sequência completa já aberta,
+incluindo seus blocos posteriores quando um ancestral está selecionado. A conversão
+usa os prompts efetivamente enviados como instruções/ações, copia seed e duração,
+herda a identidade original e registra a procedência dos runs existentes. Não copia
+nem reexecuta vídeos, não chama Grok e não altera decisões nativas.
+
+`POST /roteiros/from-freestyle/<fim>` recebe um `roteiro_id` conhecido pelo cliente.
+Em resposta perdida, `GET /roteiros/<roteiro_id>` consulta esse mesmo resultado;
+não há nova conversão automática. Só fontes com pedido nativo imutável, cadeia e
+metadados comprovados podem ser adotadas. Legado sem essa prova, identidade alterada,
+mídia substituída, parâmetros incompatíveis ou propriedade de outro roteiro bloqueiam
+a conversão com erro. Evidência de mídia inclui hash e identidade do arquivo, sem
+decodificar pixels nem alterar a origem.
+
+## Parar uma geração
+
+Os avisos da biblioteca e os cartões Freestyle ativos oferecem **Parar**. A confirmação
+acontece no próprio cartão: preenchimento curto da esquerda para a direita, **Cancelar**
+em verde e **Confirmar parada** em vermelho. Abrir/cancelar não envia pedidos; o
+segundo clique confirma a parada. Movimento reduzido e mudança dinâmica de preferência
+cancelam a animação sem alterar a confirmação ou o estado do pedido.
+
+`POST /runs/<UUID>/stop` e `POST /roteiros/<id>/batches/<UUID>/stop` aceitam `{}`.
+Somente o worker próprio pode ser interrompido; parar um filho do lote interrompe
+o lote inteiro. A operação acompanha o encerramento mesmo se o cliente desconectar.
+Sem ID ou resultado confirmado, a interface mantém a incerteza e consulta o mesmo
+endereço, sem repetir POST. Não limpa filas, modelos, caches ou processos globais.
 
 ## Estado e recuperação
 
@@ -51,11 +106,11 @@ substituição pela migração; uma configuração já migrada não é regravada
 
 Configuração/transportador reutilizados não autorizam acessar OAuth, refresh ou inferência em startup/SSE/tests. Modelo permanece `grok-4.20-0309-non-reasoning`. A autorização real37 de uma chamada já foi consumida; esta implementação usa somente fakes.
 
-Antes de materializar, o pipe compara a projeção original source_root/path/SHA do roteiro com a prova nativa recém calculada. Troca de bytes entre preflight e admissão rejeita antes de Store.create/worker. Setters fluentes de UUID/prova são puros, opcionais e não alteram schema público/parâmetros dos blocos avulsos.
+Antes de materializar, o pipe compara a projeção original source_root/path/SHA do roteiro com a prova nativa recém calculada. Troca de bytes entre preflight e admissão rejeita antes de Store.create/worker. Setters fluentes de UUID/prova são puros, opcionais e não alteram schema público/parâmetros dos blocos Freestyle.
 
 ## Apagar itens da biblioteca
 
-Os cartões de **Roteiros** e **Blocos avulsos**, e suas telas de detalhe, oferecem
+Os cartões de **Roteiros** e **Freestyle**, e suas telas de detalhe, oferecem
 **Apagar**. A confirmação solicita uma remoção real de mídia própria: arquivos são
 transferidos para um diretório privado novo `/tmp/h3-trash-*`, com registro da
 operação. Referências compartilhadas, assets versionados, dados legados e arquivos
@@ -77,6 +132,10 @@ recria vídeos nem libera IDs já utilizados.
 retorna à tela de todos os blocos pelo **Voltar**. Rascunhos e pedidos em andamento
 ou incertos mantêm seus registros e bloqueios ao navegar.
 
+O gesto de voltar começa na borda esquerda e segue para a direita, usando a mesma
+navegação do botão. Rolagem vertical, múltiplos toques, gesto cancelado e interação
+com campos, vídeos, controles ou a linha de continuidade não acionam essa navegação.
+
 Ao selecionar um ancestral na linha de continuidade, a sequência já aberta mantém
 seu último bloco explícito: abrir o bloco 12 e selecionar o 7 mantém os doze cartões
 visíveis. Esse contexto visual não substitui a cadeia real da seleção: continuar e
@@ -88,12 +147,21 @@ ou resultado mais recente.
 
 - Até50blocos por documento; listagem até1000roteiros; metadata porarquivo≤1MiB inclusive histórico. Rejeitar excesso, não descartar história.
 - Proposta macro raw≤512KiB e candidato completo≤1MiB. JSON estrito, número de blocos exato; sem interpretar Markdown/HTML, clamp ou seed/ID arbitrário do provider.
-- Ação/instrução até12000caracteres; contexto do enhancer inteiro respeita o mesmo limite. Erro preserva texto, sem truncamento silencioso.
-- Original de roteiro usa o contexto compatível com editor: JPEG/PNG próprio até20MiB/16MP. WebP nativo avulso permanece conforme contrato anterior.
+- Ação/instrução até12000caracteres; contexto manual até12000 e contexto integral do lote até100000. Erro preserva texto, sem truncamento silencioso.
+- Original de roteiro usa o contexto compatível com editor: JPEG/PNG próprio até20MiB/16MP. WebP nativo Freestyle permanece conforme contrato anterior.
 - Duração porbloco requested(0,10], até2casas,24fps/5+17k/Pythonhalf-even. Default8s→192frames/8s; benchmark2.3→56frames/2.333s permanece congelado. Tail3/audioTrue independentes. Não certifica qualidade, VRAM/RAM ou geração longa real.
 - RAM continua apenas telemetria. Nenhuma admissão/cancelamento por RAM livre, nenhum controle de cache/processo/lifecycle do ComfyUI/script do dono.
 
 ## Validação e evidência
+
+Atualização de lote, Freestyle e parada em 2026-10-13: **924 testes Python**
+fake/CPU e **209 testes Node** passaram; Ruff e whitespace check aprovados.
+Inclui melhoria Grok obrigatória por bloco, ausência de fallback/replay, descoberta
+passiva do lote, conversão com provas de mídia, navegação e gesto de retorno,
+confirmação inline e cancelamento com publicação em disco concluída antes de liberar
+o slot. Logs locais em `.dumps/tasks/freestyle-batch-pytest.txt` e
+`freestyle-batch-node-tests.txt`. Não houve chamada real ao provider/GPU,
+início/reinício do servidor de produção ou nova captura visual no navegador.
 
 Atualização de biblioteca, prompts e navegação em 2026-10-13: **889 testes Python**
 fake/CPU e **185 testes Node** passaram; Ruff e whitespace check aprovados. Inclui
@@ -110,7 +178,7 @@ inclui nova captura visual em navegador; a evidência mobile abaixo é históric
 Validação concluída sem iniciar APIreal H3, provider ou GPU:
 
 - **859 testes pytest** fake/CPU, cache-free; Ruff aprovado. Inclui persistência, ownership, prefixo congelado, admissão com UUID/prova de identidade e contratos da ponte. Uma advertência de depreciação existente do Starlette permanece.
-- **171 testes Node puros**:43 do front nativo,84 de retry e44 de roteiro. Incluem todos os4xx de roteiro bloqueados até GET próprio e preservação do comportamento avulso.
+- **171 testes Node puros**:43 do front nativo,84 de retry e44 de roteiro. Incluem todos os4xx de roteiro bloqueados até GET próprio e preservação do comportamento Freestyle.
 - **Browser nativo**, Chromium headless,393×852/DPR2/mobile/touch, pt-BR, tema escuro. Navegação normal e reduced-motion, rolagem touch e viewport320px; bancada sem overflow horizontal, CTA de geração48px. Isso é emulação, não teste de aparelho físico ou de teclado/picker do sistema.
 - Fixture HTTP loopback independente, com buffers web congelados porSHA e mídia existente em allowlist; nenhuma importação/inicialização do produto. A rodada final usou `app.js` SHA`b688d3bc2f5efb24ce40cfc9375aa6b4d196d0d1a6d1e116577b882d90f94da2`.
 - Rodada final: macro preenchido/adotado → raiz aceita →409 de continuação bloqueado →GET/reload/preparação sem reenviar →novoUUID com snapshot idêntico e mesmo pai, semPUT do prefixo →aceitação →terceiro bloco com8.1s/seed0 →montagem explícita da cadeia aceita. Foram4 intenções/3 esperas próprias; uma intenção foi recusada semRun. Salvar sistema do roteirista enviou somente`system_prompt`, semPUT do enhancer.

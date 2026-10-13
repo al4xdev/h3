@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {branchEndForSelection, validateBranchSequence, storyReviewOrigin, nativeExecutionBlocked, ownedIntentMatchingCurrent, readOwnedStoryIntent, rejectedStoryDraft, standaloneLocation, storyLocation, storyPointer, storyUpdate, storyBlockState, storyContext, createStoryClient, HTTPError} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {savedEditorMatches, editorPayload, relevantChange, batchDraftsClean, batchPointer, remainingStoryBlocks, verifiedBatch, freestyleConversionEnd, createBackSwipe, canonicalUUID, branchEndForSelection, validateBranchSequence, storyReviewOrigin, nativeExecutionBlocked, ownedIntentMatchingCurrent, readOwnedStoryIntent, rejectedStoryDraft, standaloneLocation, storyLocation, storyPointer, storyUpdate, storyBlockState, storyContext, createStoryClient, HTTPError} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const id = '11111111-1111-4111-8111-111111111111', block = '22222222-2222-4222-8222-222222222222', intent = '33333333-3333-4333-8333-333333333333';
 const fixture = () => ({id, revision: 2, name: '<img onerror=evil()>', idea: 'Macro', reference: {source_root: 'inputs', path: 'own/original.png'}, reference_sha256: 'a'.repeat(64), adopted: true, blocks: [{id: block, action: 'Dance', prompt: ' exact FINAL\n', duration_seconds: 8, seed: 42}], attempts: []});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
@@ -193,7 +193,7 @@ function deletionFixture() {
   const calls = [], messages = [], buttons = [{disabled: true}];
   let confirm = true, gate = Promise.resolve();
   const remove = async (...args) => { calls.push(args); await gate; };
-  const deps = {state, story, document: {defaultView: {confirm: () => confirm}, querySelectorAll: () => buttons}, stories: {remove}, client: {remove}, renderLibrary() {}, storyURL() {}, renderRun() {}, storyLibrary: async () => {}, loadLibrary: async () => {}, navigate: screen => { state.screen = screen; }, message: (...args) => messages.push(args)};
+  const deps = {state, story, batchBlocked: () => false, document: {defaultView: {confirm: () => confirm}, querySelectorAll: () => buttons}, stories: {remove}, client: {remove}, renderLibrary() {}, storyURL() {}, renderRun() {}, storyLibrary: async () => {}, loadLibrary: async () => {}, navigate: screen => { state.screen = screen; }, message: (...args) => messages.push(args)};
   const invoke = new Function(...Object.keys(deps), `let deleting = false, libraryEpoch = 0; const removedStories = new Set(), removedRuns = new Set(); ${handler}; return removeLibraryItem;`)(...Object.values(deps));
   return {state, story, calls, buttons, messages, invoke, cancel: () => { confirm = false; }, wait: promise => { gate = promise; }};
 }
@@ -315,4 +315,152 @@ test('actual restore preserves unrelated draft when deleted selection was incide
   const restore = new Function(...Object.keys(deps), `${handler}; return restoreView;`)(...Object.values(deps));
   await restore({screen: 'context', mode: 'new', draftKey: 'isolated-own-draft', parent: null, selectedId: id, statusOnly: false, scroll: 0}, []);
   assert.deepEqual(calls, []); assert.equal(state.screen, 'context'); assert.equal(state.draftKey, 'isolated-own-draft'); assert.equal(state.uncertain, true); assert.equal(state.pendingRun.id, block);
+});
+test('batch eligibility requires adopted accepted prefix and a never-attempted suffix', () => {
+  const doc = fixture(); assert.equal(remainingStoryBlocks(doc).length, 1);
+  doc.adopted = false; assert.deepEqual(remainingStoryBlocks(doc), []); doc.adopted = true;
+  doc.attempts.push({block_id: block, run: {state: 'ready_for_review'}}); assert.deepEqual(remainingStoryBlocks(doc), []);
+  doc.attempts[0].run.state = 'interrupted'; assert.deepEqual(remainingStoryBlocks(doc), []);
+  doc.attempts[0].run = {state: 'accepted', output: {path: 'own'}}; doc.blocks.push({...doc.blocks[0], id: intent}); assert.deepEqual(remainingStoryBlocks(doc).map(item => item.id), [intent]);
+  doc.attempts.push({block_id: intent, state: 'uncertain'}); assert.deepEqual(remainingStoryBlocks(doc), []);
+});
+test('own batch pointer/client submit once and recover by GET only', async () => {
+  assert.deepEqual(batchPointer(`http://local/?batch=${intent}&batch_roteiro=${id}`), {id: intent, roteiro: id});
+  assert.throws(() => batchPointer(`http://local/?batch=${intent}`));
+  const calls = [], api = createStoryClient(async (url, options) => { calls.push({url, options}); return response({id: intent}, options.method === 'POST' ? 202 : 200); });
+  await api.startBatch(id, intent, 2); await assert.rejects(api.startBatch(id, intent, 2)); await api.readBatch(id, intent);
+  assert.deepEqual(calls.map(call => call.options.method), ['POST', 'GET']); assert.deepEqual(JSON.parse(calls[0].options.body), {expected_revision: 2, auto_accept_intermediate: true, enhance_with_grok: true});
+  const value = {id: intent, roteiro_id: id, source_revision: 2, enhance_with_grok: true, expected_current_revision: 2, enhancement_ids: [], phase: null, stop_requested: false, state: 'active', blocks: [block], completed_block_ids: []}; assert.equal(verifiedBatch(value, {id: intent, roteiro: id}), value); assert.throws(() => verifiedBatch({...value, id: block}, {id: intent, roteiro: id}));
+});
+test('conversion chooses full explicit block12 even selected block7 and POSTs own known roteiro once', async () => {
+  assert.equal(freestyleConversionEnd(branchIds[11], branchFixture(), branchIds[6]), branchIds[11]); assert.throws(() => freestyleConversionEnd(null, branchFixture(), branchIds[6])); assert.throws(() => freestyleConversionEnd(branchIds[11], null, branchIds[6]));
+  const calls = [], api = createStoryClient(async (url, options) => { calls.push({url, options}); return response({id}, 201); });
+  await api.convertFreestyle(branchIds[11], id); await assert.rejects(api.convertFreestyle(branchIds[11], id));
+  assert.equal(calls[0].url, `/roteiros/from-freestyle/${branchIds[11]}`); assert.deepEqual(JSON.parse(calls[0].options.body), {roteiro_id: id});
+});
+test('Freestyle labels and batch option below planned blocks, conversion inside Operações', async () => {
+  const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /Blocos avulsos|Ficha do bloco|>Novo bloco</);
+  assert.match(html, /<h3>Freestyle<\/h3>/); assert.ok(html.indexOf('id="story-batch"') > html.indexOf('id="story-blocks"'));
+  const operations = html.slice(html.indexOf('<summary>Operações</summary>'), html.indexOf('</details>', html.indexOf('<summary>Operações</summary>')));
+  assert.match(operations, /id="open-assembly"/); assert.match(operations, /id="convert-story"/);
+});
+function swipeFixture() {
+  const handlers = new Map(), options = [], calls = []; let epoch = 0, enabled = true;
+  const document = {addEventListener: (name, fn, opts) => { handlers.set(name, fn); options.push(opts); }, removeEventListener: name => handlers.delete(name)};
+  const swipe = createBackSwipe(document, {back: () => calls.push('back'), canGoBack: () => enabled, navigationEpoch: () => epoch});
+  const event = (x, y, extra = {}) => ({pointerType: 'touch', pointerId: 1, isPrimary: true, clientX: x, clientY: y, target: {closest: () => false}, preventDefault() { throw new Error('Native gesture must not be blocked'); }, ...extra});
+  return {handlers, calls, options, swipe, event, advance: () => epoch++, root: () => { enabled = false; }};
+}
+test('edge swipe triggers same Back only for intentional horizontal touch and passive native events', () => {
+  const f = swipeFixture(); f.handlers.get('pointerdown')(f.event(12, 100)); f.handlers.get('pointermove')(f.event(70, 102)); f.handlers.get('pointerup')(f.event(110, 106)); assert.deepEqual(f.calls, ['back']); assert.ok(f.options.every(option => option.passive));
+  for (const scenario of ['vertical', 'cancel', 'navigation', 'two-fingers', 'native', 'root', 'middle']) {
+    const s = swipeFixture(); if (scenario === 'root') s.root(); s.handlers.get('pointerdown')(s.event(scenario === 'middle' ? 80 : 12, 100, scenario === 'native' ? {target: {closest: () => true}} : {}));
+    if (scenario === 'vertical') s.handlers.get('pointermove')(s.event(18, 140));
+    if (scenario === 'cancel') s.handlers.get('pointercancel')();
+    if (scenario === 'navigation') s.advance();
+    if (scenario === 'two-fingers') s.handlers.get('pointerdown')(s.event(12, 100, {pointerId: 2, isPrimary: false}));
+    s.handlers.get('pointerup')(s.event(115, 102)); assert.equal(s.calls.length, 0, scenario);
+    s.swipe.destroy(); assert.equal(s.handlers.size, 0);
+  }
+});
+function navigationHistoryFixture() {
+  const record = source.slice(source.indexOf('  function recordView('), source.indexOf('  function navigate('));
+  const navigate = source.slice(source.indexOf('  function navigate('), source.indexOf('  async function restoreView('));
+  const restore = source.slice(source.indexOf('  async function restoreView('), source.indexOf('  function back('));
+  const back = source.slice(source.indexOf('  function back('), source.indexOf('  function goHome('));
+  const pop = source.slice(source.indexOf("addEventListener('popstate', event => {") + "addEventListener('popstate', ".length, source.indexOf("  if (document.defaultView?.history) document.defaultView.history.scrollRestoration"));
+  const popFunction = pop.slice(0, pop.lastIndexOf(');')).trim();
+  const state = {screen: 'library', trail: [], mode: 'new', draftKey: 'own', selected: null, navigationEpoch: 0, retryEpoch: 0, config: {}, uncertain: true, pendingRun: {id: intent}, openedBranchEnd: null}, story = {doc: null, block: null, intent: null, editing: null};
+  const entries = []; let cursor = -1, popstate;
+  const location = {href: 'http://local/'};
+  const history = {state: null, pushState(value, unused, url) { entries.splice(cursor + 1); entries.push({value, url}); cursor++; this.state = value; location.href = new URL(url, location.href).href; }, replaceState(value, unused, url) { if (cursor < 0) { entries.push({value, url}); cursor = 0; } else entries[cursor] = {value, url}; this.state = value; location.href = new URL(url, location.href).href; }, back() { if (cursor > 0) { cursor--; this.state = entries[cursor].value; location.href = new URL(entries[cursor].url, location.href).href; popstate({state: this.state}); } }, forward() { if (cursor + 1 < entries.length) { cursor++; this.state = entries[cursor].value; popstate({state: this.state}); } }};
+  const node = {disabled: false, closest: () => null, matches: () => false, focus() {}};
+  const deps = {state, story, document: {defaultView: {history, location, scrollTo() {}}}, removedStories: new Set(), removedRuns: new Set(), TITLES: {library: 'Library', story: 'Story', generation: 'Generation', review: 'Review', settings: 'Settings'}, storyReviewOrigin, saveDraft() {}, restoreDraft() {}, draft: () => ({submitted: true}), paintScreen() {}, controls() {}, $: () => node, message() {}, stopped: false, select: async selectedId => { state.selected = {id: selectedId}; }, viewSnapshot: () => ({screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: null, statusOnly: false, storyDoc: story.doc, storyBlock: story.block, selectedId: state.selected?.id || null, branchEnd: null, scroll: 0})};
+  const runtime = new Function(...Object.keys(deps), `const historyViews = new Map(); let historyToken = 0, historySerial = 0; ${record}${navigate}${restore}${back} const popstate = ${popFunction}; recordView(); return {navigate, back, popstate};`)(...Object.values(deps));
+  popstate = runtime.popstate;
+  return {state, story, history, entries, ...runtime};
+}
+test('real navigation record/popstate preserves library→roteiro→block→Back→roteiro→Back→library', async () => {
+  const f = navigationHistoryFixture(); f.story.doc = {...fixture(), attempts: [{run_id: id}]}; f.navigate('story'); const origin = {screen: 'story', storyDoc: f.story.doc, selectedId: null, mode: 'new', draftKey: 'own'}; f.story.block = block; f.state.selected = {id}; f.navigate('review', {origin});
+  f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'story'); assert.equal(f.story.doc.id, id); assert.equal(f.state.uncertain, true); assert.equal(f.state.pendingRun.id, intent);
+  f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'library'); f.history.forward(); await Promise.resolve(); assert.equal(f.state.screen, 'story'); f.history.forward(); await Promise.resolve(); assert.equal(f.state.screen, 'review');
+});
+test('real history generated review and settings Back each restore exactly one intended screen', async () => {
+  const f = navigationHistoryFixture(); f.story.doc = {...fixture(), attempts: [{run_id: id}]}; f.navigate('story'); f.navigate('generation'); f.story.block = block; f.state.selected = {id}; f.navigate('review'); assert.equal(f.entries.length, 3);
+  f.navigate('settings'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'review'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'story'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'library');
+});
+test('actual batch submission retains own uncertain ID and recovery never repeats POST', async () => {
+  const start = source.slice(source.indexOf('  async function startBatch()'), source.indexOf('  function retryBlocked('));
+  const read = source.slice(source.indexOf('  async function readBatch()'), source.indexOf('  async function startBatch()'));
+  const state = {editorReady: true, editorSnapshot: {system_prompt: 'editor', model: 'fixed'}, drafts: new Map(), batchEpoch: 0, batchOwner: null, batchUncertain: false, batchReading: false, batchRecord: null}, story = {doc: fixture(), editing: null, candidate: null}, calls = [], counts = {uuid: 0};
+  const record = {id: intent, roteiro_id: id, source_revision: 2, enhance_with_grok: true, expected_current_revision: 2, enhancement_ids: [], phase: null, stop_requested: false, state: 'active', blocks: [story.doc.blocks[0]], completed_block_ids: [], current_block_id: block, current_run_id: intent};
+  const deps = {state, story, $: node => ({disabled: false, value: node === 'story-name' ? story.doc.name : node === 'grok-system' ? 'editor' : node === 'grok-model' ? 'fixed' : ''}), savedEditorMatches, batchDraftsClean, retryBlocked: () => state.batchUncertain || state.batchRecord?.state === 'active', remainingStoryBlocks, verifiedBatch, document: {defaultView: {confirm: () => true, crypto: {}}}, newAssemblyUUID: () => { counts.uuid++; return intent; }, batchURL() {}, saveDraft() {}, controls() {}, message() {}, stopped: false, renderStory() {}, stories: {startBatch: async (...args) => { calls.push(['POST', ...args]); throw new Error('connection lost'); }, readBatch: async (...args) => { calls.push(['GET', ...args]); return record; }, read: async () => story.doc}};
+  const runtime = new Function(...Object.keys(deps), `${start}${read}; return {startBatch, readBatch};`)(...Object.values(deps));
+  await runtime.startBatch(); assert.equal(state.batchOwner.id, intent); assert.equal(state.batchUncertain, true); await runtime.startBatch(); assert.equal(counts.uuid, 1); assert.equal(calls.length, 1);
+  await runtime.readBatch(); assert.deepEqual(calls.map(call => call[0]), ['POST', 'GET']); assert.equal(state.batchRecord.state, 'active'); assert.equal(state.batchUncertain, false); await runtime.startBatch(); assert.equal(calls.length, 2);
+});
+test('actual conversion submission uses opened end and uncertain recovery reads known UUID only', async () => {
+  const convert = source.slice(source.indexOf('  async function convertFreestyle()'), source.indexOf('  function batchBlocked()'));
+  const read = source.slice(source.indexOf('  async function readConversion()'), source.indexOf('  async function convertFreestyle()'));
+  const state = {selected: {id: branchIds[6]}, openedBranchEnd: branchIds[11], branchSequence: branchFixture(), conversionBusy: false, conversionUncertain: false, navigationEpoch: 0}, calls = [], counts = {uuid: 0};
+  const deps = {state, $: () => ({disabled: false}), batchBlocked: () => false, freestyleConversionEnd, document: {defaultView: {confirm: () => true, crypto: {}}}, newAssemblyUUID: () => { counts.uuid++; return id; }, conversionURL() {}, saveDraft() {}, controls() {}, message() {}, useConvertedStory: async (doc, expected) => { assert.equal(doc.id, expected); state.conversionUncertain = false; }, stories: {convertFreestyle: async (...args) => { calls.push(['POST', ...args]); throw new Error('response lost'); }, read: async known => { calls.push(['GET', known]); return fixture(); }}};
+  const runtime = new Function(...Object.keys(deps), `${convert}${read}; return {convertFreestyle, readConversion};`)(...Object.values(deps));
+  await runtime.convertFreestyle(); assert.deepEqual(calls, [['POST', branchIds[11], id]]); assert.equal(state.conversionUncertain, true); await runtime.convertFreestyle(); assert.equal(counts.uuid, 1); await runtime.readConversion(); assert.deepEqual(calls[1], ['GET', id]); assert.equal(state.selected.id, branchIds[6]);
+});
+test('batch never ignores unsaved per-block prompts and ignores unrelated Freestyle drafts', () => {
+  const doc = fixture(), drafts = new Map([['new', {chosenPrompt: 'unrelated'}]]); assert.equal(batchDraftsClean(doc, drafts), true);
+  drafts.set(`story:${id}:${block}`, {submitted: false, chosenPrompt: doc.blocks[0].prompt, idea: doc.blocks[0].action, seed: '42', duration: '8'}); assert.equal(batchDraftsClean(doc, drafts), true);
+  drafts.get(`story:${id}:${block}`).chosenPrompt = 'custom English prompt pending'; assert.equal(batchDraftsClean(doc, drafts), false);
+});
+function stopFixture(batch = null) {
+  const handler = source.slice(source.indexOf('  async function stopOwned('), source.indexOf('  async function loadStopViews('));
+  const run = {id, state: 'running'}, state = {pendingRun: run, items: [run], selected: {id: block}, globalBatchRecord: batch, batchRecord: batch, batchOwner: batch ? {id: batch.id, roteiro: batch.roteiro_id} : null, uncertain: false, stopBusy: false, stopUncertain: false}, calls = [];
+  const deps = {state, canonicalUUID, verifiedBatch, submittedStops: new Set(), stopURL() {}, controls() {}, renderRun() {}, message() {}, stopViews: {}, client: {stopRun: async ident => { calls.push(['run', ident]); return {id: ident, state: 'interrupted'}; }}, stories: {stopBatch: async (doc, ident) => { calls.push(['batch', doc, ident]); return {...batch, state: 'stopped'}; }}};
+  const stop = new Function(...Object.keys(deps), `${handler}; return stopOwned;`)(...Object.values(deps));
+  return {state, calls, stop, client: deps.client};
+}
+test('actual card STOP targets own confirmed run once without touching newer selection', async () => {
+  const f = stopFixture(); await f.stop('run'); await f.stop('run'); assert.deepEqual(f.calls, [['run', id]]); assert.equal(f.state.pendingRun.state, 'interrupted'); assert.equal(f.state.selected.id, block); assert.equal(f.state.stopUncertain, false);
+  const uncertain = stopFixture(); uncertain.state.uncertain = true; await uncertain.stop('run'); assert.equal(uncertain.calls.length, 0);
+  const failed = stopFixture(); failed.client.stopRun = async ident => { failed.calls.push(['run', ident]); throw new Error('response lost'); }; await failed.stop('run'); await failed.stop('run'); assert.equal(failed.calls.length, 1); assert.equal(failed.state.stopUncertain, true); assert.equal(failed.state.pendingRun.state, 'running'); assert.equal(failed.state.stopOwner.id, id);
+});
+test('STOP on current batch child routes to exact whole batch, never native child endpoint', async () => {
+  const batch = {id: intent, roteiro_id: block, source_revision: 2, enhance_with_grok: true, expected_current_revision: 3, enhancement_ids: [], phase: 'generating', stop_requested: false, state: 'active', blocks: [], completed_block_ids: [], current_run_id: id};
+  const f = stopFixture(batch); await f.stop('run'); assert.deepEqual(f.calls, [['batch', block, intent]]); assert.equal(f.state.batchRecord.state, 'stopped'); assert.equal(f.state.globalBatchRecord.state, 'stopped'); assert.equal(f.state.pendingRun.state, 'running');
+});
+test('actual discovery gates unknown global execution then binds confirmed external batch without POST', async () => {
+  const handler = source.slice(source.indexOf('  async function discoverBatch()'), source.indexOf('  function batchURL()'));
+  const record = {id: intent, roteiro_id: id, source_revision: 2, enhance_with_grok: true, expected_current_revision: 2, enhancement_ids: [], phase: 'improving', stop_requested: false, state: 'active', blocks: [], completed_block_ids: []};
+  const state = {batchDiscoveryEpoch: 0, batchDiscoveryUncertain: true, batchOwner: null}, calls = [];
+  const deps = {state, client: {get: async path => { calls.push(path); return {batch: record}; }}, verifiedBatch, canonicalUUID, stopped: false, batchURL() {}, controls() {}, message() {}};
+  const discover = new Function(...Object.keys(deps), `${handler}; return discoverBatch;`)(...Object.values(deps));
+  await discover(); assert.deepEqual(calls, ['/roteiro-batches/current']); assert.equal(state.batchDiscoveryUncertain, false); assert.equal(state.globalBatchRecord.state, 'active'); assert.equal(state.batchOwner.id, intent);
+  assert.equal(nativeExecutionBlocked({config: {}, globalBatchRecord: record}), true); assert.equal(nativeExecutionBlocked({config: {}, batchDiscoveryUncertain: true}), true);
+});
+
+test('new public roteiro and batch container hints trigger only metadata invalidation', () => {
+  for (const path of ['.data/roteiros', `.data/roteiros/${id}`, '.data/roteiro-batches', `.data/roteiro-batches/${intent}.json`, '.data/roteiro-batches/active.json']) assert.equal(relevantChange({invalidation: true, path}), true, path);
+  for (const path of ['.data/roteiros/.locks', '.data/roteiros/private', '.data/roteiro-batches/private/.part', '.data/roteiro-batches/active.json.part']) assert.equal(relevantChange({invalidation: true, path}), false, path);
+  const listener = source.slice(source.indexOf('const change = event =>'), source.indexOf("events.addEventListener('change'"));
+  assert.match(listener, /queueRefresh\(\)/); assert.doesNotMatch(listener, /startBatch|generate|proposal|POST/);
+});
+
+test('actual STOP callback reports no request for blocked or changed sources and returns domain status for attempts', async () => {
+  const inactive = stopFixture(); inactive.state.pendingRun.state = 'ready_for_review'; const noOp = await inactive.stop('run'); assert.equal(noOp.requested, false); assert.match(noOp.status, /ativa confirmada/); assert.equal(inactive.calls.length, 0);
+  const busy = stopFixture(); busy.state.stopUncertain = true; const blocked = await busy.stop('run'); assert.equal(blocked.requested, false); assert.match(blocked.status, /anterior/); assert.equal(busy.calls.length, 0);
+  const unknown = stopFixture(); assert.equal((await unknown.stop('unknown')).requested, false); assert.equal(unknown.calls.length, 0);
+  const success = stopFixture(); assert.deepEqual(await success.stop('run'), {requested: true, status: 'Parada confirmada no PC.'});
+  const lost = stopFixture(); lost.client.stopRun = async () => { throw new Error('response lost'); }; const result = await lost.stop('run'); assert.equal(result.requested, true); assert.match(result.status, /não confirmada/); assert.equal(lost.state.stopUncertain, true);
+});
+
+test('batch requires exact saved Grok instructions while explicit Save updates snapshot without changing manual draft text', async () => {
+  const saved = {system_prompt: 'Exact English system\n', model: 'fixed'}, current = {...saved}; assert.equal(savedEditorMatches(saved, current), true);
+  current.system_prompt = 'Unsaved custom English instructions'; assert.equal(savedEditorMatches(saved, current), false); assert.equal(savedEditorMatches(saved, saved, true), false);
+  const handler = source.slice(source.indexOf('  async function saveEditor()'), source.indexOf('  async function detailScene()'));
+  const state = {editorReady: true, editorSaving: false, editorSnapshot: saved}, calls = [];
+  const deps = {state, editorPayload, editorDraft: () => current, client: {saveEditor: async payload => { calls.push(payload); return {...payload}; }}, controls() {}, message() {}};
+  const save = new Function(...Object.keys(deps), `${handler}; return saveEditor;`)(...Object.values(deps));
+  assert.equal(calls.length, 0); await save(); assert.equal(calls.length, 1); assert.deepEqual(state.editorSnapshot, current); assert.equal(savedEditorMatches(state.editorSnapshot, current, state.editorSaving), true); assert.equal(current.system_prompt, 'Unsaved custom English instructions');
+  const nativeDrafts = new Map([['new', {chosenPrompt: 'unrelated Freestyle draft'}]]); assert.equal(batchDraftsClean(fixture(), nativeDrafts), true);
 });

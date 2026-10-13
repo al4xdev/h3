@@ -189,7 +189,7 @@ certificação científica de visão ou aderência completa da proposta.
 
 ## Provider e autenticação permanecem separados
 
-Somente a ação explícita de editar usa `https://api.x.ai/v1/responses`, após validar
+As ações explícitas de editar ou autorizar um lote usam `https://api.x.ai/v1/responses`, após validar
 modelo no catálogo do grant pelo adaptador OAuth existente (cache curto pode evitar
 GET remoto; renovação pode acontecer nesse clique). Não há atividade remota em
 import/startup/GET/config save/upload/SSE/reload. Mantém `store=false`, `stream=false`,
@@ -197,6 +197,15 @@ import/startup/GET/config save/upload/SSE/reload. Mantém `store=false`, `stream
 inferência, fallback de endpoint/API key, histórico ou parâmetros de reasoning.
 Erro é sanitizado e mantém rascunho; não repetir resultado incerto às cegas.
 As rotas retornam `Cache-Control: no-store`.
+
+No lote de roteiro, a autorização inclui o detalhamento de cada bloco antes da
+geração. O orquestrador usa este mesmo editor sequencial, com 12000 tokens de saída,
+identidade original e frame real do pai aceito. Congela system/model, registra intenção
+antes de cada chamada e salva o texto efetivamente usado. O contexto integral do lote
+aceita até 100000 caracteres pelo limite local da aplicação; a saída da cena continua
+limitada a 12000 caracteres. Resultado inválido/incerto interrompe o lote, sem usar
+o prompt-base como fallback nem repetir inferência. Uma autorização anterior de teste
+não inicia esse fluxo: o lote depende do novo clique explícito e confirmação na UI.
 
 O OAuth foi portado do Alex Tavern, independente do editor. Credenciais ficam em
 `.data/grok/oauth.json`, 0600/diretório 0700 e plaintext local: proteja computador e

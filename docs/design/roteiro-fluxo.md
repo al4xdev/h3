@@ -33,7 +33,7 @@ O roteiro é o plano. O Run continua sendo uma tentativa real. Não gerar todos 
 
 ```text
 T00 Biblioteca
- ├─ Novo bloco → fluxo avulso existente
+ ├─ Novo freestyle → fluxo Freestyle existente
  └─ Novo roteiro → T01 referência + intenção
                       ↓ propor explicitamente ou escrever manualmente
 T02 Roteiro

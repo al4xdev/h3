@@ -114,8 +114,10 @@ class FileWatcher:
     def _allowed_directory(self, path: Path) -> bool:
         parts = path.relative_to(self.data).parts
         if len(parts) == 1:
-            return parts[0] in {"runs", "inputs", "assemblies"}
+            return parts[0] in {"runs", "inputs", "assemblies", "roteiros", "roteiro-batches"}
         if parts[0] == "runs":
+            return len(parts) == 2 and self._uuid(parts[1])
+        if parts[0] == "roteiros":
             return len(parts) == 2 and self._uuid(parts[1])
         # Match accepted category-relative reference lengths, not an arbitrary nesting depth.
         # The fixed roots and global watch budget still bound this single technical observer.
@@ -166,7 +168,9 @@ class FileWatcher:
                     if directory is None or not name or name.startswith(".") or "/" in name:
                         continue
                     path = directory / name
-                    if path.relative_to(self.data).parts[0] not in {"runs", "inputs", "assemblies"}:
+                    if path.relative_to(self.data).parts[0] not in {
+                        "runs", "inputs", "assemblies", "roteiros", "roteiro-batches",
+                    }:
                         continue
                     self._emit(path.relative_to(self.root).as_posix())
                     if mask & ISDIR:

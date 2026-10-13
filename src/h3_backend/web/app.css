@@ -55,3 +55,5 @@ html{scroll-padding-top:100px}button{min-width:44px;min-height:44px}.topbar{posi
 .library-item{display:flex;flex-direction:column;gap:8px;min-width:0}.library-item .clip-card{width:100%}.delete-item{align-self:flex-start;color:var(--error)}.settings-section>summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
 
 .studio-home{min-height:44px;min-width:44px;padding:0 8px;background:transparent;border-color:transparent;text-align:left;color:var(--muted)}.studio-home:hover:not(:disabled){color:var(--copper);background:transparent;border-color:transparent}
+
+.pending-card{min-width:0;min-height:64px;margin:12px 0;border:1px solid var(--line);border-left:3px solid var(--copper);padding:12px;background:var(--black);overflow-wrap:anywhere}.pending-card .pending-tile{border:0;margin:0;padding:8px;background:transparent}.pending-card .operation{margin:0 0 8px}.pending-card[hidden]{display:none}

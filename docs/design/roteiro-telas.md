@@ -53,7 +53,7 @@ São **oito telas**, contando Biblioteca e Ajustes. Proposta/edição são estad
 │ Seus vídeos                         │
 │                                     │
 │ [ Novo roteiro ]                    │
-│ [ Novo bloco ]                      │
+│ [ Novo freestyle ]                      │
 │                                     │
 │ Roteiros                            │
 │ ┌─────────────────────────────────┐ │
@@ -63,7 +63,7 @@ São **oito telas**, contando Biblioteca e Ajustes. Proposta/edição são estad
 │ │ [ Abrir roteiro ]              │ │
 │ └─────────────────────────────────┘ │
 │                                     │
-│ Blocos avulsos                      │
+│ Freestyle                      │
 │ ┌─────────────────────────────────┐ │
 │ │ Ela gira e olha para a câmera.  │ │
 │ │ Pronto para revisão            │ │
@@ -72,7 +72,7 @@ São **oito telas**, contando Biblioteca e Ajustes. Proposta/edição são estad
 └─────────────────────────────────────┘
 ```
 
-- Novo roteiro →T01. Novo bloco →fluxo atual, sem roteiro obrigatório.
+- Novo roteiro →T01. Novo freestyle →fluxo atual, sem roteiro obrigatório.
 - Abrir roteiro →T02. Abrir bloco →revisão atual.
 - Vazio: **“Seu primeiro roteiro começa com uma ideia.”** / **“Nenhum bloco avulso ainda.”**
 - Loading: **“Lendo seus vídeos no PC…”** Erro: **“Não foi possível ler a biblioteca.”** +`Reler biblioteca`.

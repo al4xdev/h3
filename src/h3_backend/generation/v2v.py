@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request
 
-from ..infrastructure.media import sha256_file
+from ..infrastructure.media import await_thread, sha256_file
 from ..infrastructure.store import Store, contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
 from .models import CONTINUATION_PROMPT, ContinueRequest, ImageReference, Run
@@ -369,7 +369,7 @@ class V2VPipe:
         info = await service.media.probe(source)
         verify_video(info, service.frames_for_duration(run.duration_seconds))
         destination = contained(service.store.directory(run.id), "chunk.mp4")
-        await asyncio.to_thread(publish, source, destination)
+        await await_thread(publish, source, destination)
         service.store.update(
             run.id,
             state="ready_for_review",

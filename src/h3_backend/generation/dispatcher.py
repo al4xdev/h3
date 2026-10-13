@@ -126,6 +126,8 @@ class RunService:
         self._lock = asyncio.Lock()
         self._active: str | None = None
         self._task: asyncio.Task | None = None
+        self._stop_requested: set[str] = set()
+        self._stop_tasks: set[asyncio.Task] = set()
         self._cpu_active: str | None = None
         self._cpu_task: asyncio.Task | None = None
         self._closing = False
@@ -191,6 +193,8 @@ class RunService:
         if self._cpu_task and not self._cpu_task.done():
             self._cpu_task.cancel()
             await asyncio.gather(self._cpu_task, return_exceptions=True)
+        if self._stop_tasks:
+            await asyncio.gather(*self._stop_tasks, return_exceptions=True)
         if self._task and not self._task.done():
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -219,6 +223,44 @@ class RunService:
                     raise  # A disconnected HTTP waiter must not cancel the execution task.
         return self.store.get(run_id)
 
+    async def stop_run(self, run_id: str) -> Run:
+        from ..roteiro_batch import assert_batch_available
+
+        async with self._lock:
+            if self._closing:
+                raise Conflict("Backend is shutting down; read this run instead")
+            assert_batch_available(self)
+            run = self.store.get(run_id)
+            if run.state not in {"queued", "running"}:
+                raise Conflict("Only an active own generation can be stopped")
+            task = self._task
+            if run_id in self._stop_requested:
+                raise Conflict("Stop already requested; read this run instead of repeating")
+            if self._active != run_id or task is None or task.done():
+                raise Conflict("This backend does not own an active task for this run")
+            self._stop_requested.add(run_id)
+            task.cancel()
+            stopping = asyncio.create_task(self._finish_stop(run_id, task), name=f"h3-stop-{run_id}")
+            self._stop_tasks.add(stopping)
+            stopping.add_done_callback(self._stop_tasks.discard)
+            stopping.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(stopping)
+
+    async def _finish_stop(self, run_id: str, task: asyncio.Task) -> Run:
+        try:
+            await asyncio.gather(task, return_exceptions=True)
+            async with self._lock:
+                current = self.store.get(run_id)
+                if current.state in {"queued", "running"}:
+                    current = self.store.update(
+                        run_id, state="interrupted", error="User requested stop; no automatic resume",
+                    )
+                if self._active == run_id:
+                    self._active = None
+                return current
+        finally:
+            self._stop_requested.discard(run_id)
+
     def video_path(self, run_id: str) -> Path:
         run = self.store.get(run_id)
         if run.state not in {"ready_for_review", "accepted", "rejected"}:
@@ -234,8 +276,11 @@ class RunService:
     @asynccontextmanager
     async def cpu_slot(self, operation_id: str):
         """One assembly owns the same global budget; this is not another job dispatcher."""
+        from ..roteiro_batch import assert_batch_available
+
         owner = asyncio.current_task()
         async with self._lock:
+            assert_batch_available(self)
             if self._closing or self._active is not None or self._cpu_active is not None:
                 raise Conflict("Only one backend job may be active")
             self._cpu_active, self._cpu_task = operation_id, owner
@@ -247,7 +292,10 @@ class RunService:
                     self._cpu_active = self._cpu_task = None
 
     async def decide(self, run_id: str, accepted: bool) -> Run:
+        from ..roteiro_batch import assert_batch_available
+
         async with self._lock:
+            assert_batch_available(self)
             if self._cpu_active is not None:
                 raise Conflict("Review is frozen while an assembly owns the global slot")
             run = self.store.get(run_id)
@@ -280,7 +328,10 @@ class RunService:
         )
 
     async def submit(self, pipe) -> Run:
+        from ..roteiro_batch import assert_batch_available
+
         async with self._lock:
+            assert_batch_available(self)
             if pipe.dispatcher is not self:
                 raise ValueError("Pipeline belongs to another dispatcher")
             if pipe._sealed or pipe._submitting:
@@ -333,11 +384,14 @@ class RunService:
 
     async def _start_materialized(self, run_id: str) -> bool:
         """Called under the sole admission lock by HTTP's commit kick or filesystem hints."""
+        from ..roteiro_batch import assert_batch_available
+
         if self._active == run_id:
             return False
         current = self.store.get(run_id)
         if current.state != "queued":
             return False  # Terminal/interrupted records are never replayed, even on duplicate hints.
+        assert_batch_available(self)
         if (current.prompt_id is not None or current.progress or current.output or current.timings
                 or current.decision is not None or current.error is not None
                 or current.publication_mode is not None
@@ -368,7 +422,9 @@ class RunService:
         except asyncio.CancelledError:
             self.store.update(
                 run_id, state="interrupted",
-                error="Backend shutdown; own prompt cancellation requested",
+                error=("User requested stop; own prompt cancellation requested"
+                       if run_id in self._stop_requested else
+                       "Backend shutdown; own prompt cancellation requested"),
             )
             raise
         except Exception as exc:  # noqa: BLE001 - persist all worker/plugin failures at this boundary.
