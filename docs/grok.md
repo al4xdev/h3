@@ -12,8 +12,10 @@ uma ideia nova. Texto é não confiável: `.value`/`textContent`, não HTML.
 Pin aprovado: **`grok-4.20-0309-non-reasoning`**, sem alias `latest`.
 O [card oficial](https://docs.x.ai/developers/models/grok-4.20-non-reasoning.md)
 publica text+image → text, sem reasoning, contexto de 1 milhão de tokens.
-Isso **não comprova elegibilidade, visão, cota ou cobrança do grant da conta**;
-nesta implementação não houve inferência/autenticação/catálogo real.
+O card, isoladamente, **não comprova elegibilidade, visão, cota ou cobrança do grant**.
+A implementação foi inicialmente validada somente offline; uma validação real
+posterior, deliberada e autorizada no plano37, está registrada abaixo. Seu sucesso
+pontual não garante elegibilidade geral, cota futura ou condições de cobrança.
 
 - `.data/grok/editor.json`, sob `H3_PROJECT_ROOT`, guarda `{system_prompt,model}`.
   É separado de `oauth.json`; não coloque segredos nesses campos.
@@ -100,6 +102,73 @@ base64 incremental de blocos divisíveis por três. `Content-Length` inclui a ex
 `4*ceil(bytes/3)`; uma imagem de 20 MiB ocupa 27.962.028 bytes base64 mais o envelope.
 Não usa `read_bytes`, base64 completa ou `json=` com mídia inteira.
 
+## Continuação: identidade original + último frame real
+
+`POST /grok` aceita `continuation_parent_id` opcional, **string UUID canônica**, junto
+com a `reference` original obrigatória. Sem o campo, text-only e uma imagem mantêm
+seu contrato. Pai inválido não provoca fallback para uma imagem nem autenticação.
+
+```json
+{
+  "system_prompt": "Meu sistema customizado, sem alteração.",
+  "prompt": "ela vira de frente e mantém o vestido vermelho",
+  "reference": {"source_root": "assets", "path": "dance_reference.png"},
+  "continuation_parent_id": "00000000-0000-0000-0000-000000000001"
+}
+```
+
+O adaptador técnico lê somente o manifesto próprio limitado a 1 MiB. Exige `id`
+igual ao diretório, `state: accepted`, `decision.accepted: true`, `error: null`,
+`publication_mode: atomic_copy_from_comfy_output` e
+`output.path: .data/runs/<UUID>/chunk.mp4`. Ignora completamente `output.source`
+(privado do Comfy). Alias legado exato `runs/<UUID>/chunk.mp4` é permitido somente
+com o par receipt/verified da migração existente e SHA do vídeo no inventário
+concordantes; o arquivo lido continua sendo o canonical próprio em `.data/runs`.
+Estado/decisão ausentes ou ambíguos continuam bloqueados, mesmo em legado.
+
+Exige exatamente uma referência `type: image, role: identity`, com
+`source_root/source/sha256` correspondentes à seleção. Não suporta múltiplas
+identidades. Só reconhece os demais papéis nativos `image/initial_frame` e
+`video/motion_video`; não usa esses arquivos como identidade. Até assets sem prova
+normal de publicação precisam concordar com o SHA registrado pelo pai neste modo.
+Manifesto, fonte e identidade são revalidados depois das cópias e antes de submit;
+troca de inode ou conteúdo do manifesto/vídeo durante preparação rejeita o pedido.
+
+`GET /grok/continuation/<UUID>/last-frame` é prévia **CPU apenas**. Não chama OAuth,
+catálogo, provider, Store, worker, Comfy, jobs ou decisões e não cria UUID de geração.
+Não exige `last_frame.png` preexistente: congela o `chunk.mp4` próprio em snapshot
+anônimo de disco sob `.dumps/grok-editor`, conta frames decodificados por FFprobe e
+extrai `select=eq(n,count-1),format=rgb24,setsar=0` via FFmpeg. Mantém geometria,
+PNG RGB e `map_metadata -1`, como o helper nativo intacto; nunca decodifica pixels
+em Python. Valida a imagem **antes dos headers** e transmite bytes codificados em
+blocos até 48 KiB; desconexão/cancelamento fecha snapshots e reap dos filhos próprios.
+Não escreve frame, manifesto ou decisão no run e não lê um output privado.
+
+Orçamentos operacionais do editor: vídeo até **256 MiB**, **3600 frames** decodificados,
+geometria até **16 megapixels**, cada JPEG/PNG até **20 MiB** (40 MiB codificados
+no máximo para o par), subprocesso até **120 s**, stdout/stderr limitados. Não são
+máximos do modelo, garantia de desempenho ou ajustes dos parâmetros de geração.
+Diretório scratch pertence ao dono e é privado; fontes/metadados são regulares,
+link único, dono local e abertos por descriptors no-follow. Snapshots anônimos têm
+zero links e são fechados em sucesso/erro/cancelamento; não há cache persistente.
+
+A ação explícita congela e valida **ambas** as imagens antes de qualquer auth/provider.
+Responses recebe um rótulo separado mandando analisar AMBAS, seguido de dois
+`input_image` flat: primeiro identidade original, segundo último frame (pose/roupa
+atual), e a instrução literal do usuário em `input_text` separado, sem transformação.
+System customizado é enviado exato e não é regravado/reseedado. `Content-Length`
+é calculado com a expansão base64 dos dois snapshots e todo o envelope. Leitura/hash
+usa 48 KiB; expansão base64 gera blocos até 64 KiB, carry de no máximo dois bytes,
+sem imagem/base64 inteira no heap. O helper antigo de uma imagem permanece compatível.
+
+A UI deve mostrar identidade e frame com rótulos distintos, vincular respostas
+atrasadas também ao ID do pai e apresentar falha de prévia honestamente. **Usar minha
+instrução** pode seguir disponível: V2V nativo extrai seu próprio frame na geração,
+que permanece uma ação separada e não foi alterada. Os testes automatizados usam
+somente vídeos CPU sintéticos e fábricas provider falsas. A chamada real posterior
+do plano37 confirmou aceitação do payload de duas imagens naquele grant, não uma
+certificação científica de visão ou aderência completa da proposta.
+
 ## Provider e autenticação permanecem separados
 
 Somente a ação explícita de editar usa `https://api.x.ai/v1/responses`, após validar
@@ -129,7 +198,30 @@ cookies ou tokens ao H3. POST `/grok/auth/flow` com `{"flow_id":"..."}` consulta
 são operações explícitas, não descoberta automática de página.
 
 API local/rede confiável: same-origin não substitui autenticação para clientes HTTP
-diretos. Validação deste backend é fake/CPU em raízes temporárias: precedência do pin,
+diretos. A validação automatizada deste backend é fake/CPU em raízes temporárias: precedência do pin,
 seed no-clobber, shape Responses/base64/limites, ownership/hash/races/links/cancelamento,
-sem replay ou imports de geração. Integração UI e elegibilidade real são gates separados;
-não foram iniciados servidor de produção, provider ou GPU para validar este código.
+sem replay ou imports de geração. Essa implementação/testes não iniciaram servidor
+de produção, provider ou GPU. A validação real deliberada abaixo é uma etapa separada;
+integração UI, aderência da proposta e elegibilidade geral continuam gates distintos.
+
+## Validação real posterior: plano37, autorização consumida
+
+Após o opt-in explícito do dono, foi concluída **uma única** validação real do modelo
+fixo `grok-4.20-0309-non-reasoning`: **um GET models/200** e **um POST Responses/200**,
+com a identidade original e o último frame derivado do pai aceito `29699…`.
+O transporte enviou `Content-Length: 2183776` exato, em **40 chunks**, maior bloco
+**65536 bytes**; a execução completa levou **8.7403 s**. Evidência local preservada:
+`.dumps/tests/grok-real-two-images-20261013-plan37-8d42e6/`.
+
+A verificação final confirmou código congelado, pin, system customizado, grant,
+identidade, referências, provas/SHA e vídeo inalterados, com o pai ainda aceito.
+Não houve refresh, reautenticação, retry, GPU ou geração de vídeo. A autorização
+desse teste foi consumida: o resultado não autoriza novas chamadas nem replay.
+
+A resposta mencionou vestido vermelho e continuidade da pose de costas, mas também
+acrescentou detalhes não solicitados e veio em inglês, estruturada como `Video 1`
+com duração de 8 s. O system customizado atual foi mantido exato; esses elementos
+eram apenas texto da proposta, não alterações dos parâmetros nativos ou geração.
+O sucesso comprova aceitação real desse payload de duas imagens naquele instante,
+**não aderência completa**, certificação científica de visão, qualidade artística
+ou garantia geral de elegibilidade, cota e cobrança.

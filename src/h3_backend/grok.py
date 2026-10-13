@@ -10,12 +10,23 @@ from pathlib import Path
 from stat import S_ISREG
 from uuid import uuid4
 
+import anyio
 import httpx
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .infrastructure.grok_image import EditorReference, image_json_body, owned_image
+from .infrastructure.grok_image import (
+    EditorReference,
+    _thread,
+    _uuid,
+    continuation_frame,
+    encoded_chunks,
+    image_json_body,
+    images_json_body,
+    owned_image,
+    snapshot_digest,
+)
 from .infrastructure.grok_oauth import BASE_URL, OAuthError, OAuthManager
 
 
@@ -25,6 +36,18 @@ class PromptRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000, strict=True)
     model: str | None = Field(default=None, min_length=1, max_length=256, strict=True)
     reference: EditorReference | None = None
+    continuation_parent_id: str | None = Field(default=None, strict=True, max_length=36)
+
+    @field_validator("continuation_parent_id")
+    @classmethod
+    def canonical_parent(cls, value: str | None) -> str | None:
+        return _uuid(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def continuation_requires_identity(self):
+        if self.continuation_parent_id is not None and self.reference is None:
+            raise ValueError("Continuation requires the original identity reference")
+        return self
 
     @field_validator("prompt", "model")
     @classmethod
@@ -257,9 +280,22 @@ class Grok:
                 except (ValueError, OSError, TimeoutError):
                     raise OAuthError("invalid_reference", "Reference is unowned, changed, corrupt or "
                                      "unsupported; use a published JPEG/PNG up to 20 MiB.", 400) from None
+                if payload.continuation_parent_id is not None:
+                    try:
+                        frame, recheck, digest = await stack.enter_async_context(continuation_frame(
+                            self.root, payload.continuation_parent_id, payload.reference))
+                        if await _thread(snapshot_digest, snapshot) != digest:
+                            raise ValueError("Frozen identity disagrees with parent")
+                        await _thread(recheck)
+                    except (ValueError, OSError, TimeoutError, KeyError, TypeError):
+                        raise OAuthError("invalid_continuation", "Parent is unaccepted, changed, "
+                                         "unsafe or unsupported, or identity does not match.", 400) from None
+                    body, length = images_json_body(model, payload.system_prompt, payload.prompt,
+                                                    [(snapshot, mime), (frame, "image/png")])
+                else:
+                    body, length = image_json_body(model, payload.system_prompt, payload.prompt,
+                                                   snapshot, mime)
                 # Provider/auth failures are not image-validation errors.
-                body, length = image_json_body(model, payload.system_prompt, payload.prompt,
-                                               snapshot, mime)
                 return await self._submit(model, {"content": body}, length=length)
         messages = []
         if payload.system_prompt:
@@ -334,6 +370,39 @@ async def invoke(operation, *args) -> JSONResponse:
         return reply({"error": error.code, "detail": str(error)}, error.status)
     except OSError:
         return reply({"error": "storage_error", "detail": "Could not store Grok credentials."}, 500)
+
+
+class ContinuationPreview(StreamingResponse):
+    def __init__(self, snapshot, stack):
+        self.snapshot_stack = stack
+        super().__init__(encoded_chunks(snapshot), media_type="image/png", headers={
+            "Cache-Control": "no-store", "Content-Length": str(os.fstat(snapshot.fileno()).st_size),
+            "X-Content-Type-Options": "nosniff",
+        })
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.snapshot_stack.aclose()
+
+
+@router.get("/continuation/{parent_id}/last-frame")
+async def last_frame_preview(parent_id: str, request: Request):
+    # Preparation/validation completes before response headers; no OAuth or business API.
+    stack = AsyncExitStack()
+    try:
+        frame, _, _ = await stack.enter_async_context(continuation_frame(
+            request.app.state.grok_editor_root, parent_id))
+        return ContinuationPreview(frame, stack)
+    except (ValueError, OSError, TimeoutError, KeyError, TypeError):
+        await stack.aclose()
+        return reply({"error": "invalid_continuation", "detail":
+                      "Parent is unaccepted, changed, unsafe or exceeds the editor budget."}, 400)
+    except BaseException:
+        await stack.aclose()
+        raise
 
 
 @router.get("/editor")
