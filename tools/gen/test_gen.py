@@ -83,7 +83,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(Path(output).stat().st_mode & 0o777, 0o600)
 
     def test_image_alias_and_qw_have_no_caps(self):
-        for profile in ("image", "imagem", "qw"):
+        for profile in ("image", "imagem", *gen.TEXT_PROFILES):
             with self.subTest(profile=profile):
                 self.controller.start(profile)
                 self.assertFalse(any("Memory" in a for a in self.start_argv()))
@@ -285,12 +285,38 @@ class ControllerTests(unittest.TestCase):
     def test_qw_all_flags_are_passed_verbatim_through_cli(self):
         import io
         from contextlib import redirect_stdout
-        for args in (["--help"], ["--", "--port", "9999"], [""], ["--ctx-size=4096"], []):
-            with patch.object(gen, "Controller", return_value=self.controller), redirect_stdout(io.StringIO()):
-                self.assertEqual(gen.main(["qw", *args]), 0)
-            run = self.controller.current()
-            self.assertEqual(gen.read_private(self.controller.state / run["id"] / "launch.json")["args"], args)
-            self.controller.stop()
+        for profile in gen.TEXT_PROFILES:
+            for args in (["--help"], ["--", "--port", "9999"], [""], ["--ctx-size=4096"], []):
+                with self.subTest(profile=profile, args=args):
+                    with patch.object(gen, "Controller", return_value=self.controller), redirect_stdout(io.StringIO()):
+                        self.assertEqual(gen.main([profile, *args]), 0)
+                    run = self.controller.current()
+                    launch = gen.read_private(self.controller.state / run["id"] / "launch.json")
+                    self.assertEqual(launch["args"], args)
+                    self.assertEqual(run["profile"], profile)
+                    self.controller.stop()
+
+    def test_every_profile_preserves_context_and_systemd_properties(self):
+        for profile in gen.LAUNCHERS:
+            with self.subTest(profile=profile):
+                args = ["--override", "space ; quote \"", ""] if profile in gen.TEXT_PROFILES else []
+                mask = os.umask(0o027)
+                try:
+                    with patch.dict(os.environ, {"GEN_CONTEXT": "unchanged"}):
+                        result = self.controller.start(profile, args)
+                        launch = gen.read_private(self.controller.state / result["run"] / "launch.json")
+                        self.assertEqual(launch["env"], dict(os.environ))
+                finally:
+                    os.umask(mask)
+                self.assertEqual(launch["cwd"], os.getcwd())
+                self.assertEqual(launch["umask"], 0o027)
+                self.assertEqual(launch["script"], str(self.launcher))
+                self.assertEqual(launch["args"], args)
+                argv = self.start_argv()
+                for value in ("--user", "--unit=gen", "--collect", "--service-type=exec", "--property=Restart=no", "--property=KillMode=control-group"):
+                    self.assertIn(value, argv)
+                self.assertEqual(any("Memory" in value for value in argv), profile == "video")
+                self.controller.stop()
 
     def test_status_json_is_machine_readable_no_readiness_claim(self):
         import io

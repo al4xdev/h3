@@ -15,11 +15,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 UNIT = "gen.service"
+TEXT_PROFILES = ("qw", "gmmax", "gmno", "gmmed", "gmrol", "gmlow")
 LAUNCHERS = {
     "image": Path("/home/alex/.config/my_scripts/start.sh"),
     "video": Path("/home/alex/.config/my_scripts/start_video.sh"),
     "qw": Path("/home/alex/Applications/bonsai2/run-bonsai2.fish"),
+    **{name: Path(__file__).resolve().parent / "launchers" / f"{name}.fish" for name in TEXT_PROFILES if name != "qw"},
 }
+PROFILE_COMMANDS = (*LAUNCHERS, "imagem")
 PROPERTIES = ("LoadState", "ActiveState", "SubState", "Description", "Transient", "ExecStart")
 
 
@@ -185,8 +188,8 @@ class Controller:
 
     def start(self, profile, args=()):
         profile = "image" if profile == "imagem" else profile
-        if profile not in LAUNCHERS or (args and profile != "qw"):
-            raise Refused("only qw accepts extra arguments")
+        if profile not in LAUNCHERS or (args and profile not in TEXT_PROFILES):
+            raise Refused("only text profiles accept extra arguments")
         with self.locked():
             unit, previous = self.unit(), self.current()
             if unit:
@@ -287,8 +290,8 @@ def run_launch(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog="Logs: gen logs (tail 50), gen logs 1 100, gen logs 100 (up to 500 lines); --run ID selects an older run. Lines truncate at 4096 characters. Service readiness is not verified.")
-    sub = parser.add_subparsers(dest="action", required=True, metavar="{image,imagem,video,qw,stop,status,logs}")
-    for profile in ("image", "imagem", "video", "qw"):
+    sub = parser.add_subparsers(dest="action", required=True, metavar="{" + ",".join((*PROFILE_COMMANDS, "stop", "status", "logs")) + "}")
+    for profile in PROFILE_COMMANDS:
         child = sub.add_parser(profile)
         child.add_argument("args", nargs=argparse.REMAINDER)
     sub.add_parser("stop")
@@ -301,8 +304,8 @@ def main(argv=None):
     runner = sub.add_parser("_run")
     runner.add_argument("path")
     arguments = list(sys.argv[1:] if argv is None else argv)
-    # Launcher flags belong to the original qw script, not this parser.
-    if arguments and arguments[0] in ("image", "imagem", "video", "qw"):
+    # Launcher flags belong to the text scripts, not this parser.
+    if arguments and arguments[0] in PROFILE_COMMANDS:
         options = argparse.Namespace(action=arguments[0], args=arguments[1:])
     else:
         options = parser.parse_args(arguments)
