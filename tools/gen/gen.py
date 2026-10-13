@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -288,8 +289,120 @@ def run_launch(path):
     os.execve(launch["script"], [launch["script"], *launch["args"]], launch["env"])
 
 
+def follow_logs(controller, start=None, end=None, run_id=None):
+    """Observe one pinned private log; interrupt only our tail child, never a model."""
+    if end is not None:
+        raise Refused("follow does not accept an end line")
+    if start is not None and start < 1:
+        raise Refused("line range must be positive and increasing")
+    run = controller.run_info(run_id) if run_id else controller.current()
+    if not run:
+        return 0
+    fd = open_private(controller.state / run["id"] / "output.log")
+    child = None
+    try:
+        try:
+            # Defer Ctrl+C until Popen returns and cleanup owns the child handle.
+            # Tail inherits blocked SIGINT; cleanup uses SIGTERM/KILL. Keep the
+            # terminal group so closing its window also delivers SIGHUP to tail.
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+            try:
+                # The inherited descriptor pins the inode despite symlink swaps
+                # or current.json changes; tail never switches to another run.
+                child = subprocess.Popen(
+                    ["tail", "--follow=descriptor", "-n", "50" if start is None else f"+{start}", "--", f"/proc/self/fd/{fd}"],
+                    pass_fds=(fd,), stderr=subprocess.DEVNULL,
+                )
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        finally:
+            os.close(fd)
+        result = child.wait()
+        if result:
+            raise Refused("log observer failed; no retry performed")
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                # A second Ctrl+C during grace time must not orphan our observer.
+                child.kill()
+                child.wait()
+
+
+# Presentation consumes only public controller results, never launcher arguments.
+PUBLIC_ERRORS = {
+    "state directory is not privately owned": "A pasta de estado não pertence exclusivamente ao usuário.",
+    "state directory is not private": "A pasta de estado não é privada.",
+    "state file is not private": "O arquivo de estado não é privado.",
+    "lock file is not private": "O arquivo de bloqueio não é privado.",
+    "another gen start/stop is in progress": "Outra operação gen está em andamento.",
+    "service command failed; result may be uncertain; no retry performed": "Falha no comando de serviço; resultado incerto. Nenhuma repetição realizada.",
+    "cannot determine gen.service state": "Não foi possível determinar o estado de gen.service.",
+    "invalid run ID": "Identificador de execução inválido.",
+    "invalid run metadata": "Metadados de execução inválidos.",
+    "cannot exclude external model processes": "Não foi possível excluir a presença de modelos externos.",
+    "only text profiles accept extra arguments": "Somente perfis de texto aceitam argumentos adicionais.",
+    "gen.service name collision: not owned by this controller": "gen.service pertence a outro controlador; nenhuma alteração realizada.",
+    "gen.service name collision: refusing to stop an unowned unit": "gen.service pertence a outro controlador; parada recusada.",
+    "gen.service still exists or is busy; wait for collection or explicitly stop": "gen.service ainda existe ou está ocupado. Aguarde a coleta ou solicite uma parada explícita.",
+    "previous start is uncertain; inspect status/logs and explicitly stop before a new start": "Início anterior incerto. Consulte status/logs e solicite uma parada explícita antes de iniciar novamente.",
+    "external ComfyUI/llama-server detected; no process was stopped": "ComfyUI/llama-server externo detectado. Nenhum processo foi parado.",
+    "original launcher is missing or not executable": "Lançador original ausente ou sem permissão de execução.",
+    "start failed or is uncertain; no retry performed; inspect status/logs then explicitly stop": "Início falhou ou está incerto. Nenhuma repetição realizada; consulte status/logs antes de uma parada explícita.",
+    "stop failed or uncertain; no retry performed": "Parada falhou ou está incerta. Nenhuma repetição realizada.",
+    "stop completion not confirmed": "Conclusão da parada não confirmada.",
+    "line range must be positive and increasing": "O intervalo de linhas deve ser positivo e crescente.",
+    "at most 500 lines may be requested": "Solicite no máximo 500 linhas.",
+    "follow does not accept an end line": "O acompanhamento contínuo não aceita uma linha final.",
+    "log observer failed; no retry performed": "O observador de logs falhou. Nenhuma repetição realizada.",
+}
+
+
+def accent(text, stream):
+    if stream.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb":
+        return f"\033[38;2;196;133;91m{text}\033[0m"
+    return text
+
+
+def present_result(action, result):
+    titles = {
+        "started": "Início solicitado", "already-running": "Perfil já em execução",
+        "stopped": "Parada concluída", "not-running": "Nenhum serviço em execução",
+    }
+    states = {"active": "ativo", "activating": "ativando", "deactivating": "desativando",
+              "inactive": "inativo", "failed": "falhou", "absent": "ausente"}
+    title = "Estado do serviço" if action == "status" else titles[result["result"]]
+    print(accent(f"◆ gen · {title}", sys.stdout))
+    if action == "status":
+        print(f"  Estado  {states.get(result['state'], result['state'])} · {result['unit']}")
+        if result.get("substate"):
+            print(f"  Fase    {result['substate']}")
+        print(f"  Gestão  {'própria' if result['owned'] else 'não atribuída a este controlador'}")
+        if result["uncertain"]:
+            print("  Atenção Resultado de início incerto; não repetir automaticamente.")
+    if result.get("profile"):
+        print(f"  Perfil  {result['profile']}")
+    if result.get("run"):
+        print(f"  Run     {result['run']}")
+    print("  Prontidão não verificada — estado do serviço não confirma disponibilidade do modelo.")
+    # Status/stop are suggestions only; presentation must never inspect again.
+    if action == "stop":
+        next_command = "gen status"
+    elif action == "status" and not result.get("run"):
+        next_command = "gen --help"
+    else:
+        next_command = "gen logs"
+    print(f"  Próximo → {next_command}")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, epilog="Logs: gen logs (tail 50), gen logs 1 100, gen logs 100 (up to 500 lines); --run ID selects an older run. Lines truncate at 4096 characters. Service readiness is not verified.")
+    parser = argparse.ArgumentParser(description="gen · modelos locais, uma execução por vez. Prontidão não verificada.", epilog="Logs: gen logs (últimas 50), gen logs 1 100, gen logs 100 (até 500 linhas). Leituras estáticas truncam linhas em 4096 caracteres. gen logs --follow acompanha mensagens cruas; gen logs 1 --follow acompanha desde a linha 1. Ctrl+C encerra só o observador. --run ID fixa uma execução anterior. --headless deve vir antes do comando.")
+    parser.add_argument("--headless", action="store_true", help="saída estável para ferramentas (antes do comando)")
     sub = parser.add_subparsers(dest="action", required=True, metavar="{" + ",".join((*PROFILE_COMMANDS, "stop", "status", "logs")) + "}")
     for profile in PROFILE_COMMANDS:
         child = sub.add_parser(profile)
@@ -301,12 +414,17 @@ def main(argv=None):
     logs.add_argument("start", nargs="?", type=int)
     logs.add_argument("end", nargs="?", type=int)
     logs.add_argument("--run")
+    logs.add_argument("--follow", action="store_true", help="acompanhar mensagens reais; Ctrl+C encerra só o observador")
     runner = sub.add_parser("_run")
     runner.add_argument("path")
     arguments = list(sys.argv[1:] if argv is None else argv)
-    # Launcher flags belong to the text scripts, not this parser.
-    if arguments and arguments[0] in PROFILE_COMMANDS:
-        options = argparse.Namespace(action=arguments[0], args=arguments[1:])
+    # Consume root flags only before a profile: every subsequent token belongs
+    # to the launcher, including --help, --headless, -- and empty strings.
+    prefix = 0
+    while prefix < len(arguments) and arguments[prefix] == "--headless":
+        prefix += 1
+    if prefix < len(arguments) and arguments[prefix] in PROFILE_COMMANDS:
+        options = argparse.Namespace(action=arguments[prefix], args=arguments[prefix + 1:], headless=bool(prefix))
     else:
         options = parser.parse_args(arguments)
     controller = Controller()
@@ -315,6 +433,8 @@ def main(argv=None):
             run_launch(options.path)
             return 0
         if options.action == "logs":
+            if options.follow:
+                return follow_logs(controller, options.start, options.end, options.run)
             for number, line in controller.logs(options.start, options.end, options.run):
                 print(f"{number}: {line}", end="" if line.endswith("\n") else "\n")
             return 0
@@ -324,16 +444,21 @@ def main(argv=None):
             result = controller.stop()
         else:
             result = controller.start(options.action, options.args)
-        if options.action == "status" and not options.json:
-            print(f"{UNIT}: {result['state']} (readiness not verified); owned={result['owned']}; profile={result['profile']}; run={result['run']}; uncertain={result['uncertain']}")
-        else:
+        if options.headless or (options.action == "status" and options.json):
             print(json.dumps(result, sort_keys=True))
+        else:
+            present_result(options.action, result)
         return 0
     except (Refused, OSError, ValueError, KeyError):
         # Only deliberately public diagnostics leave this boundary. Exec/chdir
         # errors may contain private arguments/paths, so they get a generic error.
         error = sys.exc_info()[1]
-        print(f"gen: {error if isinstance(error, Refused) else 'operation failed; no retry performed'}", file=sys.stderr)
+        if options.headless or options.action == "_run":
+            print(f"gen: {error if isinstance(error, Refused) else 'operation failed; no retry performed'}", file=sys.stderr)
+        else:
+            message = PUBLIC_ERRORS.get(str(error), "Operação falhou. Nenhuma repetição realizada.") if isinstance(error, Refused) else "Operação falhou. Nenhuma repetição realizada."
+            print(accent("◆ gen · Operação recusada", sys.stderr), file=sys.stderr)
+            print(f"  {message}", file=sys.stderr)
         return 1
 
 

@@ -26,12 +26,33 @@ gen logs 1 100             # linhas 1 até 100, inclusive
 gen logs 101 200
 gen logs 1                 # página a partir da linha 1
 gen logs 1 100 --run ID     # execução anterior identificada explicitamente
+gen logs --follow          # últimas 50 linhas + novas mensagens continuamente
+gen logs 1 --follow        # desde a linha 1 + novas mensagens continuamente
 gen stop
 ```
 
-Não existe `--follow`. As linhas são numeradas e cada leitura é limitada a 500 linhas. Logs pertencem à execução, não misturam reinícios. `gen status` consulta lifecycle; ativo **não certifica** modelo pronto para inferência.
+Sem `--follow`, as linhas são numeradas e cada leitura é limitada a 500 linhas. Logs pertencem à execução, não misturam reinícios. `gen status` consulta lifecycle; ativo **não certifica** modelo pronto para inferência.
+
+O dono pediu depois acompanhamento contínuo: `--follow` agora permanece no terminal exibindo mensagens reais, como tail normal. Sem número começa pelas últimas 50 linhas; com um número começa naquela linha e segue. Esse modo é explicitamente contínuo (sem limite total de 500 linhas) e não aceita um fim de intervalo. A execução é fixada na abertura: não muda sozinha para outro modelo/restart. `Ctrl+C` encerra **somente o observador**, nunca o modelo/serviço. O conteúdo é transmitido cru, sem numeração adicionada; `--run ID` também pode fixar uma execução anterior.
 
 O `qw` aceita os argumentos adicionais que o lançador original já aceita, e preserva `BONSAI_CTX` / `BONSAI_PORT`. Os perfis `gmmax`, `gmno`, `gmmed`, `gmrol`, `gmlow` também aceitam argumentos adicionais como as abreviações antigas. Imagem/vídeo não aceitam parâmetros novos. Ambiente e diretório da chamada são preservados; não se importa configuração global para o gerenciador systemd. O lançador qw continua usando seu shebang fish normal (inclusive a configuração não interativa que já carregava). A execução passa a ser em segundo plano, sem terminal/stdin interativo; stdout/stderr vão para o log em vez de ocupar o terminal. A função requer este checkout no caminho `/home/alex/git/my/h3/tools/gen/gen.py`.
+
+## Humanos e ferramentas
+
+Sem flags, `gen` apresenta estado e ações em português para uso no terminal. No Kitty/TTY, usa cores ANSI discretas; em pipes, com `NO_COLOR` ou `TERM=dumb`, não emite cores. Não usa imagens/protocolo Kitty, dependências ou animações. A apresentação não altera o lifecycle nem promete que um modelo ativo já esteja pronto.
+
+Para agentes e um adaptador futuro:
+
+```fish
+gen --headless status
+gen --headless logs 1 100
+gen --headless imagem
+gen --headless stop
+```
+
+`--headless` vem **antes** do subcomando. A saída de start/stop/status é JSON estável; logs por intervalo seguem linhas numeradas sem decoração. O conteúdo original de logs (inclusive ANSI emitido pelo modelo) não é modificado. Para MCP/tools, prefira intervalos finitos; `--follow` é uma sessão contínua explícita e exige controle de interrupção pelo chamador. Erros permanecem em stderr e códigos de saída permanecem iguais. `gen status --json` continua funcionando. Depois do nome de um perfil de texto, opções pertencem ao modelo: `gen qw --headless` não ativa o modo do controlador e é encaminhado literalmente ao lançador.
+
+Isso é uma CLI pronta para ser envolvida por ferramentas; **não significa que MCP esteja instalado**. O futuro adaptador deve chamar somente operações permitidas e conservar as regras de exclusividade e intenção explícita.
 
 ## Abreviações migradas
 
@@ -60,11 +81,13 @@ Estado, ambiente privado e logs ficam em `~/.local/state/gen`, com diretório re
 ## Validação sem GPU
 
 ```fish
-env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python -m unittest discover -s tools/gen -p 'test_gen.py' -v
+env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python -m unittest discover -s tools/gen -p 'test_*.py' -v
 fish --no-execute tools/gen/gen.fish
 fish --no-execute tools/gen/completions.fish
 ```
 
 Verificação da primeira entrega: 29 testes inertes passaram; Ruff passou; função instalada, help, status JSON e leitura de logs vazios foram verificados sem iniciar serviço. SHA256 confirmou os três lançadores e, naquele momento, `config.fish` inalterados, e as seis cópias de backup íntegras. Uma revisão independente não encontrou bloqueadores no escopo documentado. A segunda entrega modifica somente o bloco de abreviações migradas do `config.fish`, além da fachada/completions e suporte aos novos perfis. Sua suíte final segura passou 35 testes, incluindo comparação byte a byte do argv real de cada perfil e preservação do ambiente pelo shebang sem config. Os três scripts originais e os 11 backups continuam íntegros; o diff de config foi validado como restrito ao bloco migrado.
 
-Os testes finais usam adaptadores falsos e cópias instrumentadas com printf. Instalação da função não liga modelos; não fazemos um teste real deliberado de carga/geração nesta entrega. Durante um teste inicial da migração, um mock inadequado pode ter alcançado o comando real gmmax; o job foi cancelado, e snapshots posteriores não encontraram modelo remanescente. Não houve requisição de inferência nem alteração de parâmetros. Evidência e correção do método em `.dumps/gen-migration-incident.md`; não afirmar que nenhum modelo foi invocado nessa segunda entrega. O start/stop real via systemd e o cgroup sob carga ainda não foram exercitados. Esta entrega não certifica prontidão nem consumo de RAM dos modelos sob carga. Os logs não têm rotação automática; a leitura tail é limitada em memória/saída, mas percorre o arquivo inteiro. Um gerenciador systemd travado também pode deixar uma chamada aguardando: não há retry automático.
+A entrega de apresentação/headless/follow passou **65 testes** (1.643s), Ruff e revisão estática independente. A comparação de AST confirmou toda a classe Controller, execução dos lançadores e primitivas de arquivos privados iguais ao checkpoint da migração. O status foi inspecionado em modo humano, JSON e PTY compatível com Kitty; a cor cobre apareceu somente no TTY elegível. O acompanhamento real foi testado somente com `tail` e arquivos de texto temporários privados, incluindo append e troca de inode; interrupções foram testadas com mocks, sem sinais aos modelos. O observador permanece no grupo do terminal para não se destacar quando a janela fecha.
+
+Os testes finais usam adaptadores falsos e cópias instrumentadas com printf. Instalação da função não liga modelos; não fazemos um teste real deliberado de carga/geração nesta entrega. Durante um teste inicial da migração, um mock inadequado pode ter alcançado o comando real gmmax; o job foi cancelado, e snapshots posteriores não encontraram modelo remanescente. Não houve requisição de inferência nem alteração de parâmetros. Evidência e correção do método em `.dumps/gen-migration-incident.md`; não afirmar que nenhum modelo foi invocado nessa segunda entrega. Os testes automatizados não exercitam start/stop de modelos reais nem o cgroup sob carga. Durante a entrega foi observado, apenas por consulta, um `gen.service` próprio ativo no perfil vídeo; permaneceu intocado, com `Restart=no`, `KillMode=control-group` e limites de memória presentes. Esta entrega não certifica prontidão nem consumo de RAM dos modelos sob carga. Os logs não têm rotação automática; a leitura tail é limitada em memória/saída, mas percorre o arquivo inteiro. Um gerenciador systemd travado também pode deixar uma chamada aguardando: não há retry automático.
