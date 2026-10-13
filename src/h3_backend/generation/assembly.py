@@ -281,6 +281,8 @@ def get_assembly(root: Path, assembly_id: str) -> dict:
     """Metadata-only rediscovery: no media probing, execution or completion recovery."""
     with storage_guard(root):
         directory = _directory(root, assembly_id)
+        if safe_path(directory, "removed.json").exists():
+            raise FileNotFoundError("Assembly removed")
         meta = _metadata(root, assembly_id)
         request_path = safe_path(directory, "request.json")
         if not request_path.exists() and meta.state != "completed":
@@ -346,6 +348,8 @@ def list_assemblies(root: Path, *, end_run_id=None, limit=50, offset=0) -> dict:
                     if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                         raise ValueError("Assembly catalog contains an unsafe directory")
                     canonical_id(entry.name)
+                    if safe_path(Path(entry.path), "removed.json").exists():
+                        continue
                     if not safe_path(Path(entry.path), "metadata.json").exists():
                         continue  # Partial admission evidence is neither completion nor replayable intent.
                     meta = _metadata(root, entry.name)
@@ -370,6 +374,8 @@ def restore_interrupted(root: Path):
                     continue
                 canonical_id(entry.name)
                 directory = _directory(root, entry.name)
+                if safe_path(directory, "removed.json").exists():
+                    continue
                 if safe_path(directory, "metadata.json").exists():
                     meta = _metadata(root, entry.name)
                     if meta.state == "running":

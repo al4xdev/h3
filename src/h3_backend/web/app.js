@@ -263,6 +263,7 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
       } finally { uploading = false; }
     },
     get: (path, signal) => request(path, {signal}),
+    remove: id => request(`/runs/${canonicalUUID(id)}`, {method: 'DELETE'}),
     decide: (id, action) => request(`/runs/${encodeURIComponent(id)}/${action}`, {method: 'POST'}),
     async generate(path, payload, onAdmitted, signal) {
       if (submitting) throw new Error('Uma solicitação já está em andamento.');
@@ -334,11 +335,34 @@ export function rejectedStoryDraft(doc, attempt, owner, capabilities) {
   }
   return {key: `not-admitted:${owner.intent}`, sourceIntentId: owner.intent, parentId: snapshot.parent_id, mode: index ? 'continue' : 'new', idea: prompt, chosenPrompt: prompt, proposal: '', seed: String(seed), duration: String(snapshot.duration_seconds), reference, revision: 0, submitted: false, promptOrigin: 'envio recusado confirmado'};
 }
+export function branchEndForSelection(id, sequence, preserve = false, explicitEnd = null, openedEnd = null) {
+  canonicalUUID(id);
+  if (explicitEnd) return canonicalUUID(explicitEnd);
+  if (preserve && openedEnd && (!sequence || sequence.blocks?.some(block => block.id === id))) return canonicalUUID(openedEnd);
+  return preserve && sequence?.blocks?.some(block => block.id === id) ? canonicalUUID(sequence.end_run_id) : id;
+}
+export function validateBranchSequence(sequence, end, selectedId) {
+  canonicalUUID(end); canonicalUUID(selectedId);
+  if (sequence?.end_run_id !== end || !Array.isArray(sequence.blocks) || !sequence.blocks.length || sequence.blocks.length > 100 || sequence.root_id !== sequence.blocks[0].id) throw new Error('Sequência aberta inválida.');
+  const seen = new Set(); let parent = null;
+  for (const block of sequence.blocks) {
+    canonicalUUID(block.id);
+    if (seen.has(block.id) || block.parent_id !== parent) throw new Error('Continuidade da sequência aberta inválida.');
+    seen.add(block.id); parent = block.id;
+  }
+  if (parent !== end || !seen.has(selectedId)) throw new Error('A sequência aberta não contém o bloco selecionado.');
+  return sequence;
+}
+export function storyReviewOrigin(previous, doc, runId, blockId, intentId, trail = []) {
+  if (!doc || !runId || !(doc.attempts?.some(attempt => attempt.run_id === runId) || (blockId && intentId === runId))) return previous;
+  const remembered = trail.findLast(view => view.screen === 'story' && view.storyDoc?.id === doc.id);
+  return {...(remembered || previous), screen: 'story', storyDoc: doc, storyBlock: blockId, storyCreating: false, storyCandidate: previous.storyCandidate, focus: 'story-title'};
+}
 export function storyContext(doc, blockId, duration, chosenPrompt = null) {
   const index = doc.blocks.findIndex(block => block.id === blockId), block = doc.blocks[index];
   if (!block) throw new Error('Bloco ausente do roteiro.');
-  const accepted = doc.blocks.slice(0, index).map(item => { const attempt = storyBlockState(doc, item).accepted; return `${item.action}\nInstrução enviada: ${attempt?.snapshot?.prompt || 'não confirmada'}`; }).join('\n\n');
-  return sceneText(`Roteiro: ${doc.name}\nIdeia geral: ${doc.idea}\n\nIntenção dos blocos aceitos:\n${accepted || 'Primeiro bloco.'}\nEstes textos descrevem intenção; o resultado visual pode diferir.\n\nEste bloco: ${block.action}\nInstrução escolhida: ${chosenPrompt ?? block.prompt}\nDuração solicitada: ${duration} s; ${alignedFrames(Number(duration))} frames.\n\nPróximo bloco planejado: ${doc.blocks[index + 1]?.action || 'Este é o último bloco.'}\nNão repetir o anterior nem antecipar o próximo.\nContexto visual: identidade original e último frame REAL do pai aceito, quando houver.`);
+  const accepted = doc.blocks.slice(0, index).map(item => { const attempt = storyBlockState(doc, item).accepted; return `${item.action}\nSubmitted instruction: ${attempt?.snapshot?.prompt || 'not confirmed'}`; }).join('\n\n');
+  return sceneText(`Story: ${doc.name}\nOverall idea: ${doc.idea}\n\nAccepted block intentions:\n${accepted || 'First block.'}\nThese texts describe intent; the visual result may differ.\n\nCurrent block: ${block.action}\nChosen instruction: ${chosenPrompt ?? block.prompt}\nRequested duration: ${duration} s; ${alignedFrames(Number(duration))} frames.\n\nNext planned block: ${doc.blocks[index + 1]?.action || 'This is the final block.'}\nDo not repeat the previous block or perform the next block early.\nVisual context: original identity and the ACTUAL final frame of the accepted parent, when present.`);
 }
 export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
   const used = new Set();
@@ -348,7 +372,7 @@ export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
   }
   const path = id => `/roteiros/${canonicalUUID(id)}`;
   const attemptPath = (id, block, intent) => `${path(id)}/blocks/${canonicalUUID(block)}/attempts/${canonicalUUID(intent)}`;
-  return {list: () => request('/roteiros'), read: id => request(path(id)), create: body => request('/roteiros', 'POST', body), save: (id, body) => request(path(id), 'PUT', body), proposal: (id, body) => request(`${path(id)}/proposal`, 'POST', body), editor: () => request('/roteiros/editor'), saveEditor: system_prompt => request('/roteiros/editor', 'PUT', {system_prompt}), readIntent: (id, block, intent) => request(attemptPath(id, block, intent)),
+  return {list: () => request('/roteiros'), read: id => request(path(id)), create: body => request('/roteiros', 'POST', body), save: (id, body) => request(path(id), 'PUT', body), remove: (id, revision) => request(path(id), 'DELETE', {expected_revision: revision}), proposal: (id, body) => request(`${path(id)}/proposal`, 'POST', body), editor: () => request('/roteiros/editor'), saveEditor: system_prompt => request('/roteiros/editor', 'PUT', {system_prompt}), readIntent: (id, block, intent) => request(attemptPath(id, block, intent)),
     async generate(id, block, intent, body) { const key = attemptPath(id, block, intent); if (used.has(key)) throw new Error('Intenção já enviada; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', body, 202); }};
 }
 
@@ -391,7 +415,7 @@ export function createPresentationMotion(document) {
     return true;
   }
   function enter(panel, heading, direction = 1) {
-    stop(); play(heading, 'enter', {direction});
+    stop(); play(heading, 'cue');
     for (const node of panel?.children || []) {
       if (node.matches('.caption, .parent-label, .context-proof, .section-head, .sequence, .operation-note, .duration-readout, #generation-status')) play(node, 'enter', {direction});
     }
@@ -420,7 +444,7 @@ export function startUI(document, client = createClient(), stories = createStory
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
-  Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
+  Object.assign(state, {screen: 'library', branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
   const story = {available: false, runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
   let storyRecovery = null; try { const href = document.defaultView?.location?.href || 'http://local/'; storyRecovery = storyPointer(href); const params = new URL(href).searchParams; if (!storyRecovery.intent && params.has('pending_intent')) { for (const key of ['pending_roteiro', 'pending_block', 'pending_intent']) if (params.getAll(key).length !== 1) throw new Error('Ponteiro de recuperação inválido.'); storyRecovery = {roteiro: canonicalUUID(params.get('pending_roteiro')), block: canonicalUUID(params.get('pending_block')), intent: canonicalUUID(params.get('pending_intent'))}; } } catch (error) { message('notice', error.message, true); }
   const TITLES = {story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
@@ -488,7 +512,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-intent-read').hidden = !ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner);
     $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
     if (state.screen === 'story') renderStory();
-    text('screen-eyebrow', ['context', 'proposal', 'generation', 'continuation'].includes(state.screen) ? state.mode === 'continue' ? 'CONTINUAÇÃO · RASCUNHO' : 'NOVA CENA · RASCUNHO' : 'ESTÚDIO LOCAL');
+    text('screen-eyebrow', 'Estúdio local');
     $('back').disabled = state.trail.length === 0;
     $('settings-open').disabled = state.screen === 'settings';
     $('create-form').hidden = state.statusOnly; $('generation-status').hidden = !state.statusOnly;
@@ -506,7 +530,7 @@ export function startUI(document, client = createClient(), stories = createStory
     }
   }
   function viewSnapshot() {
-    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
+    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, branchEnd: state.openedBranchEnd || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
   }
   function recordView(snapshot = viewSnapshot(), push = false) {
     const view = document.defaultView;
@@ -520,20 +544,25 @@ export function startUI(document, client = createClient(), stories = createStory
     if (!TITLES[screen] || (screen === 'assembly' && !state.config?.assembly_enabled)) return;
     ++state.navigationEpoch; ++state.retryEpoch;
     saveDraft();
-    const previous = origin || viewSnapshot(), changing = screen !== previous.screen || previous.selectedId !== (state.selected?.id || null);
+    const previous = screen === 'review' ? storyReviewOrigin(origin || viewSnapshot(), story.doc, state.selected?.id, story.block, story.intent, state.trail) : origin || viewSnapshot(), changing = screen !== previous.screen || previous.selectedId !== (state.selected?.id || null);
+    const replaceReview = screen === 'review' && previous.screen === 'story' && state.screen !== 'story' && state.trail.at(-1)?.screen === 'story' && state.trail.at(-1)?.storyDoc?.id === previous.storyDoc?.id;
+    if (screen === 'review' && previous.screen === 'story') { const prior = state.trail.findLastIndex(view => view.screen === 'story' && view.storyDoc?.id === previous.storyDoc?.id); if (prior >= 0) state.trail = state.trail.slice(0, prior); }
     if (remember && changing) {
       historyViews.set(historyToken, {snapshot: previous, trail: [...state.trail]});
       state.trail.push(previous);
     }
     state.screen = screen;
     paintScreen({focus, direction}); controls();
-    recordView(viewSnapshot(), remember && changing);
+    recordView(viewSnapshot(), remember && changing && !replaceReview);
   }
   async function restoreView(snapshot, trail) {
+    if (removedStories.has(snapshot.storyDoc?.id) || removedRuns.has(snapshot.parent?.id) || (['review', 'assembly'].includes(snapshot.screen) && removedRuns.has(snapshot.selectedId))) { navigate('library', {remember: false}); message('notice', 'Este item foi apagado. A biblioteca está disponível; seus outros rascunhos foram preservados.'); return; }
+    if (removedRuns.has(snapshot.selectedId)) snapshot = {...snapshot, selectedId: null, branchEnd: null};
     const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
     story.doc = snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
-    if (snapshot.selectedId && snapshot.selectedId !== state.selected?.id && !state.busy) await select(snapshot.selectedId);
+    if (snapshot.selectedId && (snapshot.selectedId !== state.selected?.id || snapshot.branchEnd !== state.openedBranchEnd) && !state.busy) await select(snapshot.selectedId, undefined, {branchEnd: snapshot.branchEnd});
     if (epoch !== state.navigationEpoch || stopped) return;
+    if (snapshot.selectedId && state.selected?.id !== snapshot.selectedId) { navigate('library', {remember: false}); message('notice', 'O bloco desta navegação não está disponível. Releia a biblioteca.', true); return; }
     Object.assign(state, {mode: snapshot.mode, draftKey: snapshot.draftKey, parent: snapshot.parent, statusOnly: snapshot.statusOnly, settingsOrigin: snapshot.settingsOrigin, screen: snapshot.screen, trail: [...trail]});
     story.creating = Boolean(snapshot.storyCreating); story.block = snapshot.storyBlock || null;
     restoreDraft(); state.statusOnly ||= draft().submitted; paintScreen({direction: -1}); controls();
@@ -548,6 +577,10 @@ export function startUI(document, client = createClient(), stories = createStory
     if (state.trail.length && document.defaultView?.history) document.defaultView.history.back();
     else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
   }
+  function goHome() {
+    if (state.screen === 'story' && story.editing) { story.pendingEdit = 'home'; $('story-unsaved').hidden = false; return; }
+    navigate('library');
+  }
   function openSettings(event) {
     if (state.screen === 'settings') return;
     const origin = viewSnapshot(), pointer = settingsPointerOrigin; settingsPointerOrigin = null;
@@ -557,7 +590,7 @@ export function startUI(document, client = createClient(), stories = createStory
     navigate('settings', {origin});
   }
   function retryBlocked(ignorePreparation = false) {
-    return !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyReading || state.assemblyUncertain || state.grokBusy || state.grokUncertain || state.editorSaving || (!ignorePreparation && state.retryPreparing) || ['queued', 'running'].includes(state.pendingRun?.state);
+    return deleting || !state.config || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyReading || state.assemblyUncertain || state.grokBusy || state.grokUncertain || state.editorSaving || (!ignorePreparation && state.retryPreparing) || ['queued', 'running'].includes(state.pendingRun?.state);
   }
   function settingsEditable() {
     return Boolean(state.config) && (state.mode !== 'continue' || state.parent?.state === 'accepted') && draftSettingsAllowed({...state, originScreen: state.screen === 'settings' ? state.settingsOrigin?.screen : state.screen, submitted: draft().submitted});
@@ -675,6 +708,36 @@ export function startUI(document, client = createClient(), stories = createStory
     if (owner) for (const [key, value] of [['pending_roteiro', owner.id], ['pending_block', owner.block], ['pending_intent', owner.intent]]) url.searchParams.set(key, canonicalUUID(value));
     view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }
+  let deleting = false;
+  const removedStories = new Set(), removedRuns = new Set();
+  function deleteButton(label, action) {
+    const button = element('button', 'delete-item', label); button.type = 'button';
+    button.disabled = deleting; button.addEventListener('click', action); return button;
+  }
+  async function removeLibraryItem(kind, item) {
+    if (!item || deleting || story.busy || state.busy || state.uncertain || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.grokBusy || state.grokUncertain) return;
+    const isStory = kind === 'story', status = isStory ? 'story-library-status' : 'notice';
+    const question = isStory ? 'Apagar este roteiro e seus vídeos e montagens? As mídias próprias serão movidas para /tmp. Registros de segurança serão preservados. Referências compartilhadas serão preservadas.' : 'Apagar este bloco e seus arquivos de mídia? As mídias serão movidas para /tmp. Registros de segurança serão preservados. Se houver continuação, roteiro ou montagem dependente, a operação será bloqueada.';
+    if (!document.defaultView.confirm(question)) return;
+    const navigation = state.navigationEpoch;
+    deleting = true; renderLibrary();
+    try {
+      if (isStory) await stories.remove(item.id, item.revision); else await client.remove(item.id);
+      ++libraryEpoch;
+      if (isStory) removedStories.add(item.id);
+      if (isStory && story.doc?.id === item.id) { story.doc = null; story.block = null; story.candidate = null; story.editing = null; story.creating = false; storyURL(); }
+      const deletedRunIDs = isStory ? new Set((item.attempts || []).map(attempt => attempt.run_id).filter(Boolean)) : new Set([item.id]);
+      for (const id of deletedRunIDs) removedRuns.add(id);
+      if (deletedRunIDs.has(state.selected?.id)) { ++state.epoch; state.selected = null; state.sequence = null; state.branchSequence = null; state.openedBranchEnd = null; renderRun(); }
+      if (navigation === state.navigationEpoch && state.screen !== 'library') navigate('library');
+      await storyLibrary(); await loadLibrary();
+      message('notice', `${isStory ? 'Roteiro' : 'Bloco'} apagado. Mídias próprias movidas para /tmp. Registros de segurança preservados.`);
+    } catch (error) {
+      message(status, `Não foi possível apagar: ${error.message}. Releia a biblioteca antes de tentar novamente.`, true);
+      if (isStory && story.doc?.id === item.id) message('story-status', `Não foi possível apagar: ${error.message}`, true);
+      if (!isStory && state.selected?.id === item.id) message('review-status', `Não foi possível apagar: ${error.message}`, true);
+    } finally { deleting = false; for (const button of document.querySelectorAll('.delete-item')) button.disabled = false; renderLibrary(); }
+  }
   async function storyLibrary() {
     if (state.config?.roteiro_enabled === false) { story.available = false; return; }
     try {
@@ -686,13 +749,15 @@ export function startUI(document, client = createClient(), stories = createStory
       for (const doc of result.items) {
         const card = element('article', 'story-card'), accepted = doc.blocks.filter(block => storyBlockState(doc, block).accepted).length;
         const button = element('button', '', 'Abrir roteiro'); button.type = 'button'; button.addEventListener('click', () => openStory(doc.id));
-        card.append(element('h3', '', doc.name || 'Roteiro sem nome'), element('p', 'caption', `${doc.blocks.length} blocos · ${accepted} aceitos`), button); $('story-library').append(card);
+        card.append(element('h3', '', doc.name || 'Roteiro sem nome'), element('p', 'caption', `${doc.blocks.length} blocos · ${accepted} aceitos`), button, deleteButton('Apagar roteiro', () => removeLibraryItem('story', doc))); $('story-library').append(card);
       }
       message('story-library-status', ''); renderLibrary();
     } catch (error) { message('story-library-status', `Não foi possível ler os roteiros: ${error.message}. Use Reler biblioteca.`, true); }
   }
   async function openStory(id) {
-    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); story.doc = doc; story.creating = false; story.candidate = null; story.block = null; storyURL(); renderStory(); navigate('story'); }
+    if (story.doc?.id === id && (story.editing || story.candidate)) { renderStory(); navigate('story'); return; }
+    const navigation = state.navigationEpoch;
+    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); if (navigation !== state.navigationEpoch || stopped) return; story.doc = doc; story.creating = false; story.candidate = null; story.block = null; storyURL(); renderStory(); navigate('story'); }
     catch (error) { message('notice', `Não foi possível abrir o roteiro: ${error.message}`, true); }
   }
   function storyBlocks() { return story.candidate?.blocks || story.doc?.blocks || []; }
@@ -719,8 +784,17 @@ export function startUI(document, client = createClient(), stories = createStory
         if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
       }
       if (!info.frozen) {
+        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.disabled = story.busy;
+        remove.addEventListener('click', async () => {
+          if (story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
+          const changed = storyBlocks().filter(item => item.id !== block.id);
+          if (story.candidate) { story.candidate.blocks = changed; story.editing = null; renderStory(); }
+          else if (await saveStoryBlocks(changed, changed.length ? story.doc.adopted : false)) { story.editing = null; renderStory(); }
+        }); li.append(remove);
+      } else li.append(element('p', 'caption', 'Bloco enviado: vídeo e histórico preservados.'));
+      if (!info.frozen) {
         const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
-        for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1], ['Remover bloco', 0]]) {
+        for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
           const button = element('button', '', label); button.type = 'button'; button.disabled = delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
           button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; await saveStoryBlocks(changed); }); organize.append(button);
         } li.append(organize);
@@ -760,9 +834,10 @@ export function startUI(document, client = createClient(), stories = createStory
     finally { story.busy = false; controls(); }
   }
   async function openStoryAttempt(attempt) {
+    const origin = viewSnapshot(), navigation = state.navigationEpoch;
     story.block = attempt.block_id; story.intent = attempt.intent_id; story.intentOwner = {id: story.doc.id, block: story.block, intent: story.intent}; storyURL();
     if (!attempt.run) { if (!state.uncertain) story.uncertainIntent = attempt.intent_id; state.uncertain = true; state.statusOnly = true; story.rejectedReady = null; navigate('generation'); message('operation', 'Resultado ainda não confirmado. Consulte o mesmo envio.'); if (attempt.admission === 'rejected' && attempt.state === 'not_admitted') await readStoryIntent(); return; }
-    await select(attempt.run.id, attempt.run); navigate('review');
+    await select(attempt.run.id, attempt.run); if (navigation === state.navigationEpoch && state.selected?.id === attempt.run.id) navigate('review', {origin});
   }
   async function prepareStoryBlock(block) {
     if (!block || !story.doc.adopted) return;
@@ -774,7 +849,7 @@ export function startUI(document, client = createClient(), stories = createStory
   }
   async function storyNext() {
     const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted);
-    if (!next) { const last = storyBlockState(story.doc, story.doc.blocks.at(-1)).accepted; await select(last.run.id, last.run); navigate('assembly'); return; }
+    if (!next) { const last = storyBlockState(story.doc, story.doc.blocks.at(-1)).accepted, navigation = state.navigationEpoch; await select(last.run.id, last.run); if (navigation === state.navigationEpoch && state.selected?.id === last.run.id) navigate('assembly'); return; }
     const latest = storyBlockState(story.doc, next).latest;
     if (latest) { await openStoryAttempt(latest); if (['rejected', 'interrupted'].includes(latest.run?.state)) await prepareRetry(); } else await prepareStoryBlock(next);
   }
@@ -974,7 +1049,7 @@ export function startUI(document, client = createClient(), stories = createStory
       const stamp = Number.isNaN(created.getTime()) ? 'Data indisponível' : new Intl.DateTimeFormat('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(created);
       const date = element('span', 'card-created', `Criado ${stamp}`); date.title = run.created_at || '';
       button.append(top, element('span', 'card-prompt', run.prompt || 'Sem instrução'), bottom, date);
-      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); list.append(button);
+      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(run.id); if (navigation === state.navigationEpoch && state.selected?.id === run.id) navigate('review', {origin}); }); const card = element('article', 'library-item'); card.append(button, deleteButton('Apagar bloco', () => removeLibraryItem('run', run))); list.append(card);
     }
     text('library-count', `${state.total} blocos`);
     text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
@@ -983,21 +1058,22 @@ export function startUI(document, client = createClient(), stories = createStory
   }
   function renderSequence() {
     $('sequence').replaceChildren();
-    const blocks = state.sequence?.blocks || [];
+    const blocks = state.openedBranchEnd ? state.branchSequence?.blocks || [] : state.sequence?.blocks || [];
     let elapsed = 0;
-    // Store already returns root -> selected, including the chosen branch only.
+    // Keep the explicitly opened branch visible while reviewing its ancestors.
     for (const [index, block] of blocks.entries()) {
       const li = element('li'); const button = element('button'); button.type = 'button'; button.setAttribute('aria-current', String(block.id === state.selected?.id));
       const seconds = Number(block.duration_seconds);
       button.append(element('span', 'shot-number', String(index + 1).padStart(2, '0')), element('span', 'shot-id', block.id.slice(0, 8)), element('span', 'shot-time', `${elapsed.toFixed(2)} → ${(elapsed + seconds).toFixed(2)} s`), element('span', 'shot-time', label(block)));
       button.setAttribute('aria-label', `Bloco ${index + 1}, ${label(block)}, ${block.id}`);
-      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(block.id); if (navigation === state.navigationEpoch && state.selected?.id === block.id) navigate('review', {origin}); }); li.append(button); $('sequence').append(li); elapsed += seconds;
+      button.addEventListener('click', async () => { const origin = viewSnapshot(), navigation = state.navigationEpoch; await select(block.id, undefined, {preserveBranch: true}); if (navigation === state.navigationEpoch && state.selected?.id === block.id) navigate('review', {origin}); }); li.append(button); $('sequence').append(li); elapsed += seconds;
     }
     text('sequence-message', blocks.length ? `${blocks.length} bloco(s) nesta cadeia · tempos de cada bloco, sem montagem automática.` : 'A cadeia segue os pais do bloco, sem misturar ramificações.');
     motion.changed('sequence', blocks.map(block => `${block.id}:${block.state}`).join('|'), [$('sequence').querySelector('[aria-current="true"] .shot-number')], 'confirm');
   }
   function renderRun() {
     const run = state.selected;
+    $('run-delete').hidden = !run || story.runIDs.has(run.id);
     text('run-state', label(run));
     motion.changed('review', `${run?.id}:${run?.state}`, [$('run-state')], ['accepted', 'rejected'].includes(run?.state) ? 'confirm' : 'cue');
     const summary = state.items.find(item => item.id === run?.id);
@@ -1109,25 +1185,32 @@ export function startUI(document, client = createClient(), stories = createStory
       state.items = result.items; state.total = result.total; renderLibrary();
     } finally { $('library').setAttribute('aria-busy', 'false'); }
   }
-  async function select(id, knownRun) {
+  async function select(id, knownRun, {preserveBranch = false, branchEnd = null} = {}) {
     if (state.busy && !knownRun) return;
     if (id !== state.selected?.id) ++state.draftRevision;
-    const epoch = ++state.epoch;
+    const end = branchEndForSelection(id, state.branchSequence, preserveBranch, branchEnd, state.openedBranchEnd);
+    const epoch = ++state.epoch, navigation = state.navigationEpoch;
     text('sequence-message', 'Carregando cadeia…');
     try {
       const run = knownRun || await client.get(`/runs/${encodeURIComponent(id)}`);
-      if (epoch !== state.epoch) return;
+      if (epoch !== state.epoch || navigation !== state.navigationEpoch || stopped) return;
+      if (run.id !== id) throw new Error('O detalhe recebido não corresponde ao bloco solicitado.');
+      canonicalUUID(run.id);
       if (state.selected?.id !== run.id) { state.sequence = null; message('retry-status', ''); }
-      state.selected = run;
+      state.selected = run; state.openedBranchEnd = end;
+      if (state.branchSequence?.end_run_id !== end) state.branchSequence = null;
       if (story.doc) { const attempt = story.doc.attempts.find(item => item.run_id === run.id); story.block = attempt?.block_id || null; if (attempt) story.intent = attempt.intent_id; }
       renderRun();
       const sequence = await client.get(`/runs/${encodeURIComponent(id)}/sequence`);
-      if (epoch !== state.epoch) return;
-      if (!Array.isArray(sequence.blocks)) throw new Error('Resposta inválida da cadeia.');
-      state.sequence = sequence; renderRun();
+      if (epoch !== state.epoch || navigation !== state.navigationEpoch || stopped) return;
+      validateBranchSequence(sequence, id, id);
+      const full = end === id ? sequence : await client.get(`/runs/${encodeURIComponent(end)}/sequence`);
+      if (epoch !== state.epoch || navigation !== state.navigationEpoch || stopped) return;
+      validateBranchSequence(full, end, id);
+      state.sequence = sequence; state.branchSequence = full; renderRun();
       await loadAssemblies();
     } catch (error) {
-      if (epoch === state.epoch) { message('notice', `Não foi possível abrir o bloco: ${error.message}`, true); text('sequence-message', `Cadeia indisponível: ${error.message}`); }
+      if (epoch === state.epoch && navigation === state.navigationEpoch) { state.branchSequence = null; renderSequence(); message('notice', `Não foi possível abrir o bloco: ${error.message}`, true); text('sequence-message', `Cadeia indisponível: ${error.message}`); }
     }
   }
   async function loadConfig() {
@@ -1182,7 +1265,7 @@ export function startUI(document, client = createClient(), stories = createStory
       await storyLibrary();
       if (story.doc && !story.busy && !story.editing && !story.candidate) { story.doc = await stories.read(story.doc.id); if (state.screen === 'story') renderStory(); }
       if (!state.busy && selectionEpoch === state.epoch) {
-        if (state.selected) await select(state.selected.id);
+        if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true});
       }
       message('notice', state.uncertain ? 'Resultado anterior incerto. Consulte os IDs e não duplique o envio.' : 'Biblioteca atualizada. Gerar e revisar exigem ação explícita.');
     } catch (error) { message('notice', `Biblioteca indisponível: ${error.message}. Use Atualizar para consultar novamente.`, true); }
@@ -1268,6 +1351,7 @@ export function startUI(document, client = createClient(), stories = createStory
   $('settings-done').addEventListener('click', back);
   $('retry-mode').addEventListener('click', prepareRetry);
   $('back').addEventListener('click', back);
+  $('screen-eyebrow').addEventListener('click', goHome);
   $('nav-status').addEventListener('click', () => { state.statusOnly = true; navigate('generation'); });
   $('status-review').addEventListener('click', async () => { if (!state.pendingRun || state.busy) return; const origin = viewSnapshot(), navigation = state.navigationEpoch, id = state.pendingRun.id; await select(id); if (navigation === state.navigationEpoch && state.selected?.id === id) navigate('review', {origin}); });
   $('use-idea').addEventListener('click', useIdea);
@@ -1308,7 +1392,9 @@ export function startUI(document, client = createClient(), stories = createStory
   for (const id of ['story-count', 'story-duration']) $(id).addEventListener('input', initialTotal);
   $('story-manual').addEventListener('click', () => createStory(false)); $('story-propose').addEventListener('click', () => createStory(true));
   $('story-adopt').addEventListener('click', () => { if (story.candidate && story.candidate.source_revision !== story.doc.revision) { message('story-status', 'O roteiro mudou no PC. Confira a proposta antiga antes de salvar.', true); return; } void saveStoryBlocks(storyBlocks(), true); });
-  $('story-add').addEventListener('click', async () => { try { const block = {id: newAssemblyUUID(document.defaultView.crypto), action: 'Descreva a próxima ação.', prompt: 'Descreva a próxima ação.', seed: parseSeed($('seed').value), duration_seconds: state.capabilities.default_requested_seconds}; if (story.candidate) { story.candidate.blocks.push(block); renderStory(); } else await saveStoryBlocks([...story.doc.blocks, block]); } catch (error) { message('story-status', error.message, true); } });
+  $('story-add').addEventListener('click', async () => { try { const block = {id: newAssemblyUUID(document.defaultView.crypto), action: 'Descreva a próxima ação.', prompt: 'Describe the next action.', seed: parseSeed($('seed').value), duration_seconds: state.capabilities.default_requested_seconds}; if (story.candidate) { story.candidate.blocks.push(block); renderStory(); } else await saveStoryBlocks([...story.doc.blocks, block]); } catch (error) { message('story-status', error.message, true); } });
+  $('story-delete').addEventListener('click', () => removeLibraryItem('story', story.doc));
+  $('run-delete').addEventListener('click', () => removeLibraryItem('run', state.selected));
   $('story-next').addEventListener('click', storyNext);
   $('story-return').addEventListener('click', () => { renderStory(); navigate('story'); });
   $('story-intent-read').addEventListener('click', readStoryIntent);
@@ -1321,8 +1407,8 @@ export function startUI(document, client = createClient(), stories = createStory
   $('story-block-proposal').addEventListener('input', () => { if (draft().storyCandidate) draft().storyCandidate.text = $('story-block-proposal').value; });
   $('story-stale-use').addEventListener('click', () => { draft().storyPromptStale = false; $('story-stale-prompt').hidden = true; controls(); });
   $('story-base-use').addEventListener('click', () => { const block = story.doc.blocks.find(item => item.id === story.block); $('prompt').value = block.prompt; draft().storyPromptStale = false; draft().promptOrigin = 'roteiro'; saveDraft(); controls(); });
-  $('story-save-continue').addEventListener('click', async () => { if (await saveStoryEdit()) { const target = story.pendingEdit; story.pendingEdit = null; $('story-unsaved').hidden = true; if (target === 'back') { back(); return; } if (target) { story.editing = target; story.editDraft = {...storyBlocks().find(block => block.id === target)}; renderStory(); } } });
-  $('story-discard').addEventListener('click', () => { const target = story.pendingEdit; story.pendingEdit = null; if (target === 'back') { story.editing = null; $('story-unsaved').hidden = true; back(); return; } story.editing = target; story.editDraft = target ? {...storyBlocks().find(block => block.id === target)} : null; $('story-unsaved').hidden = true; renderStory(); });
+  $('story-save-continue').addEventListener('click', async () => { if (await saveStoryEdit()) { const target = story.pendingEdit; story.pendingEdit = null; $('story-unsaved').hidden = true; if (target === 'home') { goHome(); return; } if (target === 'back') { back(); return; } if (target) { story.editing = target; story.editDraft = {...storyBlocks().find(block => block.id === target)}; renderStory(); } } });
+  $('story-discard').addEventListener('click', () => { const target = story.pendingEdit; story.pendingEdit = null; if (target === 'home') { story.editing = null; $('story-unsaved').hidden = true; goHome(); return; } if (target === 'back') { story.editing = null; $('story-unsaved').hidden = true; back(); return; } story.editing = target; story.editDraft = target ? {...storyBlocks().find(block => block.id === target)} : null; $('story-unsaved').hidden = true; renderStory(); });
   $('story-keep-editing').addEventListener('click', () => { story.pendingEdit = null; $('story-unsaved').hidden = true; });
   $('story-editor-save').addEventListener('click', async () => { try { await stories.saveEditor($('story-system').value); message('story-editor-status', 'Instruções do roteirista salvas no PC.'); } catch (error) { message('story-editor-status', error.message, true); } });
   for (const figure of document.querySelectorAll('.visual-card')) { const button = element('button', '', 'Ampliar imagem'); button.type = 'button'; button.addEventListener('click', () => { const expanded = figure.classList.toggle('expanded'); button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Reduzir imagem' : 'Ampliar imagem'; }); figure.append(button); }
@@ -1332,6 +1418,7 @@ export function startUI(document, client = createClient(), stories = createStory
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
+    if (remembered && state.screen === 'story' && remembered.snapshot.screen === 'story' && story.doc?.id === remembered.snapshot.storyDoc?.id) { document.defaultView.history.go(event.state.h3View > historyToken ? 1 : -1); return; }
     if (remembered) { historyToken = event.state.h3View; void restoreView(remembered.snapshot, remembered.trail); }
     else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
     else navigate('library', {remember: false});

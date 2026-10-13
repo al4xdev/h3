@@ -321,18 +321,19 @@ async def owned_image(root: Path, reference: EditorReference):
         yield snapshot, mime
 
 
-def image_json_body(model: str, system: str, prompt: str, snapshot, mime: str):
+def image_json_body(model: str, system: str, prompt: str, snapshot, mime: str, *,
+                    output_text: dict | None = None):
     """Compatibility wrapper: preserve the original single-image wire/chunk shape."""
-    return images_json_body(model, system, prompt, [(snapshot, mime)])
+    return images_json_body(model, system, prompt, [(snapshot, mime)], output_text=output_text)
 
 
 VIDEO_MAX_BYTES = 256 * 1024**2
 VIDEO_MAX_FRAMES = 3600  # Editor CPU budget, not a generation/model limit.
 CONTINUATION_LABEL = (
-    "Analise AMBAS as imagens: a primeira é a referência original de identidade/aparência; "
-    "a segunda é o último frame do pai aceito, com a pose, roupa e estado atual da cena. "
-    "Preserve a identidade da primeira e a continuidade da segunda, respeitando somente "
-    "as mudanças da instrução do usuário abaixo."
+    "Analyze BOTH images: the first is the original identity/appearance reference; "
+    "the second is the last frame of the accepted parent, showing the current pose, "
+    "clothing and scene state. Preserve the identity from the first and continuity "
+    "from the second, respecting only the changes in the user's instruction below."
 )
 
 
@@ -497,7 +498,8 @@ async def encoded_chunks(snapshot):
         yield block
 
 
-def images_json_body(model: str, system: str, prompt: str, images):
+def images_json_body(model: str, system: str, prompt: str, images, *,
+                     output_text: dict | None = None):
     """One or two flat Responses images, no media-sized Python allocation."""
     if len(images) not in (1, 2):
         raise ValueError("Editor requires one image or both continuation contexts")
@@ -515,6 +517,8 @@ def images_json_body(model: str, system: str, prompt: str, images):
              for _, mime in images]
     suffix = (b',{"type":"input_text","text":' + json.dumps(prompt, ensure_ascii=False).encode()
               + b'}]}],"max_output_tokens":8192,"stream":false,"store":false}')
+    if output_text is not None:
+        suffix = suffix[:-1] + b',"text":' + json.dumps(output_text, ensure_ascii=False).encode() + b'}'
 
     async def chunks():
         initial = prefix + heads[0]

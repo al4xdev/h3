@@ -32,9 +32,57 @@
 
 Roteirista tem configuração própria. O enhancer de bloco continua usando seu sistema custom atual, modelo fixo e endpoint `/grok`, com intenção geral/past-intents/current/next e duração. Texto de passado é **intenção**, não alegação de fato visual. Continuação envia identidade original + frame do pai aceito pelo adaptador existente, sem PNG inventado, override de path ou fallback silencioso para uma imagem.
 
+Nos ajustes, **Vídeos sequenciais** e **Roteiro completo** são seções recolhíveis,
+com campos e ações de salvar independentes. Vídeos sequenciais usa
+`.data/grok/editor.json` e devolve a instrução textual de um bloco. Roteiro completo
+usa `.data/roteiros/editor.json` e recebe a ideia, nome, quantidade e duração inicial,
+além da referência original. Os prompts padrão e contextos acrescentados pelo
+aplicativo são escritos em inglês; ideias, instruções já enviadas e falas literais
+do usuário são preservadas. O transporte Responses pede `text.format` com
+`type: json_schema`, `strict: true` e o schema do roteiro, incluindo o número exato
+de blocos. A validação local continua obrigatória; erro ou resposta incompleta não
+provoca nova chamada ou fallback para texto livre.
+
+A migração explícita `tools/migrate_grok_prompts.py` preserva exatamente a
+configuração de vídeos sequenciais, exige os hashes esperados dos dois arquivos e
+salva cópias privadas antes de trocar apenas o prompt de roteiro completo. Não
+acessa OAuth, altera modelo ou chama o provider. Nova edição do usuário impede
+substituição pela migração; uma configuração já migrada não é regravada.
+
 Configuração/transportador reutilizados não autorizam acessar OAuth, refresh ou inferência em startup/SSE/tests. Modelo permanece `grok-4.20-0309-non-reasoning`. A autorização real37 de uma chamada já foi consumida; esta implementação usa somente fakes.
 
 Antes de materializar, o pipe compara a projeção original source_root/path/SHA do roteiro com a prova nativa recém calculada. Troca de bytes entre preflight e admissão rejeita antes de Store.create/worker. Setters fluentes de UUID/prova são puros, opcionais e não alteram schema público/parâmetros dos blocos avulsos.
+
+## Apagar itens da biblioteca
+
+Os cartões de **Roteiros** e **Blocos avulsos**, e suas telas de detalhe, oferecem
+**Apagar**. A confirmação solicita uma remoção real de mídia própria: arquivos são
+transferidos para um diretório privado novo `/tmp/h3-trash-*`, com registro da
+operação. Referências compartilhadas, assets versionados, dados legados e arquivos
+do ComfyUI permanecem intactos. Pequenos manifests, pedidos, decisões e marcadores
+de remoção ficam em `.data` para preservar procedência e impedir replay de UUID.
+
+`DELETE /runs/<UUID>` não aceita body; `DELETE /roteiros/<UUID>` exige
+`{"expected_revision": <revisão atual>}`. Apagar roteiro inclui mídias das suas
+tentativas confirmadas e montagens próprias. Uso por outro roteiro, continuação
+externa ou montagem compartilhada bloqueia a remoção. Geração/montagem ativa ou
+admissão incerta também bloqueiam. A operação usa o slot local existente, sem
+controlar o ComfyUI, e guarda evidência de falha/rollback sem repetição automática.
+Itens removidos deixam os catálogos e leituras públicas; uma abertura antiga não
+recria vídeos nem libera IDs já utilizados.
+
+## Navegação e sequência aberta
+
+**Estúdio local**, no topo, abre a biblioteca. A revisão de uma tentativa de roteiro
+retorna à tela de todos os blocos pelo **Voltar**. Rascunhos e pedidos em andamento
+ou incertos mantêm seus registros e bloqueios ao navegar.
+
+Ao selecionar um ancestral na linha de continuidade, a sequência já aberta mantém
+seu último bloco explícito: abrir o bloco 12 e selecionar o 7 mantém os doze cartões
+visíveis. Esse contexto visual não substitui a cadeia real da seleção: continuar e
+montar seguem usando o bloco selecionado e seus próprios ancestrais. Outra
+ramificação precisa ser aberta explicitamente; não há escolha automática de filho
+ou resultado mais recente.
 
 ## Limites operacionais, não qualidade/performance
 
@@ -46,6 +94,18 @@ Antes de materializar, o pipe compara a projeção original source_root/path/SHA
 - RAM continua apenas telemetria. Nenhuma admissão/cancelamento por RAM livre, nenhum controle de cache/processo/lifecycle do ComfyUI/script do dono.
 
 ## Validação e evidência
+
+Atualização de biblioteca, prompts e navegação em 2026-10-13: **889 testes Python**
+fake/CPU e **185 testes Node** passaram; Ruff e whitespace check aprovados. Inclui
+exclusão de roteiro com tentativa nativa e montagem falsas, preservação dos arquivos
+de origem, restart sem replay, dependências compartilhadas, rollback, migração
+privada/atômica, payload de JSON Schema, navegação 12→7 sem truncamento, falha de
+leitura do fim da sequência, respostas atrasadas e histórico de itens apagados.
+A configuração local do roteiro completo foi migrada para inglês com snapshot;
+o hash da configuração sequencial permaneceu exatamente igual. Logs locais em
+`.dumps/tasks/library-grok-pytest.txt` e `library-grok-node-tests.txt`. Não houve
+provider/GPU ou início/reinício de servidor de produção. Esta atualização não
+inclui nova captura visual em navegador; a evidência mobile abaixo é histórica.
 
 Validação concluída sem iniciar APIreal H3, provider ou GPU:
 

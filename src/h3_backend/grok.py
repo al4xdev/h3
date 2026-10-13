@@ -58,12 +58,13 @@ class PromptRequest(BaseModel):
 
 
 DEFAULT_EDITOR_SYSTEM = (
-    "Transforme a ideia simples do usuário em uma instrução de cena clara, no idioma dele. "
-    "Preserve a ação, roupa, pose e ordem das mudanças pedidas; descreva a continuidade de modo "
-    "conciso. Não invente identidade, aparência, ações ou mudanças não solicitadas. "
-    "Não inclua explicações, títulos, parâmetros técnicos, nodes, seed, duração, resolução, "
-    "sampler ou ajustes do modelo. Responda somente com a instrução editável da cena, "
-    "em até 12000 caracteres. Você edita texto: não edita imagens nem gera vídeos."
+    "Turn the user's simple idea into a clear scene instruction in English. "
+    "Preserve exact dialogue quotations in their requested language. "
+    "Preserve the requested action, clothing, pose and order of changes; describe continuity "
+    "concisely. Do not invent identity, appearance, actions or unrequested changes. "
+    "Do not include explanations, titles, technical parameters, nodes, seed, duration, "
+    "resolution, sampler or model settings. Respond only with the editable scene instruction, "
+    "using at most 12000 characters. You edit text: you do not edit images or generate videos."
 )
 EDITOR_MAX_BYTES = 1024 * 1024
 FIXED_EDITOR_MODEL = "grok-4.20-0309-non-reasoning"
@@ -256,7 +257,11 @@ class Grok:
         self.model = model
         self.root = root
 
-    async def complete(self, payload: PromptRequest) -> dict:
+    async def complete(self, payload: PromptRequest, *, output_schema: dict | None = None,
+                       schema_name: str = "h3_roteiro") -> dict:
+        output_text = ({"format": {"type": "json_schema", "name": schema_name,
+                                  "strict": True, "schema": output_schema}}
+                       if output_schema is not None else None)
         model = payload.model or self.model
         try:
             config = await asyncio.to_thread(persisted_editor, self.root) if self.root else None
@@ -291,20 +296,24 @@ class Grok:
                         raise OAuthError("invalid_continuation", "Parent is unaccepted, changed, "
                                          "unsafe or unsupported, or identity does not match.", 400) from None
                     body, length = images_json_body(model, payload.system_prompt, payload.prompt,
-                                                    [(snapshot, mime), (frame, "image/png")])
+                                                    [(snapshot, mime), (frame, "image/png")],
+                                                    output_text=output_text)
                 else:
                     body, length = image_json_body(model, payload.system_prompt, payload.prompt,
-                                                   snapshot, mime)
+                                                   snapshot, mime, output_text=output_text)
                 # Provider/auth failures are not image-validation errors.
                 return await self._submit(model, {"content": body}, length=length)
         messages = []
         if payload.system_prompt:
             messages.append({"role": "system", "content": payload.system_prompt})
         messages.append({"role": "user", "content": payload.prompt})
-        return await self._submit(model, {"json": {
+        body = {
             "model": model, "input": messages, "max_output_tokens": 8192,
             "stream": False, "store": False,
-        }})
+        }
+        if output_text is not None:
+            body["text"] = output_text
+        return await self._submit(model, {"json": body})
 
     async def _submit(self, model: str, body: dict, *, length: int | None = None) -> dict:
         async with self.manager.client_factory() as client:

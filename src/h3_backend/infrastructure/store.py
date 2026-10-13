@@ -500,6 +500,8 @@ class Store:
 
     def get(self, run_id: str) -> Run:
         with self._lock, storage_guard(self.root):
+            if self.removed(run_id):
+                raise FileNotFoundError("Block removed")
             path = safe_path(self.directory(run_id), "manifest.json")
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             with os.fdopen(fd, "rb") as stream:
@@ -581,6 +583,22 @@ class Store:
                 "blocks": blocks,
             }
 
+    def removed(self, run_id: str) -> bool:
+        path = safe_path(self.directory(run_id), "removed.json")
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or info.st_nlink != 1 or not 0 < info.st_size <= 1024):
+                    raise ValueError("Invalid block removal marker")
+                raw = stream.read(1025)
+        except FileNotFoundError:
+            return False
+        if len(raw) > 1024 or json.loads(raw) != {"id": run_id, "removed": True}:
+            raise ValueError("Invalid block removal marker")
+        return True
+
     def list_runs(self, *, limit: int = 50, offset: int = 0) -> tuple[list[Run], int]:
         """Bounded metadata page; never probe videos, select siblings or touch ComfyUI."""
         if type(limit) is not int or type(offset) is not int or not (
@@ -591,6 +609,8 @@ class Store:
             self._authority()
             order = []
             for path in self.runs.glob("*/manifest.json"):
+                if self.removed(path.parent.name):
+                    continue
                 if len(order) >= 10000:
                     raise ValueError("Run catalog exceeds metadata capacity")
                 run = self.get(path.parent.name)
@@ -651,6 +671,8 @@ class Store:
             self._authority()
         restored = []
         for path in sorted(self.runs.glob("*/manifest.json")):
+            if self.removed(path.parent.name):
+                continue
             run = self.get(path.parent.name)
             if run.state in {"queued", "running"}:
                 run = self.update(

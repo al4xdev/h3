@@ -45,7 +45,7 @@ Exemplo de body de `POST /grok` (somente no clique explícito de detalhar):
 
 ```json
 {
-  "system_prompt": "Detalhe a ideia sem inventar ações ou parâmetros.",
+  "system_prompt": "Expand the idea in English without inventing actions or parameters.",
   "prompt": "ela dá um salto e o vestido fica vermelho",
   "reference": {"source_root": "assets", "path": "dance_reference.png"}
 }
@@ -55,7 +55,25 @@ Exemplo de body de `POST /grok` (somente no clique explícito de detalhar):
 pode divergir do pin persistido. Resposta: `{"text":"...","model":"..."}`.
 O endpoint recebe prompt até 100000 caracteres; o campo de cena/UI limita 12000 e
 rejeita saída maior sem truncar. O system prompt padrão pede somente a instrução da
-cena no idioma do usuário, sem inventar identidade ou alterar parâmetros nativos.
+cena em inglês, sem inventar identidade ou alterar parâmetros nativos. As instruções
+embutidas no código e o rótulo de contexto de continuação também são em inglês;
+o system personalizado persistido continua sendo enviado literalmente.
+
+O roteiro completo usa a chamada interna `Grok.complete(..., output_schema=...)`
+para pedir JSON estruturado. O contrato de [Responses da xAI](https://docs.x.ai/developers/rest-api-reference/inference/responses)
+é `text.format = {type: "json_schema", name: "h3_roteiro", strict: true, schema: ...}`;
+não é o campo `response_format` de Chat Completions. O schema vem do DTO do roteiro,
+com campos obrigatórios e propriedades extras proibidas. O mesmo formato acompanha
+texto puro ou imagens em streaming, mantendo o pin e as referências originais.
+O editor sequencial público não recebe esse opt-in nem aceita schemas arbitrários.
+
+A [documentação de schemas](https://docs.x.ai/developers/model-capabilities/text/structured-outputs)
+aceita referências não circulares, objetos, arrays e limites numéricos; limites de
+strings acima de 2048 caracteres dependem do comportamento do modelo. Portanto, o
+roteiro continua validando o JSON, conteúdo, quantidade de blocos e durações no PC.
+Recusa, resposta incompleta ou schema rejeitado não causam retry, fallback para texto
+livre ou mudança de modelo. Esta integração foi verificada com clientes falsos;
+suporte ao formato pelo grant OAuth específico não foi certificado por inferência real.
 
 O helper `infrastructure/grok_image.py` resolve somente bytes públicos próprios:
 

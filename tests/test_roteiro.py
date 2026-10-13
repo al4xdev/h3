@@ -53,6 +53,7 @@ def update(doc, **changes):
 class FakeGrok:
     def __init__(self, *, text=None, gate=None):
         self.calls = []
+        self.schemas = []
         self.gate = gate
         self.entered = asyncio.Event()
         self.text = text or json.dumps({"name": "Proposta", "blocks": [
@@ -60,8 +61,9 @@ class FakeGrok:
             {"action": "Vermelho", "duration_seconds": 8, "prompt": "Muda para vermelho"},
         ]})
 
-    async def complete(self, request):
+    async def complete(self, request, **kwargs):
         self.calls.append(request)
+        self.schemas.append(kwargs)
         self.entered.set()
         if self.gate:
             await self.gate.wait()
@@ -123,6 +125,10 @@ async def test_candidate_separate_exact_count_seed_and_late_revision(tmp_path):
     assert op.get(doc.id).blocks == doc.blocks
     assert op.get(doc.id).name == edited["name"]
     assert len(fake.calls) == 1
+    assert fake.schemas[0]["schema_name"] == "h3_roteiro"
+    schema = fake.schemas[0]["output_schema"]
+    assert schema["properties"]["blocks"]["minItems"] == 2
+    assert schema["properties"]["blocks"]["maxItems"] == 2
     assert fake.calls[0].reference == doc.reference
     assert fake.calls[0].system_prompt == op.script_config()["system_prompt"]
     assert fake.calls[0].model == FIXED_EDITOR_MODEL
@@ -268,7 +274,7 @@ async def test_provider_failure_leaves_durable_candidate_intent_not_adopted(tmp_
     doc = op.get(created["id"])
 
     class LostGrok:
-        async def complete(self, payload):
+        async def complete(self, payload, **kwargs):
             raise OSError("Lost explicit proposal response")
 
     with pytest.raises(OSError):

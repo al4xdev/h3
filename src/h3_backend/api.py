@@ -21,6 +21,7 @@ from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
+from .library import router as library_router
 from .roteiro import router as roteiro_router
 
 WEB_ROOT = Path(__file__).with_name("web")
@@ -59,6 +60,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
     app.include_router(roteiro_router)
+    app.include_router(library_router)
     app.include_router(assembly_router)
     if service is not None:
         app.state.service = service

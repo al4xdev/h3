@@ -37,13 +37,14 @@ from .infrastructure.store import Store
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_BLOCKS = 50  # Local planning budget, not a model or GPU capacity claim.
 DEFAULT_SCRIPT_SYSTEM = (
-    'Divida a ideia do usuário em blocos de vídeo consecutivos, sem gerar vídeos. '
-    'Preserve identidade, ações e ordem das mudanças. Não invente fatos sobre frames futuros. '
-    'Responda somente JSON estrito: {"name":"título", "blocks":['
-    '{"action":"ação", "duration_seconds":8, "prompt":"instrução-base editável"}]}. '
-    'Use exatamente a quantidade solicitada, durações positivas até 10 segundos com no máximo '
-    'duas casas decimais, ação e prompt não vazios com até 12000 caracteres. '
-    'Não inclua IDs, seed, explicações, markdown nem parâmetros do modelo.'
+    'Divide the user idea into consecutive video blocks without generating videos. '
+    'Preserve identity, actions and the order of changes. Do not invent facts about future frames. '
+    'Return only strict JSON: {"name":"title", "blocks":['
+    '{"action":"action", "duration_seconds":8, "prompt":"editable base instruction"}]}. '
+    'Use exactly the requested block count and positive durations up to 10 seconds with at most '
+    'two decimal places. Action and prompt must be nonempty and at most 12000 characters. '
+    'Write each video prompt in English, preserving any explicitly requested dialogue verbatim. '
+    'Do not include IDs, seeds, explanations, markdown or model parameters.'
 )
 
 
@@ -113,6 +114,10 @@ class CreatePlan(PlanFields):
 
 
 class UpdatePlan(PlanFields):
+    expected_revision: StrictInt = Field(ge=1)
+
+
+class RemovePlan(StrictDTO):
     expected_revision: StrictInt = Field(ge=1)
 
 
@@ -317,6 +322,8 @@ class Roteiro:
         self.root: Path = service.store.root
 
     def get(self, ident: str) -> Document:
+        if self.removed(ident):
+            raise FileNotFoundError("Roteiro removed")
         with _directory(self.root, (".data", "roteiros", canonical(ident))) as directory:
             doc = Document.model_validate(read_file(directory, "plan.json"))
         if doc.id != ident:
@@ -337,24 +344,44 @@ class Roteiro:
         # Bound library work independently of any native run history.
         if len(ids) > 1000:
             raise ValueError("Roteiro library exceeds 1000 documents")
-        items = [self.view(self.get(ident)) for ident in sorted(ids)]
+        items = [self.view(self.get(ident)) for ident in sorted(ids) if not self.removed(ident)]
         return {"items": items, "total": len(items)}
+
+    def removed(self, ident: str) -> bool:
+        with _directory(self.root, (".data", "roteiros", canonical(ident))) as directory:
+            try:
+                marker = read_file(directory, "removed.json")
+            except FileNotFoundError:
+                return False
+        if marker != {"id": ident, "removed": True}:
+            raise ValueError("Invalid roteiro removal marker")
+        return True
 
     async def reference_digest(self, reference: EditorReference) -> str:
         async with owned_image(self.root, reference) as (snapshot, _):
             return await asyncio.to_thread(snapshot_digest, snapshot)
+
+    def reference_available(self, reference):
+        if reference.source_root == "runs":
+            run_id, _ = self.service.store.run_image_parts(reference.path)
+            self.service.store.get(run_id)
 
     async def create(self, payload: CreatePlan) -> dict:
         digest = await self.reference_digest(payload.reference)
         doc = Document(**payload.model_dump(), id=str(uuid4()), revision=1,
                        reference_sha256=digest)
         encoded_metadata(doc.model_dump())  # Reject aggregate overflow before directory reservation.
-        with (_directory(self.root, (".data", "roteiros", doc.id), create=True) as directory,
-              locked(directory)):
-            write_file(directory, "plan.json", doc.model_dump(), exclusive=True)
+        with (_directory(self.root, (".data", "roteiros"), create=True) as library,
+              locked(library)):
+            self.reference_available(payload.reference)
+            with (_directory(self.root, (".data", "roteiros", doc.id), create=True) as directory,
+                  locked(directory)):
+                write_file(directory, "plan.json", doc.model_dump(), exclusive=True)
         return self.view(doc)
 
     def check_revision(self, doc: Document, expected: int):
+        if self.removed(doc.id):
+            raise Conflict("Roteiro removed from library; history is read-only")
         if doc.revision != expected:
             raise Conflict("Roteiro revision changed; preserve the local draft and reread")
 
@@ -362,8 +389,10 @@ class Roteiro:
         original = self.get(ident)
         self.check_revision(original, payload.expected_revision)
         digest = await self.reference_digest(payload.reference)
-        with (_directory(self.root, (".data", "roteiros", canonical(ident))) as directory,
+        with (_directory(self.root, (".data", "roteiros")) as library, locked(library),
+              _directory(self.root, (".data", "roteiros", canonical(ident))) as directory,
               locked(directory)):
+            self.reference_available(payload.reference)
             doc = self.get(ident)
             self.check_revision(doc, payload.expected_revision)
             if doc.attempts:
@@ -419,9 +448,13 @@ class Roteiro:
                 "id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
                 "state": "uncertain", "request": payload.model_dump(), "source": source,
             }, exclusive=True)
+        schema = ProposedPlan.model_json_schema()
+        schema["properties"]["blocks"]["minItems"] = payload.count
+        schema["properties"]["blocks"]["maxItems"] = payload.count
         result = await grok.complete(PromptRequest(system_prompt=config["system_prompt"],
                                                   prompt=prompt, model=config["model"],
-                                                  reference=doc.reference))
+                                                  reference=doc.reference),
+                                     output_schema=schema, schema_name="h3_roteiro")
         raw = result.get("text") if isinstance(result, dict) else None
         if not isinstance(raw, str):
             raise ValueError("Grok proposal did not contain text")  # noqa: TRY004 - invalid wire response.

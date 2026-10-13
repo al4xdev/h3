@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {nativeExecutionBlocked, ownedIntentMatchingCurrent, readOwnedStoryIntent, rejectedStoryDraft, standaloneLocation, storyLocation, storyPointer, storyUpdate, storyBlockState, storyContext, createStoryClient, HTTPError} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {branchEndForSelection, validateBranchSequence, storyReviewOrigin, nativeExecutionBlocked, ownedIntentMatchingCurrent, readOwnedStoryIntent, rejectedStoryDraft, standaloneLocation, storyLocation, storyPointer, storyUpdate, storyBlockState, storyContext, createStoryClient, HTTPError} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const id = '11111111-1111-4111-8111-111111111111', block = '22222222-2222-4222-8222-222222222222', intent = '33333333-3333-4333-8333-333333333333';
 const fixture = () => ({id, revision: 2, name: '<img onerror=evil()>', idea: 'Macro', reference: {source_root: 'inputs', path: 'own/original.png'}, reference_sha256: 'a'.repeat(64), adopted: true, blocks: [{id: block, action: 'Dance', prompt: ' exact FINAL\n', duration_seconds: 8, seed: 42}], attempts: []});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
@@ -34,7 +34,9 @@ test('accepted positions require observed native publication and decision', () =
 });
 test('packed enhancer context is literal intention not invented visual proof', () => {
   const doc = fixture(), packed = storyContext(doc, block, '8');
-  assert.match(packed, /resultado visual pode diferir/); assert.match(packed, /192 frames/); assert.match(packed, /exact FINAL/);
+  assert.match(packed, /visual result may differ/); assert.match(packed, /192 frames/); assert.match(packed, /exact FINAL/); assert.doesNotMatch(packed, /Roteiro:|Ideia geral:|Instrução escolhida:|Duração solicitada:|Contexto visual:/);
+  doc.idea = 'Ideia original em português'; assert.match(storyContext(doc, block, '8'), /Ideia original em português/);
+  assert.match(source, /action: 'Descreva a próxima ação\.', prompt: 'Describe the next action\.'/);
   doc.idea = 'x'.repeat(12000); assert.throws(() => storyContext(doc, block, '8'));
 });
 test('new intent is known and serialized once; duplicate POST never replays', async () => {
@@ -169,4 +171,148 @@ test('every story admission 4xx remains submitted/status-only until own intent G
     assert.equal(nativeExecutionBlocked({config: {}, mode: 'new', uncertain: fenced, submitted: fenced, statusOnly: fenced}), true);
     assert.equal(uncertain(null, null, error, HTTPError), false, `standalone HTTP ${status} preserves prior semantics`);
   }
+});
+test('library deletion uses explicit DELETE contracts without inference', async () => {
+  const calls = [];
+  const api = createStoryClient(async (url, options = {}) => { calls.push({url, options}); return response({removed: true}); });
+  await api.remove(id, 2);
+  assert.equal(calls[0].url, `/roteiros/${id}`);
+  assert.equal(calls[0].options.method, 'DELETE');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {expected_revision: 2});
+  const handler = source.slice(source.indexOf('async function removeLibraryItem'), source.indexOf('async function storyLibrary'));
+  assert.match(handler, /navigation === state.navigationEpoch/);
+  assert.match(handler, /deletedRunIDs.has\(state.selected\?\.id\)/);
+  assert.match(handler, /button.disabled = false/);
+  assert.doesNotMatch(handler, /client\.(detail|generate|accept)|stories\.(proposal|create)/);
+  assert.match(source, /card.append\(button, deleteButton\('Apagar bloco'/);
+});
+function deletionFixture() {
+  const handler = source.slice(source.indexOf('  async function removeLibraryItem'), source.indexOf('  async function storyLibrary'));
+  const state = {navigationEpoch: 1, screen: 'review', epoch: 0, selected: {id}, sequence: {blocks: []}};
+  const story = {doc: fixture(), block, candidate: {}, editing: block};
+  const calls = [], messages = [], buttons = [{disabled: true}];
+  let confirm = true, gate = Promise.resolve();
+  const remove = async (...args) => { calls.push(args); await gate; };
+  const deps = {state, story, document: {defaultView: {confirm: () => confirm}, querySelectorAll: () => buttons}, stories: {remove}, client: {remove}, renderLibrary() {}, storyURL() {}, renderRun() {}, storyLibrary: async () => {}, loadLibrary: async () => {}, navigate: screen => { state.screen = screen; }, message: (...args) => messages.push(args)};
+  const invoke = new Function(...Object.keys(deps), `let deleting = false, libraryEpoch = 0; const removedStories = new Set(), removedRuns = new Set(); ${handler}; return removeLibraryItem;`)(...Object.values(deps));
+  return {state, story, calls, buttons, messages, invoke, cancel: () => { confirm = false; }, wait: promise => { gate = promise; }};
+}
+test('actual deletion handler cancels and fences busy without requests', async () => {
+  const cancelled = deletionFixture(); cancelled.cancel(); await cancelled.invoke('run', {id}); assert.equal(cancelled.calls.length, 0);
+  const busy = deletionFixture(); busy.state.uncertain = true; await busy.invoke('run', {id}); assert.equal(busy.calls.length, 0);
+});
+test('actual deletion handler clears selected media and reenables buttons', async () => {
+  const f = deletionFixture(); await f.invoke('run', {id}); assert.deepEqual(f.calls, [[id]]); assert.equal(f.state.selected, null); assert.equal(f.state.screen, 'library'); assert.equal(f.buttons[0].disabled, false);
+  const s = deletionFixture(); const doc = {...fixture(), attempts: [{run_id: id}]}; await s.invoke('story', doc); assert.deepEqual(s.calls, [[id, 2]]); assert.equal(s.state.selected, null); assert.equal(s.story.doc, null);
+});
+test('actual deletion handler keeps newer scene and draft on late response', async () => {
+  const f = deletionFixture(); let resolve; f.wait(new Promise(done => { resolve = done; })); const pending = f.invoke('run', {id});
+  f.state.navigationEpoch++; f.state.screen = 'context'; f.state.selected = {id: block}; f.state.parent = {id: block}; f.state.pendingRun = {id: intent}; f.state.uncertain = true;
+  resolve(); await pending;
+  assert.equal(f.state.screen, 'context'); assert.equal(f.state.selected.id, block); assert.equal(f.state.parent.id, block); assert.equal(f.state.pendingRun.id, intent); assert.equal(f.state.uncertain, true);
+});
+
+const branchIds = Array.from({length: 12}, (_, i) => `${String(i + 1).padStart(8, '0')}-1111-4111-8111-111111111111`);
+const branchFixture = (count = 12) => ({end_run_id: branchIds[count - 1], root_id: branchIds[0], blocks: branchIds.slice(0, count).map((id, i) => ({id, parent_id: i ? branchIds[i - 1] : null}))});
+test('filmstrip keeps explicit block12 branch while selected block7 ancestry remains separate', () => {
+  const full = branchFixture(), ancestor = branchIds[6];
+  assert.equal(branchEndForSelection(ancestor, full, true), branchIds[11]);
+  assert.equal(branchEndForSelection(ancestor, full), ancestor);
+  assert.equal(branchEndForSelection(id, full, true), id);
+  assert.equal(branchEndForSelection(ancestor, null, false, branchIds[11]), branchIds[11]);
+  assert.equal(validateBranchSequence(full, branchIds[11], ancestor), full);
+  assert.throws(() => validateBranchSequence({...full, end_run_id: ancestor}, branchIds[11], ancestor));
+  assert.throws(() => validateBranchSequence({...full, blocks: [...full.blocks.slice(0, 6), {...full.blocks[6], parent_id: id}, ...full.blocks.slice(7)]}, branchIds[11], ancestor));
+  assert.throws(() => validateBranchSequence(full, branchIds[11], id));
+});
+test('roteiro review origin returns all planned blocks while settings keeps review origin', () => {
+  const doc = {...fixture(), attempts: [{run_id: id}]}, previous = {screen: 'generation', draftKey: 'active', storyDoc: doc, storyCandidate: {blocks: []}};
+  const remembered = {screen: 'story', storyDoc: doc, scroll: 120, draftKey: 'earlier'};
+  const result = storyReviewOrigin(previous, doc, id, block, intent, [remembered]);
+  assert.equal(result.screen, 'story'); assert.equal(result.scroll, 120); assert.equal(result.storyCandidate, previous.storyCandidate);
+  assert.equal(storyReviewOrigin(previous, doc, intent, block, intent).screen, 'story');
+  assert.equal(storyReviewOrigin(previous, doc, block, null, null), previous);
+  const navigation = source.slice(source.indexOf('  function navigate('), source.indexOf('  async function restoreView('));
+  assert.match(navigation, /screen === 'review' \? storyReviewOrigin/);
+  assert.match(source, /branchEnd: state.openedBranchEnd/);
+  assert.match(source, /snapshot.branchEnd !== state.openedBranchEnd/);
+});
+function selectionFixture() {
+  const handler = source.slice(source.indexOf('  async function select('), source.indexOf('  async function loadConfig('));
+  const state = {epoch: 0, navigationEpoch: 0, draftRevision: 0, branchSequence: branchFixture(), openedBranchEnd: branchIds[11], selected: {id: branchIds[11]}};
+  const calls = [], story = {doc: null}; let gate = Promise.resolve();
+  const client = {get: async path => { calls.push(path); await gate; const selected = path.split('/')[2]; const count = branchIds.indexOf(selected) + 1; return path.endsWith('/sequence') ? branchFixture(count) : {id: selected}; }};
+  const deps = {state, story, client, stopped: false, canonicalUUID: value => value, branchEndForSelection, validateBranchSequence, text() {}, message() {}, renderRun() {}, renderSequence() {}, loadAssemblies: async () => {}};
+  return {state, calls, client, select: new Function(...Object.keys(deps), `${handler}; return select;`)(...Object.values(deps)), wait: value => { gate = value; }};
+}
+test('actual ancestor selection and refresh GET exact opened end without truncating display', async () => {
+  const f = selectionFixture(); await f.select(branchIds[6], undefined, {preserveBranch: true});
+  assert.equal(f.state.sequence.end_run_id, branchIds[6]); assert.equal(f.state.sequence.blocks.length, 7);
+  assert.equal(f.state.branchSequence.end_run_id, branchIds[11]); assert.equal(f.state.branchSequence.blocks.length, 12);
+  assert.ok(f.calls.includes(`/runs/${branchIds[11]}/sequence`));
+  await f.select(branchIds[6], undefined, {preserveBranch: true}); assert.equal(f.state.branchSequence.blocks.length, 12);
+  await f.select(branchIds[3]); assert.equal(f.state.branchSequence.blocks.length, 4);
+});
+test('actual selection discards stale run response after home navigation', async () => {
+  const f = selectionFixture(); let resolve; f.wait(new Promise(done => { resolve = done; })); const pending = f.select(branchIds[6], undefined, {preserveBranch: true});
+  f.state.navigationEpoch++; resolve(); await pending; assert.equal(f.state.selected.id, branchIds[11]); assert.equal(f.calls.length, 1);
+});
+
+test('home uses navigation only and keeps unsaved roteiro edits behind the explicit save guard', async () => {
+  const handler = source.slice(source.indexOf('  function goHome()'), source.indexOf('  function openSettings('));
+  const state = {screen: 'story', uncertain: true, pendingRun: {id}, drafts: new Map([['own', {submitted: true}]])}, story = {editing: block, candidate: {blocks: []}}, unsaved = {hidden: true}, calls = [];
+  const goHome = new Function('state', 'story', '$', 'navigate', `${handler}; return goHome;`)(state, story, () => unsaved, screen => calls.push(screen));
+  goHome(); assert.deepEqual(calls, []); assert.equal(story.pendingEdit, 'home'); assert.equal(unsaved.hidden, false); assert.equal(story.editing, block);
+  story.editing = null; goHome(); assert.deepEqual(calls, ['library']); assert.equal(state.uncertain, true); assert.equal(state.pendingRun.id, id); assert.equal(state.drafts.get('own').submitted, true); assert.ok(story.candidate);
+  assert.doesNotMatch(handler, /client|stories|POST|uuid|uncertain\s*=/i);
+  const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');
+  assert.match(html, /<button id="screen-eyebrow"[^>]+type="button"[^>]+aria-label="Estúdio local: abrir biblioteca"/);
+  assert.match(source, /stop\(\); play\(heading, 'cue'\)/);
+});
+
+test('known display anchor survives unavailable frames and refresh never anchors selected ancestor', () => {
+  assert.equal(branchEndForSelection(branchIds[6], null, true, null, branchIds[11]), branchIds[11]);
+  const selectSource = source.slice(source.indexOf('  async function select('), source.indexOf('  async function loadConfig('));
+  assert.ok(selectSource.indexOf('if (run.id !== id)') < selectSource.indexOf('state.selected = run'));
+  assert.doesNotMatch(selectSource.slice(selectSource.indexOf('catch (error)')), /openedBranchEnd\s*=/);
+  const restore = source.slice(source.indexOf('  async function restoreView('), source.indexOf('  function back('));
+  assert.match(restore, /removedStories.has\(snapshot.storyDoc\?\.id\)/);
+  assert.match(restore, /state.selected\?\.id !== snapshot.selectedId/);
+  assert.match(source, /state.trail = state.trail.slice\(0, prior\)/);
+});
+
+test('actual navigation replaces generation entry after roteiro so Back reaches story once', () => {
+  const handler = source.slice(source.indexOf('  function navigate('), source.indexOf('  async function restoreView('));
+  const doc = {...fixture(), attempts: [{run_id: id}]}, storyView = {screen: 'story', storyDoc: doc, selectedId: null};
+  const state = {screen: 'generation', navigationEpoch: 0, retryEpoch: 0, selected: {id}, trail: [{screen: 'library'}, storyView]};
+  const story = {doc, block, intent}, historyViews = new Map(), recorded = [];
+  const snapshot = () => ({screen: state.screen, storyDoc: doc, selectedId: id});
+  const deps = {state, story, TITLES: {review: 'Review', settings: 'Settings'}, saveDraft() {}, storyReviewOrigin, viewSnapshot: snapshot, historyViews, historyToken: 2, paintScreen() {}, controls() {}, recordView: (value, push) => recorded.push({value, push})};
+  const navigate = new Function(...Object.keys(deps), `${handler}; return navigate;`)(...Object.values(deps));
+  navigate('review'); assert.equal(recorded[0].push, false); assert.deepEqual(state.trail.map(view => view.screen), ['library', 'story']); assert.equal(state.screen, 'review');
+  navigate('settings'); assert.equal(recorded[1].push, true); assert.deepEqual(state.trail.map(view => view.screen), ['library', 'story', 'review']);
+});
+
+test('actual selection rejects mismatched run and retains end12 through transient anchor failure', async () => {
+  const bad = selectionFixture(); bad.client.get = async () => ({id}); await bad.select(branchIds[6]); assert.equal(bad.state.selected.id, branchIds[11]);
+  const f = selectionFixture(), read = f.client.get; let unavailable = true;
+  f.client.get = async path => { if (unavailable && path === `/runs/${branchIds[11]}/sequence`) throw new Error('temporarily unavailable'); return read(path); };
+  await f.select(branchIds[6], undefined, {preserveBranch: true}); assert.equal(f.state.openedBranchEnd, branchIds[11]); assert.equal(f.state.branchSequence, null);
+  unavailable = false; await f.select(branchIds[6], undefined, {preserveBranch: true}); assert.equal(f.state.branchSequence.blocks.length, 12); assert.equal(f.state.sequence.blocks.length, 7);
+});
+test('actual restore of an own deleted item returns library before using deleted metadata', async () => {
+  const handler = source.slice(source.indexOf('  async function restoreView('), source.indexOf('  function back('));
+  const calls = [], deps = {removedStories: new Set([id]), removedRuns: new Set([intent]), navigate: (...args) => calls.push(args), message() {}};
+  const restore = new Function(...Object.keys(deps), `${handler}; return restoreView;`)(...Object.values(deps));
+  await restore({screen: 'story', storyDoc: {id}}, []); await restore({screen: 'review', selectedId: intent}, []);
+  assert.deepEqual(calls.map(call => call[0]), ['library', 'library']);
+});
+test('actual restore preserves unrelated draft when deleted selection was incidental', async () => {
+  const handler = source.slice(source.indexOf('  async function restoreView('), source.indexOf('  function back('));
+  const state = {navigationEpoch: 0, retryEpoch: 0, selected: null, uncertain: true, pendingRun: {id: block}}, story = {}, calls = [];
+  const node = {disabled: false, closest: () => null, matches: () => false, focus() {}};
+  const deps = {state, story, removedStories: new Set(), removedRuns: new Set([id]), navigate: screen => calls.push(screen), message() {}, stopped: false, saveDraft() {}, restoreDraft() {}, draft: () => ({submitted: false}), paintScreen() {}, controls() {}, $: () => node, document: {defaultView: {scrollTo() {}}}, recordView() {}};
+  const restore = new Function(...Object.keys(deps), `${handler}; return restoreView;`)(...Object.values(deps));
+  await restore({screen: 'context', mode: 'new', draftKey: 'isolated-own-draft', parent: null, selectedId: id, statusOnly: false, scroll: 0}, []);
+  assert.deepEqual(calls, []); assert.equal(state.screen, 'context'); assert.equal(state.draftKey, 'isolated-own-draft'); assert.equal(state.uncertain, true); assert.equal(state.pendingRun.id, block);
 });
