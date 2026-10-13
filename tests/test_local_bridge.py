@@ -32,6 +32,7 @@ def client(service):
 
 @pytest.mark.asyncio
 async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv("H3_GROK_MODEL", "grok-4.20-0309-non-reasoning")
     service = make_service(tmp_path)
     await service.startup()
 
@@ -43,7 +44,7 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
     monkeypatch.setattr(service.media, "verify_image", forbidden)
     monkeypatch.setattr(service.media, "probe", forbidden)
     async with client(service) as http:
-        for path, mime in (("/", "text/html"), ("/index", "text/html"),
+        for path, mime in (("/", "text/html"), ("/index", "text/html"), ("/roteiro", "text/html"),
                            ("/ui/app.css", "text/css"), ("/ui/app.js", "text/javascript")):
             response = await http.get(path)
             assert response.status_code == 200 and response.headers["content-type"].startswith(mime)
@@ -57,7 +58,7 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
         assert config == {"default_prompt": DEFAULT_PROMPT, "continuation_prompt": CONTINUATION_PROMPT,
                           "reference_image": "dance_reference.png", "duration_seconds": 8,
                           "workflow_output_profile": "baseline", "filesystem_events": True,
-                          "reference_library": True, "assembly_enabled": True,
+                          "reference_library": True, "assembly_enabled": True, "roteiro_enabled": True,
                           "duration_capabilities": {
                               "default_requested_seconds": 8, "min_requested_seconds": 0,
                               "min_exclusive": True, "max_requested_seconds": 10,
@@ -69,6 +70,12 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
         refs = (await http.get("/inputs")).json()
         assert refs["total"] == 1 and refs["items"][0]["source_root"] == "assets"
         assert refs["items"][0]["path"] == "dance_reference.png"
+        assert not (service.store.root / ".data" / "roteiros").exists()
+        assert (await http.get("/roteiros")).json() == {"items": [], "total": 0}
+        editor = (await http.get("/roteiros/editor")).json()
+        assert isinstance(editor["system_prompt"], str) and editor["system_prompt"]
+        assert editor["model"] == "grok-4.20-0309-non-reasoning"
+        assert not (service.store.root / ".data" / "roteiros").exists()
     assert not service.comfy.submitted and service._task is None
     await service.shutdown()
 

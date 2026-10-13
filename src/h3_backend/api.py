@@ -21,6 +21,7 @@ from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
+from .roteiro import router as roteiro_router
 
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_INPUT_BYTES = 32 * 1024**2
@@ -57,6 +58,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
 
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
+    app.include_router(roteiro_router)
     app.include_router(assembly_router)
     if service is not None:
         app.state.service = service
@@ -92,6 +94,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
 
     @app.get("/")
     @app.get("/index")
+    @app.get("/roteiro")
     def index():
         return FileResponse(safe_path(WEB_ROOT, "index.html"), media_type="text/html")
 
@@ -116,6 +119,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
             "duration_capabilities": duration_capabilities(),
             "filesystem_events": getattr(backend(), "watcher", None) is not None,
             "reference_library": True, "assembly_enabled": True,
+            "roteiro_enabled": True,
         }
 
     @app.get("/runs")

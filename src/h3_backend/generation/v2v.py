@@ -9,19 +9,21 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import monotonic
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request
 
 from ..infrastructure.media import sha256_file
 from ..infrastructure.store import Store, contained, timestamp
 from .dispatcher import Conflict, output_source, publish, verify_video
-from .models import CONTINUATION_PROMPT, ContinueRequest, Run
+from .models import CONTINUATION_PROMPT, ContinueRequest, ImageReference, Run
 from .workflow import V2V_CONFIG, WorkflowConfig
 
 
 @dataclass(frozen=True)
 class V2VPipeState:
+    run_id: str | None = None
+    identity_proof: tuple[str, str, str] | None = None
     request: ContinueRequest | None = None
     parent_id: str | None = None
     workflow_config: WorkflowConfig | None = None
@@ -97,6 +99,19 @@ class V2VPipe:
 
     def save_chunk(self) -> V2VPipe:
         return self._configure(save_output=True)
+
+    def with_run_id(self, run_id: str) -> V2VPipe:
+        # Explicit caller intent correlation; composition remains pure and legacy IDs unchanged.
+        if not isinstance(run_id, str) or str(UUID(run_id)) != run_id:
+            raise ValueError("Run ID must be a canonical UUID")
+        return self._configure(run_id=run_id)
+
+    def with_identity_proof(self, source_root: str, path: str, sha256: str) -> V2VPipe:
+        reference = ImageReference(source_root=source_root, path=path)
+        if (not isinstance(sha256, str) or len(sha256) != 64
+                or any(c not in "0123456789abcdef" for c in sha256)):
+            raise ValueError("Identity proof requires a lowercase SHA256")
+        return self._configure(identity_proof=(reference.source_root, reference.path, sha256))
 
     async def admit(self) -> Run:
         return await self.dispatcher.submit(self)
@@ -183,12 +198,17 @@ class V2VPipe:
                     "sha256": digest, "input_info": info,
                 }
             )
+        # Optional caller metadata binds the fresh native hash before materialization or worker I/O.
+        if self._state.identity_proof is not None and [self._state.identity_proof] != [
+            (ref["source_root"], ref["source"], ref["sha256"]) for ref in references
+        ]:
+            raise Conflict("Identity changed from the explicit caller snapshot")
         await service.comfy.ensure_idle()
         service.builder.validate_object_info(await service.comfy.object_info(), operation="v2v")
         now = timestamp()
         run = service.store.create(
             Run(
-                id=str(uuid4()), created_at=now, updated_at=now,
+                id=self._state.run_id or str(uuid4()), created_at=now, updated_at=now,
                 seed=request.seed,
                 prompt=request.prompt if request.prompt is not None else CONTINUATION_PROMPT,
                 duration_seconds=request.duration_seconds,
