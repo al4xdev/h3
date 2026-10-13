@@ -1,524 +1,294 @@
-// All browser requests are intercepted; no listener or real H3 API is used.
+// Maintained E2E: every request is intercepted; no API listener, provider or GPU.
 import assert from 'node:assert/strict';
-import {readFile, mkdir, writeFile} from 'node:fs/promises';
+import {readFile, mkdir, writeFile, readdir, lstat} from 'node:fs/promises';
+import {createReadStream} from 'node:fs';
 import {resolve, relative} from 'node:path';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
-const require = createRequire(import.meta.url);
-const {chromium} = require('playwright');
+const {chromium} = createRequire(import.meta.url)('playwright');
 const root = resolve(new URL('..', import.meta.url).pathname);
-const artifacts = resolve(root, '.dumps/tests/ui-assembly');
+const artifacts = resolve(root, '.dumps/tests/ui-progressive');
 await mkdir(artifacts, {recursive: true});
 const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
-let media = null;
+const {alignedFrames} = await import(`data:text/javascript;base64,${Buffer.from(assets['app.js']).toString('base64')}`);
+// No traversal into .data/grok, OAuth, or private credentials, even for hashes.
+async function protectedHashes() {
+  const result = {};
+  async function visit(path) {
+    const info = await lstat(path); if (info.isSymbolicLink()) return;
+    if (info.isDirectory()) { for (const entry of await readdir(path)) await visit(resolve(path, entry)); }
+    else if (info.isFile()) { const hash = createHash('sha256'); for await (const block of createReadStream(path)) hash.update(block); result[relative(root, path)] = hash.digest('hex'); }
+  }
+  for (const path of ['assets', 'workflows', 'prompts', 'runs', '.data/runs', '.data/inputs', '.data/assemblies']) await visit(resolve(root, path));
+  return result;
+}
+const beforeHashes = await protectedHashes();
+const image = await readFile(resolve(root, 'assets/dance_reference.png'));
+let media = null, assemblyMedia = null;
 if (process.env.H3_UI_TEST_CLIP) {
   const path = resolve(root, process.env.H3_UI_TEST_CLIP);
-  assert.ok(['runs/', '.data/'].some(prefix => relative(root, path).startsWith(prefix)), 'Media must be an explicitly supplied existing local H3 clip');
+  assert.ok(['runs/', '.data/runs/'].some(prefix => relative(root, path).startsWith(prefix)) && path.endsWith('/chunk.mp4'));
   media = await readFile(path);
 }
-let assemblyMedia = null, assemblyFixture = null, assemblyFixtureSHA = null;
 if (process.env.H3_UI_TEST_ASSEMBLY) {
-  assemblyFixture = resolve(root, process.env.H3_UI_TEST_ASSEMBLY);
-  assert.equal(relative(root, assemblyFixture), '.dumps/benchmarks/baseline-three-chunks/benchmark.mp4', 'Only the existing frozen baseline movie is an assembly fixture');
-  assemblyMedia = await readFile(assemblyFixture); assemblyFixtureSHA = createHash('sha256').update(assemblyMedia).digest('hex');
+  const path = resolve(root, process.env.H3_UI_TEST_ASSEMBLY);
+  assert.equal(relative(root, path), '.dumps/benchmarks/baseline-three-chunks/benchmark.mp4');
+  assemblyMedia = await readFile(path);
 }
+const assemblyHash = assemblyMedia && createHash('sha256').update(assemblyMedia).digest('hex');
+const pin = 'grok-4.20-0309-non-reasoning';
+const caps = {default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
+const rootID = '11111111-1111-4111-8111-111111111111', endID = '22222222-2222-4222-8222-222222222222', failedID = '44444444-4444-4444-8444-444444444444';
 const malicious = '<img src=x onerror="window.hacked=true"> vestido preto & continuidade';
-const config = {default_prompt: 'Dança com vestido preto.', continuation_prompt: 'Pequeno salto. Vestido vermelho. Termina de costas.', reference_image: 'dance_reference.png', duration_seconds: 2.3, workflow_output_profile: 'final_only', filesystem_events: true, reference_library: true, assembly_enabled: false};
-const image = await readFile(resolve(root, 'assets/dance_reference.png'));
-const references = [{id: 'original', source_root: 'assets', path: 'dance_reference.png', name: 'Original', image_url: '/assets/image?path=dance_reference.png'}, {id: 'manual', source_root: 'inputs', path: 'my_photo.png', name: malicious, image_url: '/inputs/image?path=my_photo.png'}, {id: 'frame', source_root: 'runs', path: '.data/runs/z-root/last_frame.png', name: 'Último frame', image_url: '/runs/z-root/image?name=last_frame.png'}];
-const mkRun = (id, state, parent_id = null, prompt = malicious) => ({id, state, parent_id, prompt, seed: 2026101205, duration_seconds: 2.3, created_at: '2026-10-12T20:00:00Z', updated_at: '2026-10-12T20:00:01Z', output: {path: `runs/${id}/chunk.mp4`}, error: null});
-let runs = [mkRun('a-child', 'ready_for_review', 'z-root'), mkRun('z-root', 'accepted'), {...mkRun('failed-root', 'failed'), error: 'Falha histórica preservada', output: {}}];
-const requests = []; const exceptions = []; const violations = [];
-let editor = {system_prompt: 'Preserve ação, roupa, pose e ordem. Responda só com a cena.', model: ''};
-let grokMode = 'normal'; let grokGate = null; let releaseGrok;
-const detailedScene = 'Ela dá um salto. Durante o movimento, o vestido fica vermelho. Preserve a identidade original. <img onerror="window.hacked=true">';
-const chainRoot = '11111111-1111-4111-8111-111111111111', chainMid = '22222222-2222-4222-8222-222222222222', chainEnd = '33333333-3333-4333-8333-333333333333';
-let assemblyMode = 'normal', assemblies = [], assemblyGate = null, releaseAssembly;
-const mkAssembly = (id, end, state = 'completed') => ({id, end_run_id: end, state, mode: runs.find(run => run.id === end)?.state === 'accepted' ? 'accepted_sequence' : 'preview', created_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:01Z', request_sha256: 'a'.repeat(64), output_sha256: state === 'completed' ? 'b'.repeat(64) : null, label: 'Server text is untrusted <img onerror=evil>', input_ids: [chainRoot, chainMid, chainEnd], frames: 168, fps: '24/1', video_url: state === 'completed' ? `/assemblies/${id}/video` : null, output: state === 'completed' ? {path: `.data/assemblies/${id}/video.mp4`} : null, error: null});
-let mode = 'normal'; let generated = 0; let releaseWait; let waitGate = null; let releaseDetail; let detailGate = null;
+const scene = 'Ela dá um salto. O vestido fica vermelho. <img onerror="window.hacked=true">';
+let providerScene = scene;
+const original = {source_root: 'assets', path: 'dance_reference.png'};
+const references = [{...original, name: 'Original', image_url: '/assets/image?path=dance_reference.png'}, {source_root: 'inputs', path: 'own/original.png', name: malicious, image_url: '/inputs/image?path=own%2Foriginal.png'}, {source_root: 'runs', path: `.data/runs/${rootID}/last_frame.png`, name: 'Último frame', image_url: `/runs/${rootID}/image?name=last_frame.png`}];
+const config = {default_prompt: 'Dança com vestido preto.', continuation_prompt: 'Pequeno salto. Vestido vermelho. Termina de costas.', reference_image: 'dance_reference.png', duration_seconds: 2.3, duration_capabilities: caps, workflow_output_profile: 'final_only', filesystem_events: true, reference_library: true, assembly_enabled: true};
+let editor = {system_prompt: 'Preserve ação, roupa, pose e ordem. Responda só com a cena.', model: pin};
+const mkRun = (id, state, parent_id = null, duration = 2.3, prompt = malicious) => ({id, state, parent_id, prompt, seed: 2026101205, duration_seconds: duration, created_at: '2026-10-12T20:00:00Z', updated_at: '2026-10-12T20:00:01Z', references: [{type: 'image', role: 'identity', source_root: 'assets', source: 'dance_reference.png'}], output: {path: `.data/runs/${id}/chunk.mp4`, probe: {streams: [{codec_type: 'video', duration: String(alignedFrames(duration) / 24)}]}}, error: null});
+let runs, assemblies = [], mode = 'normal', grokMode = 'normal', assemblyMode = 'normal', generated = 0;
+let grokGate = null, releaseGrok, waitGate = null, releaseWait, detailGate = null, releaseDetail;
+const resetRuns = () => { runs = [mkRun(endID, 'ready_for_review', rootID), mkRun(rootID, 'accepted'), {...mkRun(failedID, 'failed'), error: 'Falha histórica preservada', output: {}}]; };
+resetRuns();
+const requests = [], exceptions = [], violations = [], consoleMessages = [], failedRequests = [], audits = [], captures = [];
+const posts = () => requests.filter(item => item.method === 'POST');
+const inference = () => posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v'));
+const grokPosts = () => posts().filter(item => item.path === '/grok');
+const assemblyPosts = () => posts().filter(item => item.path.startsWith('/assemblies/'));
 const browser = await chromium.launch({headless: true});
-const context = await browser.newContext({viewport: {width: 1440, height: 1000}, reducedMotion: 'reduce', serviceWorkers: 'block'});
-const routeRequest = async route => {
-  const request = route.request(); const url = new URL(request.url());
-  if (url.origin !== 'http://h3.mock.invalid') { violations.push(request.url()); await route.abort(); return; }
-  const path = url.pathname; const method = request.method();
-  requests.push({method, path: path + url.search, body: path === '/inputs' && method === 'POST' ? {diskUploadFake: true, bytes: request.postDataBuffer()?.length, contentType: request.headers()['content-type']} : request.postDataJSON()});
+const context = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
+async function routeRequest(route) {
+  const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
+  if (url.origin !== 'http://h3.mock.invalid') { violations.push(request.url()); return route.abort(); }
+  requests.push({method, path: path + url.search, body: path === '/inputs' && method === 'POST' ? {diskUploadFake: true, bytes: request.postDataBuffer()?.length} : request.postDataJSON()});
   const json = (body, status = 200) => route.fulfill({status, contentType: 'application/json', body: JSON.stringify(body)});
   if (path === '/') return route.fulfill({contentType: 'text/html', body: assets['index.html']});
-  if (path === '/ui/app.css') return route.fulfill({contentType: 'text/css', body: assets['app.css']});
-  if (path === '/ui/app.js') return route.fulfill({contentType: 'text/javascript', body: assets['app.js']});
-  if (path === '/assemblies' && method === 'GET') {
-    const end = url.searchParams.get('end_run_id');
-    const items = assemblies.filter(item => item.end_run_id === end);
-    return json({items, total: items.length, limit: 50, offset: 0});
+  if (path.startsWith('/ui/') && assets[path.slice(4)]) return route.fulfill({contentType: path.endsWith('.js') ? 'text/javascript' : 'text/css', body: assets[path.slice(4)]});
+  if (path === '/favicon.ico') return route.fulfill({status: 204});
+  if (path === '/app/config') return mode === 'config-error' ? json({detail: 'Configuração indisponível'}, 503) : json(config);
+  if (path === '/grok/editor') {
+    if (grokMode === 'editor-error') return json({detail: 'Editor indisponível'}, 409);
+    if (method === 'PUT') { const body = request.postDataJSON(); assert.equal(body.model, pin); editor = body; }
+    return json(editor);
   }
-  if (path.startsWith('/assemblies/')) {
-    const match = path.match(/^\/assemblies\/([0-9a-f-]{36})(\/video)?$/); assert.ok(match, 'Only canonical own assembly routes allowed');
-    const id = match[1];
-    if (method === 'POST') {
-      const body = request.postDataJSON(); assert.deepEqual(Object.keys(body), ['end_run_id']);
-      assert.equal(new URL(request.frame().page().url()).searchParams.get('assembly'), id, 'UUID pointer must be recorded before POST');
-      if (assemblyMode === 'busy' || assemblyMode === 'collision') return json({detail: assemblyMode === 'busy' ? 'CPU ocupado' : 'UUID já existente'}, 409);
-      const record = mkAssembly(id, body.end_run_id); assemblies.unshift(record);
-      if (assemblyGate) await assemblyGate;
-      if (assemblyMode === 'lost') return route.abort('connectionfailed');
-      return json(record);
-    }
-    const record = assemblies.find(item => item.id === id);
-    if (!record) return json({detail: 'Montagem ainda não publicada'}, 404);
-    if (match[2]) return record.state === 'completed' && assemblyMedia ? route.fulfill({status: 200, contentType: 'video/mp4', body: assemblyMedia}) : route.fulfill({status: 404});
-    return json(record);
-  }
-  if (path === '/grok/editor' && method === 'GET') return grokMode === 'editor-error' ? json({detail: 'Configuração local indisponível'}, 409) : json(editor);
-  if (path === '/grok/editor' && method === 'PUT') { editor = request.postDataJSON(); return json(editor); }
   if (path === '/grok' && method === 'POST') {
     if (grokGate) await grokGate;
     if (grokMode === 'network') return route.abort('connectionfailed');
-    if (grokMode === 'error') return json({detail: 'Modelo ou conexão precisa ser configurado'}, 400);
-    if (grokMode === 'oversized') return json({text: 'x'.repeat(12001), model: 'fake'});
-    return json({text: detailedScene, model: 'fake'});
+    if (grokMode === 'error') return json({detail: 'Imagem não suportada'}, 400);
+    return json({text: grokMode === 'oversized' ? 'x'.repeat(12001) : providerScene, model: pin});
   }
-  if (path.startsWith('/grok/auth/')) { violations.push('Authentication/model catalog must never start automatically'); return json({detail: 'Forbidden test call'}, 409); }
-  if (path === '/inputs' && method === 'GET') return json({items: references, total: references.length, limit: 50, offset: 0});
-  if (path === '/inputs' && method === 'POST') {
-    assert.equal(url.searchParams.get('name'), 'phone photo.png');
-    const item = {id: 'uploaded', source_root: 'inputs', path: 'mock-upload/original.png', name: 'phone photo.png', image_url: '/inputs/image?path=mock-upload%2Foriginal.png'};
-    references.push(item); return json(item, 201);
+  if (path.startsWith('/grok/auth/') || path === '/events') { violations.push(path); return route.abort(); }
+  if (path === '/inputs') {
+    if (method === 'POST') { const item = {source_root: 'inputs', path: 'uploaded/original.png', name: 'phone photo.png', image_url: '/inputs/image?path=uploaded%2Foriginal.png'}; references.push(item); return json(item, 201); }
+    return json({items: references, total: references.length});
   }
   if (['/assets/image', '/inputs/image'].includes(path) || path.endsWith('/image')) return route.fulfill({contentType: 'image/png', body: image});
-  if (path === '/events') { violations.push('Native SSE unexpectedly reached network'); return route.abort(); }
-  if (path === '/favicon.ico') return route.fulfill({status: 204});
-  if (path === '/app/config') return mode === 'config-error' ? json({detail: 'Configuração temporariamente indisponível'}, 503) : json(config);
-  if (path === '/runs') {
-    if (mode === 'list-error') return json({detail: 'Leitura indisponível <b>não é HTML</b>'}, 503);
-    const items = mode === 'empty' ? [] : runs.map(run => ({...run, video_url: ['ready_for_review', 'accepted', 'rejected'].includes(run.state) && run.output.path ? `/runs/${run.id}/video` : null}));
-    return json({items, total: items.length, limit: 50, offset: 0});
-  }
+  if (path === '/runs') return mode === 'list-error' ? json({detail: 'Leitura indisponível <b>texto</b>'}, 503) : json({items: mode === 'empty' ? [] : runs.map(run => ({...run, video_url: ['ready_for_review', 'accepted', 'rejected'].includes(run.state) && run.output.path ? `/runs/${run.id}/video` : null})), total: mode === 'empty' ? 0 : runs.length});
   if (method === 'POST' && (path === '/runs/i2v' || path.endsWith('/v2v'))) {
-    if (mode === 'ambiguous') { await route.abort('connectionfailed'); return; }
+    if (mode === 'ambiguous') return route.abort('connectionfailed');
     if (mode === 'conflict') return json({detail: 'Slot ocupado'}, 409);
-    const body = request.postDataJSON();
-    const id = `generated-${++generated}`;
-    const parent = path.endsWith('/v2v') ? path.split('/')[2] : null;
-    const run = {...mkRun(id, 'queued', parent, body.prompt), seed: body.seed, output: {}};
+    const body = request.postDataJSON(), id = `00000000-0000-4000-8000-${String(++generated).padStart(12, '0')}`;
+    const run = {...mkRun(id, 'queued', path.endsWith('/v2v') ? path.split('/')[2] : null, body.duration_seconds, body.prompt), seed: body.seed, output: {}};
+    run.references = run.parent_id ? structuredClone(runs.find(item => item.id === run.parent_id).references) : (body.references || [original]).map(ref => ({type: 'image', role: 'identity', source_root: ref.source_root, source: ref.path}));
     runs.unshift(run); return json(run, 202);
   }
-  const id = path.split('/')[2]; const run = runs.find(item => item.id === id);
-  if (!run) return json({detail: 'Run not found'}, 404);
-  if (path.endsWith('/video')) {
-    if (!media) return route.fulfill({status: 204});
-    return route.fulfill({status: 200, contentType: 'video/mp4', body: media});
+  if (path === '/assemblies') { const items = assemblies.filter(item => item.end_run_id === url.searchParams.get('end_run_id')); return json({items, total: items.length}); }
+  if (path.startsWith('/assemblies/')) {
+    const id = path.split('/')[2];
+    if (method === 'POST') {
+      const body = request.postDataJSON(); assert.deepEqual(Object.keys(body), ['end_run_id']);
+      assert.equal(new URL(request.frame().page().url()).searchParams.get('assembly'), id);
+      if (assemblyMode === 'busy' || assemblyMode === 'collision') return json({detail: assemblyMode}, 409);
+      const end = runs.find(run => run.id === body.end_run_id);
+      const record = {id, end_run_id: end.id, state: 'completed', mode: end.state === 'accepted' ? 'accepted_sequence' : 'preview', request_sha256: 'a'.repeat(64), output_sha256: 'b'.repeat(64), frames: 168, fps: '24/1', video_url: `/assemblies/${id}/video`, output: {path: `.data/assemblies/${id}/video.mp4`}};
+      assemblies.unshift(record); if (assemblyMode === 'lost') return route.abort('connectionfailed'); return json(record);
+    }
+    const record = assemblies.find(item => item.id === id);
+    if (!record) return json({detail: 'ID não publicado'}, 404);
+    if (path.endsWith('/video')) return route.fulfill(assemblyMedia ? {contentType: 'video/mp4', body: assemblyMedia} : {status: 204});
+    return json(record);
   }
-  if (method === 'POST' && /\/(accept|reject)$/.test(path)) {
-    assert.equal(run.state, 'ready_for_review');
-    run.state = path.endsWith('/accept') ? 'accepted' : 'rejected'; return json(run);
+  if (path.startsWith('/runs/')) {
+    const run = runs.find(item => item.id === path.split('/')[2]); if (!run) return json({detail: 'Run not found'}, 404);
+    if (path === `/runs/${rootID}` && detailGate) await detailGate;
+    if (path.endsWith('/video')) return route.fulfill(media ? {contentType: 'video/mp4', body: media} : {status: 204});
+    if (method === 'POST' && /\/(accept|reject)$/.test(path)) { assert.equal(run.state, 'ready_for_review'); if (mode === 'decision-error') return json({detail: 'Decisão recusada'}, 409); run.state = path.endsWith('/accept') ? 'accepted' : 'rejected'; return json(run); }
+    if (path.endsWith('/sequence')) {
+      const chain = []; let current = run; while (current) { chain.unshift(current); current = runs.find(item => item.id === current.parent_id); }
+      return json({root_id: chain[0].id, end_run_id: run.id, blocks: chain.map(item => ({id: item.id, parent_id: item.parent_id, state: item.state, duration_seconds: alignedFrames(item.duration_seconds) / 24, video_url: item.output.path && ['ready_for_review', 'accepted', 'rejected'].includes(item.state) ? `/runs/${item.id}/video` : null}))});
+    }
+    if (url.searchParams.get('wait') === 'true') { if (waitGate) await waitGate; run.state = 'ready_for_review'; run.output = mkRun(run.id, run.state, run.parent_id, run.duration_seconds).output; }
+    return json(run);
   }
-  if (path.endsWith('/sequence')) {
-    const chain = []; let current = run;
-    while (current) { chain.unshift(current); current = runs.find(item => item.id === current.parent_id); }
-    return json({schema_version: 1, root_id: chain[0].id, end_run_id: run.id, blocks: chain.map((item, index) => ({index, id: item.id, parent_id: item.parent_id, state: item.state, accepted: item.state === 'accepted', duration_seconds: 2.333333, duration_source: 'verified_video', video_url: item.output.path && ['ready_for_review', 'accepted', 'rejected'].includes(item.state) ? `/runs/${item.id}/video` : null}))});
-  }
-  if (path === '/runs/z-root' && detailGate) await detailGate;
-  if (url.searchParams.get('wait') === 'true') { if (waitGate) await waitGate; run.state = 'ready_for_review'; run.output = {path: `runs/${id}/chunk.mp4`}; }
-  return json(run);
-};
-await context.route('**/*', routeRequest);
+  violations.push(`unexpected:${method}:${path}`); return route.abort();
+}
 const mockStartup = () => {
-  window.mockEvents = []; window.startupOrder = []; window.uuidDraws = 0;
-  const random = crypto.getRandomValues.bind(crypto);
-  Object.defineProperty(crypto, 'randomUUID', {value: undefined, configurable: true});
+  window.mockEvents = []; window.startupOrder = []; window.uuidDraws = 0; window.mediaLoads = 0;
+  const load = HTMLMediaElement.prototype.load; HTMLMediaElement.prototype.load = function() { window.mediaLoads++; return load.call(this); };
+  const random = crypto.getRandomValues.bind(crypto); Object.defineProperty(crypto, 'randomUUID', {value: undefined, configurable: true});
   crypto.getRandomValues = bytes => { window.uuidDraws++; return random(bytes); };
-  const fetch = window.fetch.bind(window);
-  window.fetch = (...args) => { window.startupOrder.push(String(args[0])); return fetch(...args); };
+  const fetch = window.fetch.bind(window); window.fetch = (...args) => { window.startupOrder.push(String(args[0])); return fetch(...args); };
   window.EventSource = class extends EventTarget {
     constructor(path) { super(); this.url = path; this.closed = false; window.mockEvents.push(this); window.startupOrder.push('SSE registered'); queueMicrotask(() => { window.startupOrder.push('SSE open'); this.emit('open'); }); }
     close() { this.closed = true; }
     emit(type, data) { this.dispatchEvent(type === 'open' ? new Event(type) : new MessageEvent(type, {data: JSON.stringify(data)})); }
   };
 };
-await context.addInitScript(mockStartup);
-const page = await context.newPage(); page.on('pageerror', error => exceptions.push(error.message));
-const ready = async () => { await page.goto('http://h3.mock.invalid/'); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); };
-const posts = () => requests.filter(item => item.method === 'POST');
-const capture = async options => { await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); }); await page.screenshot(options); };
+await context.route('**/*', routeRequest); await context.addInitScript(mockStartup);
+const page = await context.newPage();
+function watch(page) { page.on('pageerror', error => exceptions.push(error.message)); page.on('console', message => { if (message.type() === 'error') consoleMessages.push(message.text()); }); page.on('requestfailed', request => failedRequests.push({url: request.url(), reason: request.failure()?.errorText})); }
+watch(page);
+async function ready(href = 'http://h3.mock.invalid/?other=keep#viewer') { await page.goto(href); await page.locator('#notice').filter({hasText: /Escolha um bloco|API indisponível/}).waitFor(); }
+async function active(screen) { await page.locator(`[data-screen="${screen}"]`).waitFor({state: 'visible'}); assert.equal(await page.locator('[data-screen]:visible').count(), 1); }
+async function audit(name, target = page) {
+  const bounds = await target.evaluate(() => ({width: innerWidth, height: innerHeight, scrollX, scrollY, visualViewport: {x: visualViewport.offsetLeft, y: visualViewport.offsetTop, width: visualViewport.width, height: visualViewport.height, scale: visualViewport.scale}, heading: document.getElementById('screen-title').getBoundingClientRect().toJSON(), overflow: document.documentElement.scrollWidth > innerWidth, active: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => node.dataset.screen), hiddenInert: [...document.querySelectorAll('[data-screen][hidden]')].every(node => node.inert), hiddenFocus: Boolean(document.activeElement?.closest('[data-screen][hidden]')), controls: [...document.querySelectorAll('button')].filter(node => node.getClientRects().length).map(node => ({id: node.id, height: node.getBoundingClientRect().height, width: node.getBoundingClientRect().width})), panels: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => ({screen: node.dataset.screen, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflow: getComputedStyle(node).overflow, bounds: node.getBoundingClientRect().toJSON()}))}));
+  assert.equal(bounds.overflow, false, `${name}: horizontal overflow`); assert.equal(bounds.active.length, 1); assert.equal(bounds.hiddenInert, true); assert.equal(bounds.hiddenFocus, false); assert.ok(bounds.controls.every(control => control.height >= 44), `${name}: touch target`);
+  const actions = await target.evaluate(() => {
+    const footer = document.querySelector('.studio-footer').getBoundingClientRect(), view = visualViewport;
+    return [...document.querySelectorAll('[data-screen]:not([hidden]) .screen-actions button')].filter(node => node.getClientRects().length).map(node => {
+      const box = node.getBoundingClientRect(), center = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return {id: node.id, box: box.toJSON(), footer: footer.toJSON(), intersectsFooter: box.bottom > footer.top + 1 && box.top < footer.bottom && box.left < footer.right && box.right > footer.left, insideViewport: box.top >= view.offsetTop && box.bottom <= view.offsetTop + view.height && box.left >= view.offsetLeft && box.right <= view.offsetLeft + view.width, centerTarget: center?.closest('button')?.id};
+    });
+  });
+  if (bounds.width <= 640) for (const action of actions) { assert.equal(action.intersectsFooter, false, `${name}: ${action.id} footer overlap`); assert.equal(action.insideViewport, true, `${name}: ${action.id} clipped`); assert.equal(action.centerTarget, action.id, `${name}: ${action.id} occluded`); }
+  audits.push({name, ...bounds, actions}); return bounds;
+}
+async function focusedAudit(id) {
+  await page.locator(`#${id}`).tap(); await page.locator(`#${id}`).evaluate(node => node.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'}));
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const result = await page.evaluate(id => { const box = document.getElementById(id).getBoundingClientRect(); const blockers = [...document.querySelectorAll('.studio-footer,[data-screen]:not([hidden]) .screen-actions')].filter(node => node.getClientRects().length && ['fixed', 'sticky'].includes(getComputedStyle(node).position)).map(node => node.getBoundingClientRect().top); return {id, focused: document.activeElement.id, box: box.toJSON(), safeBottom: Math.min(visualViewport.offsetTop + visualViewport.height, ...blockers), viewportTop: visualViewport.offsetTop}; }, id);
+  assert.equal(result.focused, id); assert.ok(result.box.top >= result.viewportTop && result.box.bottom <= result.safeBottom, `${id}: focused field covered by fixed controls`); audits.push({name: `focused-${id}`, ...result});
+}
+async function capture(name) {
+  await page.evaluate(async () => { await document.fonts.ready; for (const image of document.images) if (image.getClientRects().length && !image.complete) await new Promise(resolve => { image.addEventListener('load', resolve, {once: true}); image.addEventListener('error', resolve, {once: true}); }); document.getElementById('screen-title').focus({preventScroll: true}); document.activeElement?.blur(); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); window.scrollTo(0, 0); await new Promise(resolve => requestAnimationFrame(resolve)); });
+  await page.mouse.move(2, 2);
+  await page.waitForLoadState('networkidle');
+  if (media || assemblyMedia) await page.waitForFunction(() => [...document.querySelectorAll('video')].filter(video => !video.hidden && video.getClientRects().length && video.getAttribute('src')).every(video => video.readyState >= 2 || video.error));
+  await audit(name); assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
+  const path = resolve(artifacts, `${name}.png`), size = page.viewportSize();
+  // An explicit document-origin clip avoids mobile IME/compositor scroll races.
+  await page.screenshot({path, animations: 'disabled', clip: {x: 0, y: 0, width: size.width, height: size.height}}); captures.push(path);
+}
+async function openRun(id) { await page.locator('#nav-library').click(); await page.getByRole('button', {name: new RegExp(id)}).click(); await active('review'); }
+async function newIdea(text = 'Uma ideia simples') { await page.locator('#nav-new').click(); await active('context'); await page.locator('#idea').fill(text); }
+async function prepare(text = 'Uma ideia simples', duration = '2.3') { await newIdea(text); await page.locator('#use-idea').click(); await active('generation'); await page.locator('#duration').fill(duration); }
+async function emitHints() { await page.evaluate(() => { mockEvents[0]?.emit('open'); for (let i = 0; i < 12; i++) mockEvents[0]?.emit('change', {path: '.data/runs/own/manifest.json', invalidation: true}); }); await page.locator('#notice').filter({hasText: /Biblioteca atualizada|Resultado anterior incerto/}).waitFor(); }
 try {
-  await ready();
-  assert.equal(posts().length, 0, 'initial reads cannot generate');
-  assert.ok(await page.evaluate(() => startupOrder.indexOf('SSE open') < startupOrder.indexOf('/inputs?limit=50&offset=0')), 'Subscribe before catalog snapshot');
-  assert.deepEqual(requests.filter(item => item.path.startsWith('/runs') && !item.path.endsWith('/video')).map(item => [item.method, item.path]), [['GET', '/runs?limit=50&offset=0'], ['GET', '/runs/a-child'], ['GET', '/runs/a-child/sequence']]);
-  assert.equal(await page.locator('#player').getAttribute('autoplay'), null);
-  assert.equal(await page.locator('#player').evaluate(node => getComputedStyle(node).objectFit), 'contain');
-  assert.equal(await page.locator('#player').evaluate(node => node.paused), true);
-  assert.deepEqual(await page.locator('.shot-id').allTextContents(), ['z-root', 'a-child']);
-  await page.locator('.metadata summary').click();
-  assert.equal(await page.locator('#run-prompt').textContent(), malicious);
-  assert.equal(await page.locator('#run-prompt img').count(), 0);
-  assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
-  if (media) {
-    await page.waitForFunction(() => document.getElementById('player').videoWidth > 0);
-    assert.deepEqual(await page.locator('#player').evaluate(node => [node.videoWidth, node.videoHeight]), [480, 864]);
-    // Deliberate test playback of the supplied prerecorded clip, never autoplay.
-    await page.locator('#player').evaluate(async node => { await node.play(); });
-    await page.waitForFunction(() => document.getElementById('player').currentTime > 0);
-    await page.locator('#player').evaluate(node => { node.pause(); });
-  }
-  await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
-  assert.equal(await page.locator('.skip').evaluate(node => getComputedStyle(node).top), '-100px');
-  await capture({path: resolve(artifacts, 'desktop-1440.png'), fullPage: true});
-  for (const width of [390, 320]) {
-    await page.setViewportSize({width, height: 844});
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px horizontal overflow`);
-    await capture({path: resolve(artifacts, `mobile-${width}.png`), fullPage: true});
-  }
-  await page.setViewportSize({width: 1440, height: 1000});
-  detailGate = new Promise(resolve => { releaseDetail = resolve; });
-  await page.locator('.clip-card').filter({hasText: 'z-root'}).click();
-  await page.locator('.clip-card').filter({hasText: 'a-child'}).click();
-  await page.waitForFunction(() => document.getElementById('metadata').textContent.includes('a-child'));
-  releaseDetail(); detailGate = null;
-  await page.locator('#accept').waitFor({state: 'visible'});
-  assert.equal(await page.locator('#run-state').textContent(), 'Pronto para revisão', 'Late old selection cannot overwrite current child');
-  // Keyboard activation of the gallery is read-only and failed evidence stays failed.
-  await page.locator('.clip-card').filter({hasText: 'failed-r'}).focus(); await page.keyboard.press('Enter');
-  await page.locator('#run-state').filter({hasText: 'Falhou'}).waitFor();
-  assert.equal(await page.locator('#player').isHidden(), true);
-  assert.equal(await page.locator('#accept').isDisabled(), true);
-  assert.equal(await page.locator('#continue-mode').isDisabled(), true);
-  assert.equal(posts().length, 0);
-  await capture({path: resolve(artifacts, 'failed-evidence.png'), fullPage: true});
-  await page.locator('.clip-card').filter({hasText: 'a-child'}).click();
-  await page.locator('#accept').waitFor({state: 'visible'});
-  await page.waitForFunction(() => !document.getElementById('accept').disabled);
-  await page.locator('#accept').click();
-  await page.locator('#run-state').filter({hasText: 'Aceito'}).waitFor();
-  assert.equal(posts().filter(item => item.path === '/runs/a-child/accept').length, 1);
-  await page.locator('#continue-mode').click();
-  await page.locator('#seed').fill('9007199254740991');
-  await page.locator('#prompt').fill('Continuação <script>não executar</script>');
-  await page.locator('#create-form').evaluate(form => { form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})); form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})); });
-  await page.locator('#operation').filter({hasText: 'Pronto para revisão'}).waitFor();
-  await page.waitForFunction(() => !document.getElementById('accept').disabled);
-  const continuations = posts().filter(item => item.path.endsWith('/v2v'));
-  assert.deepEqual(continuations, [{method: 'POST', path: '/runs/a-child/v2v', body: {seed: Number.MAX_SAFE_INTEGER, prompt: 'Continuação <script>não executar</script>', duration_seconds: 2.3, reference_tail_seconds: 3, include_audio: true}}]);
-  assert.equal(requests.filter(item => item.path === '/runs/generated-1?wait=true').length, 1);
-  await page.locator('#reject').click(); await page.locator('#run-state').filter({hasText: 'Rejeitado'}).waitFor();
-  assert.equal(posts().filter(item => item.path === '/runs/generated-1/reject').length, 1);
-  assert.equal(await page.locator('#continue-mode').isDisabled(), true);
-  await page.locator('#new-mode').click();
-  await page.locator('#seed').fill('0'); await page.locator('#prompt').fill('Nova cena');
-  await page.locator('#create-form').evaluate(form => { form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})); form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})); });
-  await page.locator('#operation').filter({hasText: 'generated-2'}).waitFor();
-  await page.waitForFunction(() => !document.getElementById('generate').disabled);
-  assert.deepEqual(posts().filter(item => item.path === '/runs/i2v'), [{method: 'POST', path: '/runs/i2v', body: {seed: 0, prompt: 'Nova cena', duration_seconds: 2.3, image: 'dance_reference.png'}}]);
-  assert.equal(requests.filter(item => item.path === '/runs/generated-2?wait=true').length, 1);
-  mode = 'conflict'; await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'HTTP 409'}).waitFor();
-  assert.equal(await page.locator('#generate').isEnabled(), true);
-  mode = 'ambiguous'; await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'Resultado incerto'}).waitFor();
-  assert.equal(await page.locator('#generate').isDisabled(), true);
-  const count = posts().length; await page.locator('#refresh').click();
-  await page.locator('#notice').filter({hasText: 'Resultado anterior incerto'}).waitFor();
-  assert.equal(posts().length, count); assert.equal(await page.locator('#generate').isDisabled(), true);
-  await page.evaluate(() => mockEvents[0].emit('open'));
-  await page.locator('#notice').filter({hasText: 'Resultado anterior incerto'}).waitFor();
-  assert.equal(await page.locator('#generate').isDisabled(), true, 'SSE cannot clear uncertainty');
-  await capture({path: resolve(artifacts, 'admission-uncertain.png'), fullPage: true});
-  mode = 'empty'; await ready(); assert.equal(await page.locator('.clip-card').count(), 0);
-  await capture({path: resolve(artifacts, 'empty.png'), fullPage: true});
-  // False-ready files and all nonplayable states must not attach a media URL.
-  for (const state of ['ready_for_review', 'accepted', 'rejected', 'queued', 'running', 'interrupted']) {
-    mode = 'normal'; runs = [{...mkRun(`no-file-${state}`, state), output: {}}];
-    await ready();
-    assert.equal(await page.locator('#player').isHidden(), true, `${state} without publication`);
-    assert.equal(await page.locator('#player').getAttribute('src'), null);
-    assert.equal(await page.locator('#accept').isEnabled(), state === 'ready_for_review');
-    assert.equal(await page.locator('#continue-mode').isEnabled(), state === 'accepted');
-  }
-  mode = 'config-error'; await page.goto('http://h3.mock.invalid/');
-  await page.locator('#notice').filter({hasText: 'API indisponível'}).waitFor();
-  assert.equal(await page.locator('#generate').isDisabled(), true);
-  mode = 'normal'; await page.locator('#refresh').click();
-  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
-  assert.equal(await page.locator('#generate').isEnabled(), true);
-  // Client-side seed validation also guards synthetic form submits.
-  const beforeInvalid = posts().length;
-  for (const seed of ['1e3', '-1', '9007199254740992']) {
-    await page.locator('#seed').fill(seed);
-    await page.locator('#create-form').evaluate(form => form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})));
-    await page.locator('#operation').filter({hasText: 'Seed'}).waitFor();
-  }
-  assert.equal(posts().length, beforeInvalid);
-  await page.locator('#reference').selectOption('1');
-  assert.equal(await page.locator('#reference-path').textContent(), 'inputs / my_photo.png');
-  assert.equal(await page.locator('#reference-library img').count(), 1);
-  assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
-  await capture({path: resolve(artifacts, 'reference-gallery.png'), fullPage: true});
-  await page.locator('#seed').fill('42'); await page.locator('#prompt').fill('Imagem do PC');
-  await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'generated-3'}).waitFor();
-  await page.waitForFunction(() => !document.getElementById('generate').disabled);
-  assert.deepEqual(posts().filter(item => item.path === '/runs/i2v').at(-1).body, {seed: 42, prompt: 'Imagem do PC', duration_seconds: 2.3, references: [{source_root: 'inputs', path: 'my_photo.png'}]});
-  const beforeUpload = posts().length;
-  await page.locator('#upload-file').setInputFiles({name: 'phone photo.png', mimeType: 'image/png', buffer: image});
-  await page.locator('#upload').evaluate(button => { button.click(); button.click(); });
-  await page.locator('#upload-status').filter({hasText: 'Imagem salva no PC'}).waitFor();
-  assert.equal(posts().length, beforeUpload + 1, 'Upload alone cannot infer');
-  const uploaded = posts().at(-1); assert.equal(uploaded.body.diskUploadFake, true); assert.equal(uploaded.body.bytes, image.length);
-  assert.equal(await page.locator('#reference-path').textContent(), 'inputs / mock-upload/original.png');
-  await capture({path: resolve(artifacts, 'upload-selected.png'), fullPage: true});
-  await page.locator('#reference').selectOption('2');
-  waitGate = new Promise(resolve => { releaseWait = resolve; });
-  await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'Admitido: generated-4'}).waitFor();
-  const busyReads = requests.filter(item => item.path.startsWith('/inputs?limit')).length;
-  await page.evaluate(() => { for (let i = 0; i < 8; i++) mockEvents[0].emit('change', {path: '.data/runs/generated-4/manifest.json', invalidation: true}); });
-  assert.equal(requests.filter(item => item.path.startsWith('/inputs?limit')).length, busyReads, 'Hints stay dirty during own wait');
-  assert.equal(await page.locator('#generate').isDisabled(), true);
-  releaseWait(); waitGate = null;
-  await page.locator('#operation').filter({hasText: 'Pronto para revisão · generated-4'}).waitFor();
-  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
-  assert.equal(requests.filter(item => item.path === '/runs/generated-4?wait=true').length, 1);
-  assert.deepEqual(posts().filter(item => item.path === '/runs/i2v').at(-1).body.references, [{source_root: 'runs', path: '.data/runs/z-root/last_frame.png'}]);
-  const beforeSSE = posts().length; const beforeReads = requests.filter(item => item.path.startsWith('/inputs?limit')).length;
-  const playerSrc = await page.locator('#player').getAttribute('src');
-  await page.evaluate(() => { const events = mockEvents[0]; events.emit('open'); for (let i = 0; i < 12; i++) events.emit('change', {path: '.data/runs/generated-3/manifest.json', invalidation: true}); events.emit('message', {path: '.data/inputs/new/metadata.json', invalidation: true}); });
-  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
-  await page.waitForFunction(() => !document.getElementById('library').getAttribute('aria-busy') || document.getElementById('library').getAttribute('aria-busy') === 'false');
-  assert.equal(posts().length, beforeSSE, 'Reconnect and hints are read-only');
-  assert.ok(requests.filter(item => item.path.startsWith('/inputs?limit')).length - beforeReads <= 2, 'Burst coalesces to bounded reads');
-  assert.equal(await page.locator('#player').getAttribute('src'), playerSrc);
-  await capture({path: resolve(artifacts, 'sse-refreshed.png'), fullPage: true});
-  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
-  assert.equal(await page.evaluate(() => mockEvents.every(event => event.closed)), true);
-  mode = 'list-error'; await page.goto('http://h3.mock.invalid/');
-  await page.locator('#notice').filter({hasText: 'API indisponível'}).waitFor();
-  assert.equal(await page.locator('#notice b').count(), 0);
-  await capture({path: resolve(artifacts, 'api-error.png'), fullPage: true});
-  delete config.filesystem_events; delete config.reference_library; mode = 'normal'; await ready();
-  assert.equal(await page.evaluate(() => mockEvents.length), 0, 'Legacy config does not open SSE');
-  assert.equal(await page.locator('#reference-library').isHidden(), true);
-  const nativePosts = () => posts().filter(item => item.path.startsWith('/runs')).length;
-  const grokPosts = () => posts().filter(item => item.path === '/grok');
-  assert.equal(grokPosts().length, 0, 'Grok must not run on load or SSE');
+  await ready(); await active('library'); assert.equal(posts().length, 0); assert.equal(await page.locator('#player').getAttribute('src'), null);
+  assert.ok(await page.evaluate(() => startupOrder.indexOf('SSE open') < startupOrder.indexOf('/inputs?limit=50&offset=0')));
+  assert.equal(await page.evaluate(() => navigator.maxTouchPoints > 0 && devicePixelRatio === 2), true);
+  await capture('phone-library');
+  await newIdea('ela dá um salto e o vestido fica vermelho');
+  assert.equal(await page.locator('#grok-model').inputValue(), pin); assert.equal(await page.locator('#grok-model').getAttribute('readonly'), '');
+  await page.locator('.grok-settings summary').click(); await page.locator('#grok-system').fill('Detalhe sem inventar identidade.');
+  const enterCount = posts().length; await page.locator('#grok-model').press('Enter'); assert.equal(posts().length, enterCount);
+  await page.locator('#grok-save').click(); await page.locator('#grok-config-status').filter({hasText: 'Configuração salva'}).waitFor();
   await page.locator('.grok-settings summary').click();
-  await page.locator('#grok-system').fill('Detalhe a ideia sem inventar ações ou parâmetros.');
-  await page.locator('#grok-model').fill('explicit-fake-model');
-  const beforeConfigEnter = posts().length;
-  await page.locator('#grok-model').press('Enter');
-  assert.equal(posts().length, beforeConfigEnter, 'Model ID Enter must not submit the native generation form');
-  await page.locator('#grok-save').click();
-  await page.locator('#grok-config-status').filter({hasText: 'Configuração salva'}).waitFor();
-  assert.deepEqual(requests.filter(item => item.method === 'PUT').at(-1).body, {system_prompt: 'Detalhe a ideia sem inventar ações ou parâmetros.', model: 'explicit-fake-model'});
-  const beforeGrokNative = nativePosts();
-  await page.locator('#prompt').fill('ela dá um salto e o vestido fica vermelho');
-  await page.locator('#grok-detail').evaluate(button => { button.click(); button.click(); });
-  await page.locator('#grok-status').filter({hasText: 'Texto detalhado'}).waitFor();
-  assert.equal(grokPosts().length, 1); assert.equal(nativePosts(), beforeGrokNative);
-  assert.equal(await page.locator('#prompt').inputValue(), detailedScene);
-  assert.deepEqual(grokPosts().at(-1).body, {prompt: 'ela dá um salto e o vestido fica vermelho', system_prompt: editor.system_prompt, model: 'explicit-fake-model'});
-  assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
-  await capture({path: resolve(artifacts, 'grok-detailed-desktop.png'), fullPage: true});
-  grokGate = new Promise(resolve => { releaseGrok = resolve; });
-  await page.locator('#prompt').fill('Outra ideia simples'); await page.locator('#grok-model').fill('');
-  await page.locator('#grok-detail').click();
-  await page.locator('#prompt').fill('Rascunho mais novo, não substituir');
-  releaseGrok(); grokGate = null;
-  await page.locator('#grok-status').filter({hasText: 'proposta ficou separada'}).waitFor();
-  assert.equal(await page.locator('#prompt').inputValue(), 'Rascunho mais novo, não substituir');
-  assert.equal(grokPosts().at(-1).body.model, undefined, 'Empty model defers to configured environment');
-  assert.equal(nativePosts(), beforeGrokNative);
-  await capture({path: resolve(artifacts, 'grok-stale-proposal.png'), fullPage: true});
-  await page.locator('#grok-use').click();
-  assert.equal(await page.locator('#prompt').inputValue(), detailedScene);
-  assert.equal(nativePosts(), beforeGrokNative, 'Use proposal does not generate');
-  await page.locator('#seed').fill('42'); await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'generated-5'}).waitFor();
-  await page.waitForFunction(() => !document.getElementById('generate').disabled);
-  assert.equal(nativePosts(), beforeGrokNative + 1, 'Only explicit Generate can submit native work');
-  grokMode = 'error'; const preserved = await page.locator('#prompt').inputValue();
-  await page.locator('#grok-detail').click();
-  await page.locator('#grok-status').filter({hasText: 'HTTP 400'}).waitFor();
-  assert.equal(await page.locator('#prompt').inputValue(), preserved);
-  assert.equal(await page.locator('#grok-detail').isEnabled(), true);
-  grokMode = 'oversized'; await page.locator('#grok-detail').click();
-  await page.locator('#grok-status').filter({hasText: 'sem truncar'}).waitFor();
-  assert.equal(await page.locator('#prompt').inputValue(), preserved);
-  await capture({path: resolve(artifacts, 'grok-oversized-error.png'), fullPage: true});
-  grokMode = 'normal'; await ready();
-  grokGate = new Promise(resolve => { releaseGrok = resolve; });
-  await page.locator('#prompt').fill('salto vermelho'); await page.locator('#grok-detail').click();
-  mode = 'ambiguous'; await page.locator('#generate').click();
-  await page.locator('#operation').filter({hasText: 'Resultado incerto'}).waitFor();
-  releaseGrok(); grokGate = null;
-  await page.locator('#grok-status').filter({hasText: 'proposta ficou separada'}).waitFor();
-  assert.equal(await page.locator('#generate').isDisabled(), true, 'Grok completion cannot reset native uncertainty');
-  assert.equal(await page.locator('#prompt').inputValue(), 'salto vermelho');
-  mode = 'normal'; grokMode = 'network'; await ready();
-  await page.locator('#grok-detail').click();
-  await page.locator('#grok-status').filter({hasText: 'Resultado incerto'}).waitFor();
-  const uncertainGrokCount = grokPosts().length;
-  await page.locator('#refresh').click();
-  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
-  assert.equal(grokPosts().length, uncertainGrokCount); assert.equal(await page.locator('#grok-detail').isDisabled(), true);
-  await capture({path: resolve(artifacts, 'grok-uncertain.png'), fullPage: true});
-  grokMode = 'editor-error'; await ready();
-  assert.equal(await page.locator('#grok-detail').isDisabled(), true); assert.equal(await page.locator('#generate').isEnabled(), true, 'Editor failure must not block native generation');
-  grokMode = 'normal';
-  runs = Array.from({length: 12}, (_, index) => mkRun(`many-${index}`, index === 0 ? 'ready_for_review' : 'accepted', null, ('# Cena longa\nEla dá um salto e o vestido fica vermelho. Preserve a ordem, a pose e a identidade original.\n').repeat(12)));
-  await ready();
-  const bounds = [];
-  for (const width of [1440, 393, 320]) {
-    await page.setViewportSize({width, height: 844});
-    const cards = await page.locator('.clip-card').evaluateAll(nodes => nodes.map(node => {
-      const box = node.getBoundingClientRect();
-      return {height: box.height, shrink: getComputedStyle(node).flexShrink, top: box.top, bottom: box.bottom, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflow: getComputedStyle(node).overflow, children: [...node.children].map(child => { const rect = child.getBoundingClientRect(); return {className: child.className, inside: rect.top >= box.top && rect.bottom <= box.bottom, height: rect.height, top: rect.top, bottom: rect.bottom, scrollHeight: child.scrollHeight, clientHeight: child.clientHeight, overflow: getComputedStyle(child).overflow}; })};
-    }));
-    assert.equal(cards.length, 12);
-    assert.ok(cards.every(card => card.shrink === '0' && card.children.every(child => child.inside)), `${width}px library children must remain inside each card`);
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px long-library horizontal overflow`);
-    const ancestors = await page.locator('#library').evaluate(node => [node, node.parentElement].map(item => { const box = item.getBoundingClientRect(); return {className: item.className, height: box.height, top: box.top, bottom: box.bottom, scrollHeight: item.scrollHeight, clientHeight: item.clientHeight, overflow: getComputedStyle(item).overflow}; }));
-    if (width < 640) assert.ok(ancestors[0].clientHeight <= 430 && ancestors[0].scrollHeight > ancestors[0].clientHeight, 'Phone library remains bounded and scrollable');
-    bounds.push({width, cards, ancestors});
-    if (media) await page.waitForFunction(() => document.getElementById('player').readyState >= 2);
-    await capture({path: resolve(artifacts, `library-many-${width}.png`), fullPage: true});
+  await page.locator('#reference').selectOption('1'); await focusedAudit('idea'); await capture('phone-context');
+  const beforeGrok = inference().length;
+  await page.locator('#grok-detail').evaluate(button => { button.click(); button.click(); }); await active('proposal');
+  assert.equal(grokPosts().length, 1); assert.equal(inference().length, beforeGrok);
+  assert.deepEqual(grokPosts().at(-1).body, {system_prompt: editor.system_prompt, prompt: 'ela dá um salto e o vestido fica vermelho', model: pin, reference: {source_root: 'inputs', path: 'own/original.png'}});
+  assert.equal(await page.locator('#idea').inputValue(), 'ela dá um salto e o vestido fica vermelho'); assert.equal(await page.locator('#grok-result').inputValue(), scene);
+  await page.locator('#grok-result').fill('   '); await page.locator('#grok-use').click(); await page.locator('#proposal-error').filter({hasText: 'não devolveu'}).waitFor(); assert.equal(inference().length, beforeGrok); await page.locator('#grok-result').fill(`${scene}\nEla termina de costas.`); await focusedAudit('grok-result'); await capture('phone-proposal');
+  await page.locator('#grok-use').tap(); await active('generation'); assert.equal(inference().length, beforeGrok);
+  await page.locator('#duration').tap(); await page.locator('#duration').fill('5'); await page.locator('#seed').fill('42'); await page.locator('#duration-preview').filter({hasText: '124 frames'}).waitFor();
+  await page.locator('#duration').press('Enter'); assert.equal(inference().length, beforeGrok);
+  await focusedAudit('duration'); await capture('phone-generation-5s');
+  // Back and mode/selection changes retain idea, edited proposal, duration and seed.
+  await page.locator('#back').click(); await active('proposal'); assert.match(await page.locator('#grok-result').inputValue(), /termina de costas/);
+  await page.locator('#grok-use').click(); assert.equal(await page.locator('#duration').inputValue(), '5'); assert.equal(await page.locator('#seed').inputValue(), '42');
+  waitGate = new Promise(resolve => { releaseWait = resolve; });
+  await page.locator('#generate').evaluate(button => { button.click(); button.click(); }); await page.locator('#operation').filter({hasText: 'Admitido:'}).waitFor();
+  assert.equal(inference().length, beforeGrok + 1); assert.equal(inference().at(-1).body.duration_seconds, 5);
+  const admitted = runs[0].id; assert.equal(requests.filter(item => item.path === `/runs/${admitted}?wait=true`).length, 1);
+  await capture('phone-status'); const countPending = posts().length; await page.locator('#nav-library').click(); await active('library');
+  await page.evaluate(() => mockEvents[0].emit('change', {path: '.data/runs/own/manifest.json', invalidation: true})); assert.equal(posts().length, countPending);
+  releaseWait(); waitGate = null; await page.locator('#nav-status').click(); await page.locator('#operation').filter({hasText: `Pronto para revisão · ${admitted}`}).waitFor(); await page.locator('#status-review').click(); await active('review');
+  assert.match(await page.locator('#review-duration').textContent(), /Solicitada 5 s.*124 frames.*verificada 5,167 s/);
+  if (media) { await page.waitForFunction(() => document.getElementById('player').videoWidth > 0); await page.locator('#player').evaluate(async video => { await video.play(); }); await page.waitForFunction(() => document.getElementById('player').currentTime > 0.05); await page.locator('#player').evaluate(video => video.pause()); }
+  await capture('phone-review'); mode = 'decision-error'; await page.locator('#accept').click(); await page.locator('#review-status').filter({hasText: 'Decisão não confirmada'}).waitFor(); assert.equal(await page.locator('#accept').isEnabled(), true); await active('review'); mode = 'normal'; const beforeAccept = posts().length; await page.locator('#accept').click(); await page.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); await active('review'); assert.equal(posts().length, beforeAccept + 1);
+  await page.locator('#continue-mode').click(); await active('continuation'); await capture('phone-continuation'); await page.locator('#continue-idea').click(); await active('context');
+  assert.equal(await page.locator('#reference').isDisabled(), true); await page.locator('#idea').fill('Continua de costas e vira de frente.');
+  await page.locator('#grok-detail').click(); await active('proposal'); assert.deepEqual(grokPosts().at(-1).body.reference, {source_root: 'inputs', path: 'own/original.png'});
+  await page.locator('#grok-use').click(); await page.locator('#duration').fill('10'); await page.locator('#seed').fill('9007199254740991');
+  await page.locator('#generate').click(); await page.locator('#operation').filter({hasText: 'Pronto para revisão'}).waitFor();
+  assert.deepEqual(inference().at(-1).body, {seed: Number.MAX_SAFE_INTEGER, prompt: scene, duration_seconds: 10, reference_tail_seconds: 3, include_audio: true}); assert.equal(inference().at(-1).path, `/runs/${admitted}/v2v`);
+  await page.locator('#status-review').click(); await active('review'); await page.locator('#reject').click(); await page.locator('#run-state').filter({hasText: 'Rejeitado'}).waitFor(); assert.equal(await page.locator('#continue-mode').isDisabled(), true);
+  // Parent-keyed continuation drafts survive visiting another parent and the new scene.
+  await openRun(rootID); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click(); await page.locator('#idea').fill('Rascunho do pai original'); await page.locator('#use-idea').click(); await page.locator('#duration').fill('3');
+  await openRun(admitted); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click(); assert.equal(await page.locator('#idea').inputValue(), 'Continua de costas e vira de frente.'); await page.locator('#use-idea').click(); assert.equal(await page.locator('#duration').inputValue(), '10');
+  await openRun(rootID); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click(); assert.equal(await page.locator('#idea').inputValue(), 'Rascunho do pai original'); await page.locator('#use-idea').click(); assert.equal(await page.locator('#duration').inputValue(), '3');
+  await newIdea(); assert.equal(await page.locator('#grok-result').inputValue(), `${scene}\nEla termina de costas.`); assert.equal(await page.locator('#duration').inputValue(), '5');
+  // Explicit upload selects only; it never details, generates or accepts.
+  await page.locator('#upload-details summary').click(); const uploadBefore = posts().length;
+  await page.locator('#upload-file').setInputFiles({name: 'phone photo.png', mimeType: 'image/png', buffer: image}); await page.locator('#upload').evaluate(button => { button.click(); button.click(); }); await page.locator('#upload-status').filter({hasText: 'Imagem salva no PC'}).waitFor(); assert.equal(posts().length, uploadBefore + 1);
+  await page.locator('#upload-details summary').click();
+  grokGate = new Promise(resolve => { releaseGrok = resolve; }); await page.locator('#idea').fill('Ideia antiga'); await page.locator('#grok-detail').click(); await page.locator('#idea').fill('Ideia nova, não substituir'); await page.locator('#reference').selectOption('0');
+  releaseGrok(); grokGate = null; await page.locator('#grok-status').filter({hasText: 'contexto mudou'}).waitFor(); await active('context'); assert.equal(await page.locator('#idea').inputValue(), 'Ideia nova, não substituir'); await page.locator('#show-proposal').click(); await active('proposal'); assert.match(await page.locator('#proposal-hint').textContent(), /contexto mudou/); assert.match(await page.locator('#proposal-context').textContent(), /uploaded/);
+  await capture('phone-stale-proposal');
+  // Changing originating parent during an in-flight Grok never replaces another draft.
+  await newIdea('Pedido no rascunho novo'); grokGate = new Promise(resolve => { releaseGrok = resolve; }); await page.locator('#grok-detail').click(); await openRun(rootID); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click();
+  releaseGrok(); grokGate = null; await page.locator('#grok-status').filter({hasText: 'contexto mudou'}).waitFor(); assert.equal(await page.locator('#idea').inputValue(), 'Rascunho do pai original');
+  // A provider response must not clobber a manually edited original proposal,
+  // including after leaving that draft. Its late candidate requires a separate choice.
+  await newIdea('Pedido com uma proposta em edição'); const editedOrigin = {chosen: await page.locator('#prompt').inputValue(), duration: await page.locator('#duration').inputValue(), seed: await page.locator('#seed').inputValue(), reference: await page.locator('#reference').inputValue()}; grokGate = new Promise(resolve => { releaseGrok = resolve; }); await page.locator('#grok-detail').click(); await page.locator('#show-proposal').click();
+  await page.locator('#grok-result').fill('Minha proposta editada deve sobreviver ao retorno atrasado.'); await openRun(rootID); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click(); releaseGrok(); grokGate = null;
+  await page.locator('#grok-status').filter({hasText: 'contexto mudou'}).waitFor(); const lateBefore = inference().length; await page.locator('#nav-new').click(); await page.locator('#show-proposal').click();
+  assert.equal(await page.locator('#grok-result').inputValue(), 'Minha proposta editada deve sobreviver ao retorno atrasado.'); assert.equal(await page.locator('#idea').inputValue(), 'Pedido com uma proposta em edição');
+  await page.locator('#late-proposal-details summary').click(); assert.equal(await page.locator('#late-proposal').inputValue(), scene); assert.match(await page.locator('#late-proposal-context').textContent(), /assets.*dance_reference/); const beforeAdopt = posts().length; await page.locator('#use-late-proposal').click(); assert.equal(await page.locator('#grok-result').inputValue(), scene); assert.equal(inference().length, lateBefore); assert.equal(posts().length, beforeAdopt); await page.locator('#use-late-proposal').evaluate(button => button.click()); assert.equal(posts().length, beforeAdopt); assert.equal(await page.locator('#grok-result').inputValue(), scene); assert.deepEqual({chosen: await page.locator('#prompt').inputValue(), duration: await page.locator('#duration').inputValue(), seed: await page.locator('#seed').inputValue(), reference: await page.locator('#reference').inputValue()}, editedOrigin); await page.locator('#edit-idea').click();
+  // No form submit from hidden screens, navigation, SSE, resize or browser history.
+  const noPost = posts().length; await page.locator('#create-form').evaluate(form => form.dispatchEvent(new Event('submit', {cancelable: true, bubbles: true}))); await emitHints(); await page.evaluate(() => window.dispatchEvent(new PopStateEvent('popstate'))); assert.equal(posts().length, noPost);
+  await openRun(rootID); const source = await page.locator('#player').getAttribute('src'), loads = await page.evaluate(() => mediaLoads); await emitHints(); assert.equal(await page.locator('#player').getAttribute('src'), source); assert.equal(await page.evaluate(() => mediaLoads), loads);
+  await openRun(failedID); assert.equal(await page.locator('#player').isHidden(), true); assert.equal(await page.locator('#accept').isDisabled(), true); await capture('phone-failed');
+  // Stale library detail cannot open the wrong clip after a newer selection.
+  await page.locator('#nav-library').click(); detailGate = new Promise(resolve => { releaseDetail = resolve; }); await page.locator('.clip-card').filter({hasText: rootID.slice(0, 8)}).click(); await page.locator('.clip-card').filter({hasText: endID.slice(0, 8)}).click(); await active('review'); releaseDetail(); detailGate = null; assert.match(await page.locator('#metadata').textContent(), new RegExp(endID));
+  await page.locator('.metadata summary').click(); assert.equal(await page.locator('#run-prompt').textContent(), malicious); assert.equal(await page.locator('#run-prompt img').count(), 0); assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
+  // Assembly is its own explicit action and read-only same-UUID recovery.
+  await page.locator('#open-assembly').click(); await active('assembly'); const nativeBeforeAssembly = inference().length;
+  await page.locator('#assemble').evaluate(button => { button.click(); button.click(); }); await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); const ownID = new URL(page.url()).searchParams.get('assembly');
+  assert.equal(await page.evaluate(() => uuidDraws), 1); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(await page.locator('#run-state').textContent(), 'Pronto para revisão'); assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente'); assert.equal(inference().length, nativeBeforeAssembly);
+  if (assemblyMedia) { await page.waitForFunction(() => document.getElementById('assembly-player').videoWidth > 0); await page.locator('#assembly-player').evaluate(async video => { await video.play(); }); await page.waitForFunction(() => document.getElementById('assembly-player').currentTime > 0.05); await page.locator('#assembly-player').evaluate(video => video.pause()); }
+  await capture('phone-assembly-preview'); const assemblyBeforeReload = assemblyPosts().length; await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); await active('assembly'); assert.equal(assemblyPosts().length, assemblyBeforeReload); assert.equal(new URL(page.url()).searchParams.get('assembly'), ownID);
+  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload);
+  await page.locator('#nav-library').click(); await openRun(endID); await page.locator('#accept').click(); await page.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload); await page.locator('#open-assembly').click(); await page.locator('#assemble').click(); await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); assert.notEqual(new URL(page.url()).searchParams.get('assembly'), ownID); assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem da sequência aceita');
+  await capture('phone-assembly-accepted');
+  // Uncertain CPU publication never invents/reposts an ID on read, reload or navigation.
+  resetRuns(); assemblies = []; assemblyMode = 'lost'; await ready(); await openRun(endID); await page.locator('#open-assembly').click(); await page.locator('#assemble').click(); await page.locator('#assembly-status').filter({hasText: 'Resultado incerto'}).waitFor(); const lostID = new URL(page.url()).searchParams.get('assembly'), lostCount = assemblyPosts().length; assert.equal(await page.locator('#assemble').isDisabled(), true);
+  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); assert.equal(assemblyPosts().length, lostCount); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
+  assemblyMode = 'normal'; const missing = '99999999-9999-4999-8999-999999999999'; await ready(`http://h3.mock.invalid/?assembly=${missing}`); await active('assembly'); assert.equal(await page.locator('#assemble').isDisabled(), true); await capture('phone-assembly-missing');
+  // Explicit refuses are recoverable, uncertain inference is not, even after navigation/SSE.
+  mode = 'conflict'; await ready(); await prepare('Recusa explícita', '3'); await page.locator('#generate').click(); await page.locator('#operation').filter({hasText: 'HTTP 409'}).waitFor(); assert.equal(await page.locator('#generate').isEnabled(), true);
+  mode = 'ambiguous'; await page.locator('#generate').click(); await page.locator('#operation').filter({hasText: 'Resultado incerto'}).waitFor(); const uncertainCount = inference().length; await newIdea('Rascunho mantido após incerteza'); await page.locator('#use-idea').click(); assert.equal(await page.locator('#generate').isDisabled(), true); await emitHints(); assert.equal(inference().length, uncertainCount); await capture('phone-native-uncertain');
+  mode = 'normal'; grokMode = 'network'; await ready(); await newIdea('Grok incerto'); await page.locator('#grok-detail').click(); await page.locator('#grok-status').filter({hasText: 'Resultado incerto'}).waitFor(); const uncertainGrok = grokPosts().length; await page.locator('#nav-library').click(); await newIdea('Outra navegação'); assert.equal(await page.locator('#grok-detail').isDisabled(), true); await emitHints(); assert.equal(grokPosts().length, uncertainGrok);
+  grokMode = 'error'; await ready(); await newIdea('Imagem recusada'); await page.locator('#grok-detail').click(); await page.locator('#grok-status').filter({hasText: 'HTTP 400'}).waitFor(); assert.equal(await page.locator('#idea').inputValue(), 'Imagem recusada'); assert.equal(await page.locator('#grok-detail').isEnabled(), true);
+  grokMode = 'oversized'; await page.locator('#grok-detail').click(); await page.locator('#grok-status').filter({hasText: 'sem truncar'}).waitFor(); assert.equal(await page.locator('#idea').inputValue(), 'Imagem recusada');
+  grokMode = 'editor-error'; await ready(); await prepare('Sem editor', '2.8'); assert.equal(await page.locator('#generate').isEnabled(), true); grokMode = 'normal';
+  delete config.duration_capabilities; await ready(); await newIdea(); await page.locator('#use-idea').click(); assert.equal(await page.locator('#duration').getAttribute('readonly'), ''); assert.match(await page.locator('#duration-policy').textContent(), /legado/);
+  config.duration_capabilities = {...caps, max_frames: 240}; await ready(); assert.equal(await page.locator('#new-mode').isDisabled(), true); assert.equal(await page.locator('#generate').isDisabled(), true);
+  config.duration_capabilities = caps; config.assembly_enabled = false; delete config.filesystem_events; delete config.reference_library; const disabledAssemblyReads = requests.filter(item => item.path.startsWith('/assemblies')).length; await ready(); assert.equal(await page.evaluate(() => mockEvents.length), 0); assert.equal(requests.filter(item => item.path.startsWith('/assemblies')).length, disabledAssemblyReads);
+  config.assembly_enabled = true; config.filesystem_events = true; config.reference_library = true; mode = 'empty'; await ready(); await capture('phone-empty'); mode = 'list-error'; await ready(); assert.equal(await page.locator('#notice b').count(), 0); await capture('phone-api-error'); mode = 'normal';
+  runs = Array.from({length: 12}, (_, index) => mkRun(`10000000-0000-4000-8000-${String(index).padStart(12, '0')}`, 'accepted', null, 2.3, malicious.repeat(30))); await ready();
+  for (const width of [393, 320, 640, 1440]) {
+    const count = posts().length; await page.setViewportSize({width, height: 852}); await audit(`library-${width}`); assert.equal(posts().length, count);
+    const cards = await page.locator('.clip-card').evaluateAll(nodes => nodes.map(node => { const box = node.getBoundingClientRect(); return {shrink: getComputedStyle(node).flexShrink, children: [...node.children].map(child => { const rect = child.getBoundingClientRect(); return rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1; })}; })); assert.equal(cards.length, 12); assert.ok(cards.every(card => card.shrink === '0' && card.children.every(Boolean))); await capture(`library-${width}`);
+    await prepare('Mobile parâmetros', '10'); await audit(`generation-${width}`); await capture(`generation-${width}`); await page.locator('#nav-library').click();
   }
-  await writeFile(resolve(root, '.dumps/tests/reports/assembly_library_bounds.json'), JSON.stringify(bounds, null, 2));
-  const phone = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
-  await phone.route('**/*', routeRequest); await phone.addInitScript(mockStartup);
-  const phonePage = await phone.newPage(); phonePage.on('pageerror', error => exceptions.push(error.message));
-  await phonePage.goto('http://h3.mock.invalid/');
-  await phonePage.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
-  assert.equal(await phonePage.evaluate(() => navigator.maxTouchPoints > 0 && devicePixelRatio === 2), true);
-  await phonePage.locator('#prompt').fill('ela dá um salto e o vestido fica vermelho');
-  const phoneNativeBefore = nativePosts(); await phonePage.locator('#grok-detail').tap();
-  await phonePage.locator('#grok-status').filter({hasText: 'Texto detalhado'}).waitFor();
-  assert.equal(nativePosts(), phoneNativeBefore);
-  assert.ok(await phonePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  if (media) {
-    // Explicit prerecorded fixture playback settles the decoder, never autoplay.
-    await phonePage.locator('#player').evaluate(async player => { await player.play(); });
-    await phonePage.waitForFunction(() => document.getElementById('player').currentTime > 0.05);
-    await phonePage.locator('#player').evaluate(player => player.pause());
-  }
-  await phonePage.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
-  await phonePage.screenshot({path: resolve(artifacts, 'grok-phone-393-touch-2x.png'), fullPage: true});
-  await phone.close();
-  assert.equal(await page.locator('#assembly-panel').isHidden(), true, 'Feature disabled in legacy config');
-  assert.equal(requests.filter(item => item.path.startsWith('/assemblies')).length, 0, 'Disabled config makes no assembly reads or submissions');
-  config.assembly_enabled = true; config.filesystem_events = true; config.reference_library = true;
-  runs = [mkRun(chainEnd, 'ready_for_review', chainMid), mkRun(chainMid, 'accepted', chainRoot), mkRun(chainRoot, 'accepted')];
-  const assemblyPosts = () => posts().filter(item => item.path.startsWith('/assemblies/'));
-  const assemblyReady = async (href = 'http://h3.mock.invalid/?other=keep#viewer') => { if (page.url() === href) await page.reload(); else await page.goto(href); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); };
-  await page.setViewportSize({width: 1440, height: 1000}); await assemblyReady();
-  await page.waitForFunction(() => !document.getElementById('assemble').disabled);
-  const nativeBeforeAssembly = nativePosts(), grokBeforeAssembly = grokPosts().length;
-  const generationBeforeAssembly = posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length;
-  const waitsBeforeAssembly = requests.filter(item => item.path.endsWith('?wait=true')).length;
-  const originalPlayer = await page.locator('#player').getAttribute('src');
-  await page.locator('#assemble').evaluate(button => { button.click(); button.click(); });
-  await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
-  const ownID = new URL(page.url()).searchParams.get('assembly');
-  assert.match(ownID, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  assert.equal(await page.evaluate(() => uuidDraws), 1, 'HTTP LAN fallback uses one WebCrypto UUID draw');
-  assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep');
-  assert.equal(assemblyPosts().length, 1); assert.deepEqual(assemblyPosts()[0].body, {end_run_id: chainEnd});
-  assert.equal(nativePosts(), nativeBeforeAssembly); assert.equal(grokPosts().length, grokBeforeAssembly);
-  assert.equal(await page.locator('#player').getAttribute('src'), originalPlayer);
-  assert.equal(await page.locator('#run-state').textContent(), 'Pronto para revisão');
-  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente');
-  assert.equal(await page.locator('#assembly-download').getAttribute('href'), `/assemblies/${ownID}/video`);
-  assert.equal(await page.locator('#assemble').isDisabled(), true, 'A committed own intent is not blindly reassembled');
-  if (assemblyMedia) {
-    await page.waitForFunction(() => { const video = document.getElementById('assembly-player'); return video.videoWidth === 480 && video.videoHeight === 864 && Math.abs(video.duration - 7) < .01; });
-    await page.locator('#assembly-player').evaluate(async video => { await video.play(); });
-    await page.waitForFunction(() => document.getElementById('assembly-player').currentTime > .1);
-    await page.locator('#assembly-player').evaluate(video => video.pause());
-  }
-  await capture({path: resolve(artifacts, 'assembly-preview-1440.png'), fullPage: true});
-  const assembledSrc = await page.locator('#assembly-player').getAttribute('src');
-  await page.evaluate(id => { for (let i = 0; i < 10; i++) mockEvents[0].emit('change', {path: `.data/assemblies/${id}/metadata.json`, invalidation: true}); mockEvents[0].emit('open'); }, ownID);
-  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
-  assert.equal(assemblyPosts().length, 1); assert.equal(await page.locator('#player').getAttribute('src'), originalPlayer); assert.equal(await page.locator('#assembly-player').getAttribute('src'), assembledSrc);
-  await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
-  assert.equal(new URL(page.url()).searchParams.get('assembly'), ownID); assert.equal(assemblyPosts().length, 1);
-  assert.ok(requests.some(item => item.method === 'GET' && item.path === `/assemblies/${ownID}`), 'Reload recovers the known ID read-only');
-  await assemblyReady(); assemblyGate = new Promise(resolve => { releaseAssembly = resolve; });
-  await page.locator('#assemble').click();
-  await page.locator('#assembly-status').filter({hasText: 'Montando no PC'}).waitFor();
-  const staleID = new URL(page.url()).searchParams.get('assembly');
-  await page.locator('.clip-card').filter({hasText: chainRoot.slice(0, 8)}).click();
-  await page.waitForFunction(id => document.getElementById('metadata').textContent.includes(id), chainRoot);
-  const newerSrc = await page.locator('#player').getAttribute('src'); releaseAssembly(); assemblyGate = null;
-  await page.locator('#assembly-status').filter({hasText: 'seleção mudou'}).waitFor();
-  assert.equal(await page.locator('#player').getAttribute('src'), newerSrc); assert.equal(await page.locator('#assembly-result').isHidden(), true);
-  assert.equal(assemblies.find(item => item.id === staleID).end_run_id, chainEnd);
-  await capture({path: resolve(artifacts, 'assembly-stale-selection.png'), fullPage: true});
-  assemblyMode = 'busy'; await assemblyReady(); await page.locator('#assemble').click();
-  await page.locator('#assembly-status').filter({hasText: 'CPU ocupado'}).waitFor();
-  const busyCount = assemblyPosts().length;
-  await capture({path: resolve(artifacts, 'assembly-busy.png'), fullPage: true});
-  assemblyMode = 'collision'; await page.locator('#assemble').click();
-  await page.locator('#assembly-status').filter({hasText: 'UUID já existente'}).waitFor(); assert.equal(assemblyPosts().length, busyCount + 1, 'Collision is not auto retried');
-  assemblyMode = 'lost'; await assemblyReady(); await page.locator('#assemble').click();
-  await page.locator('#assembly-status').filter({hasText: 'Resultado incerto'}).waitFor();
-  const lostID = new URL(page.url()).searchParams.get('assembly'), lostPosts = assemblyPosts().length;
-  assert.equal(await page.locator('#assemble').isDisabled(), true);
-  await capture({path: resolve(artifacts, 'assembly-uncertain.png'), fullPage: true});
-  await page.locator('#assembly-refresh').click();
-  await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor();
-  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
-  await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
-  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
-  const missingID = '99999999-9999-4999-8999-999999999999'; assemblyMode = 'normal';
-  await assemblyReady(`http://h3.mock.invalid/?other=keep&assembly=${missingID}#viewer`);
-  assert.equal(await page.locator('#assemble').isDisabled(), true); assert.equal(assemblyPosts().length, lostPosts);
-  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'não confirmada'}).waitFor();
-  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), missingID);
-  await capture({path: resolve(artifacts, 'assembly-missing-id.png'), fullPage: true});
-  runs[1].state = 'rejected'; await assemblyReady(); assert.equal(await page.locator('#assemble').isDisabled(), true);
-  runs[1].state = 'accepted'; runs[0].state = 'failed'; await assemblyReady(); assert.equal(await page.locator('#assemble').isDisabled(), true);
-  assert.equal(await page.locator('#player').isHidden(), true); assert.equal(assemblyPosts().length, lostPosts);
-  runs[0].state = 'ready_for_review'; await assemblyReady(`http://h3.mock.invalid/?other=keep&assembly=${lostID}#viewer`);
-  assert.equal(await page.locator('#assemble').isDisabled(), true);
-  const oldPreview = JSON.stringify(assemblies.find(item => item.id === lostID));
-  const cpuBeforeReview = assemblyPosts().length;
-  await page.locator('#accept').click();
-  await page.waitForFunction(() => document.getElementById('run-state').textContent === 'Aceito' && !document.getElementById('assemble').disabled);
-  assert.equal(assemblyPosts().length, cpuBeforeReview, 'Accept changes review only, not assembly intent');
-  assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
-  assert.equal(JSON.stringify(assemblies.find(item => item.id === lostID)), oldPreview, 'Previous preview remains immutable');
-  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente');
-  await page.locator('#assemble').click();
-  await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
-  assert.notEqual(new URL(page.url()).searchParams.get('assembly'), lostID, 'Accepted revision has a new UUID only on explicit Montar');
-  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem da sequência aceita');
-  assert.equal(runs[0].state, 'accepted'); await capture({path: resolve(artifacts, 'assembly-accepted.png'), fullPage: true});
-  runs[0].state = 'ready_for_review'; const safeURL = assemblies[0].video_url; assemblies[0].video_url = 'https://outside.invalid/movie';
-  await assemblyReady(); assert.equal(await page.locator('#assembly-result').isHidden(), true);
-  await page.locator('#assembly-status').filter({hasText: 'publicação própria'}).waitFor(); assemblies[0].video_url = safeURL;
-  const assemblyPhone = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
-  await assemblyPhone.route('**/*', routeRequest); await assemblyPhone.addInitScript(mockStartup);
-  const ap = await assemblyPhone.newPage(); ap.on('pageerror', error => exceptions.push(error.message));
-  await ap.goto('http://h3.mock.invalid/?other=keep#viewer'); await ap.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
-  await ap.locator('#assemble').tap(); await ap.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
-  assert.equal(await ap.evaluate(() => uuidDraws), 1); assert.ok(await ap.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  if (assemblyMedia) { await ap.locator('#assembly-player').evaluate(async video => { await video.play(); }); await ap.waitForFunction(() => document.getElementById('assembly-player').currentTime > .1); await ap.locator('#assembly-player').evaluate(video => video.pause()); }
-  await ap.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
-  await ap.screenshot({path: resolve(artifacts, 'assembly-phone-393-touch-2x.png'), fullPage: true});
-  await ap.locator('#assembly-panel').screenshot({path: resolve(artifacts, 'assembly-phone-panel-393.png')});
-  await ap.setViewportSize({width: 320, height: 852}); assert.ok(await ap.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await ap.screenshot({path: resolve(artifacts, 'assembly-phone-320.png'), fullPage: true});
-  await assemblyPhone.close();
-  assert.equal(nativePosts(), nativeBeforeAssembly + 1, 'Only the explicit extra review was native; no inference'); assert.equal(grokPosts().length, grokBeforeAssembly);
-  assert.equal(posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, generationBeforeAssembly);
-  assert.equal(requests.filter(item => item.path.endsWith('?wait=true')).length, waitsBeforeAssembly);
-  assert.equal(runs[0].state, 'ready_for_review');
-  if (assemblyFixture) assert.equal(createHash('sha256').update(await readFile(assemblyFixture)).digest('hex'), assemblyFixtureSHA, 'Frozen assembly movie unchanged');
-  assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
-  assert.equal(await page.evaluate(() => localStorage.length), 0);
-  console.log(`PASS mock browser: ${requests.length} intercepted requests, ${posts().length} fake POSTs, zero live API/GPU requests`);
+  const desktop = await browser.newContext({viewport: {width: 1440, height: 1000}, reducedMotion: 'reduce', serviceWorkers: 'block'}); await desktop.route('**/*', routeRequest); await desktop.addInitScript(mockStartup); const desktopPage = await desktop.newPage(); watch(desktopPage); await desktopPage.goto('http://h3.mock.invalid/'); await desktopPage.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); await audit('desktop-real-context', desktopPage); await desktop.close();
+  // Owner-facing evidence is a separate benign fixture set, not XSS regression copy.
+  resetRuns(); for (const run of runs) run.prompt = run.parent_id ? 'Ela dá um pequeno salto e termina de costas.' : 'Ela dança mantendo a referência original.';
+  references[1].name = 'Foto publicada no PC'; providerScene = 'Ela dá um pequeno salto. Durante o movimento, o vestido fica vermelho. Ao final, ela fica de costas. Preserve a identidade da referência original.';
+  await page.setViewportSize({width: 393, height: 852}); await ready(); await capture('owner-library');
+  await newIdea('Ela dá um salto, muda o vestido para vermelho e termina de costas.'); await focusedAudit('idea'); await capture('owner-context');
+  await page.locator('#grok-detail').click(); await active('proposal'); await focusedAudit('grok-result'); await capture('owner-proposal');
+  await page.locator('#grok-use').click(); await page.locator('#duration').fill('5'); await focusedAudit('duration'); await capture('owner-generation-5s');
+  await openRun(endID); await capture('owner-review');
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide'))); assert.equal(await page.evaluate(() => mockEvents.every(event => event.closed)), true);
+  assert.deepEqual(exceptions, []); assert.deepEqual(violations, []); assert.deepEqual(await protectedHashes(), beforeHashes);
+  if (assemblyMedia) assert.equal(createHash('sha256').update(await readFile(resolve(root, process.env.H3_UI_TEST_ASSEMBLY))).digest('hex'), assemblyHash);
+  console.log(`PASS progressive browser: ${requests.length} intercepted requests, ${posts().length} explicit fake POSTs, ${audits.length} bounds audits, zero API/provider/GPU`);
 } finally {
-  await writeFile(resolve(root, '.dumps/tests/reports/assembly_ui.json'), JSON.stringify({requests, exceptions, violations, media: Boolean(media), fakeInferencePosts: posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, fakeDiskUploads: posts().filter(item => item.body?.diskUploadFake).length, fakeGrokPosts: posts().filter(item => item.path === '/grok').length, fakeEditorSaves: requests.filter(item => item.path === '/grok/editor' && item.method === 'PUT').length, phone: {width: 393, height: 852, touch: true, scale: 2}, protectedProof: '.dumps/tests/reports/assembly_ui_hashcheck.json', assemblyFixtureSHA, fakeAssemblyPosts: posts().filter(item => item.path.startsWith('/assemblies/')).length, uuidFallback: 'WebCrypto.getRandomValues; one16-byte draw/version4/variantRFC4122; HTTP mock, not physical phone', cloudRequests: 0, gpuRequests: 0}, null, 2));
+  await writeFile(resolve(artifacts, 'report.json'), JSON.stringify({requests, exceptions, violations, consoleMessages, failedRequests, audits, captures, phone: {width: 393, height: 852, touch: true, scale: 2}, originalFilesProtected: Object.keys(beforeHashes).length, mediaFixture: Boolean(media), assemblyFixture: Boolean(assemblyMedia), assemblyHash, liveAPI: 0, provider: 0, GPU: 0}, null, 2));
   await browser.close();
 }

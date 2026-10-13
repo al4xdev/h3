@@ -1,52 +1,68 @@
 # H3 · Bancada de filme
 
-## Entrega independente — plano 15, revisão 2
+## Mobile por telas — planos 23, 24 e 25
 
-HTML/CSS/JavaScript same-origin, sem framework, build, CDN, fontes remotas, dependências novas ou estado persistido no navegador. A bancada grafite/cobre preserva o vídeo retrato no centro e a régua ancestral real (origem → seleção). No celular, vídeo e decisões precedem formulário e biblioteca. Upload e catálogo usam o mesmo formulário simples.
+HTML/CSS/JavaScript same-origin, sem framework, build, CDN ou fontes remotas. A identidade grafite/cobre e a **linha ancestral real** permanecem; a bancada de três colunas foi substituída por uma decisão de cada vez. No telefone, exatamente um painel principal está visível e focável. Desktop tem uma navegação lateral compacta, não sete formulários simultâneos.
 
-A entrega original de assets/mocks não concluía a integração. A ponte agora foi implementada separadamente no commit `6eae6f9`; o principal já validou leitura real de biblioteca/SSE/Range e reprodução sem POST. A biblioteca com 12 cards revelou compressão flex: `flex-shrink:0` mantém todos os filhos dentro de cada card e a lista rolável limitada. **As revisões acrescentam o editor Grok isolado, a correção visual e controles explícitos de montagem; fechamento e revalidação real da UI final permanecem com o principal.** Não altera geração nativa, recursos ou dados existentes.
+### Caminho de uso
 
-## Contratos da ponte
+1. **Biblioteca** abre primeiro. Nova cena inicia um rascunho; selecionar um bloco lê seus metadados e abre a revisão. Falhas/interrupções não se tornam vídeos prontos.
+2. **Referência e ideia** escolhe a imagem original ou uma referência publicada no PC, recebe upload explícito e a ideia simples. Upload salva em `.data` no PC e não gera nem chama Grok.
+3. **Proposta do Grok** mantém a ideia separada, mostra texto sempre editável e exige **Usar esta proposta**. **Usar minha instrução** permite pular Grok. Nenhuma dessas ações gera vídeo.
+4. **Preparar geração / pedido no PC** mostra a instrução escolhida, referência/parent, seed e duração solicitada → frames → tempo alinhado. Só **Gerar** envia a intenção. HTTP 202 é admissão, não conclusão. **Abrir bloco** leva ao resultado confirmado.
+5. **Revisar bloco** oferece vídeo retrato manual, tempo solicitado/alinhado/verificado, ancestrais e decisões explícitas. Aceitar apenas desbloqueia continuação; não continua nem monta automaticamente.
+6. **Preparar continuação** confirma o pai aceito. Sua identidade original é herdada; o último frame inicia o vídeo, mas o contexto enviado a Grok é a imagem de identidade original. Descrever leva novamente à ideia/proposta/geração.
+7. **Montagem** é uma tela e uma ação separadas. A cadeia é a ancestralidade exata do fim selecionado, sem misturar ramificações. Montar não aceita o fim nem gera outros blocos.
 
-| Caminho | Contrato |
-| --- | --- |
-| `GET /` | `src/h3_backend/web/index.html` |
-| `GET /ui/app.css`, `/ui/app.js` | Assets fixos, MIME CSS/JavaScript ES module |
-| `GET /app/config` | `default_prompt`, `continuation_prompt`, `reference_image:"dance_reference.png"`, `duration_seconds:2.3`, `workflow_output_profile`; flags opcionais `filesystem_events`, `reference_library`, `assembly_enabled` (false até os gates da montagem) |
-| `GET /runs?limit=50&offset=0` | `{items,total,limit,offset}`; itens `id,state,prompt,seed,duration_seconds,created_at,updated_at,parent_id,video_url` |
-| `GET /inputs?limit=50&offset=0` | `{items,total,limit,offset}`; itens `id,source_root,path,name,image_url,width?,height?` |
-| `POST /inputs?name=<encodeURIComponent(file.name)>` | Body **File** bruto, Content-Type do arquivo ou `application/octet-stream`; resposta item do catálogo |
-| `GET /events` | EventSource same-origin; evento `change` (ou default `message`), JSON `{path,invalidation:true}` |
+Voltar, seleção, resize, history e SSE conservam rascunhos por cena/pai: ideia, proposta editada, instrução escolhida, referência, seed e duração. O preset não sobrescreve rascunhos sujos em cada troca. Resposta Grok atrasada fica no rascunho original, marcada com o contexto antigo; nunca substitui a ideia de outro pai. **Reabrir proposta deste rascunho** permite conferi-la explicitamente. Se você editou a proposta enquanto Grok trabalhava, essa edição vence: a resposta atrasada fica em um disclosure separado no rascunho de origem. **Substituir a proposta pela resposta atrasada** é outra escolha explícita que só copia para o editor; não muda ideia/instrução escolhida/referência/duração/seed nem envia geração. Sem candidato, essa ação não faz nada.
 
-`source_root` só admite `assets`, `inputs`, `runs`. Paths e nomes são texto, não HTML, CSS selectors ou comandos. Thumbnails só aceitam URLs relativas próprias: `/assets/image?path=…`, `/inputs/image?path=…`, `/runs/{id}/image?name=initial_frame.png|last_frame.png`. O navegador não valida ownership do disco: contenção, formatos reais, symlinks e publicação atômica são responsabilidade da ponte. Paths relativos inseguros e URLs externas são rejeitados na UI também.
+Estado de tela/rascunhos é transitório em memória, não autoridade de negócio ou armazenamento durável. Recarregar não recupera texto não salvo nem repete intenção. A query de tela é só navegação; preserva outros parâmetros/hash e o ponteiro de montagem. `.data` no PC continua a autoridade. Não há localStorage/sessionStorage, banco no navegador ou acesso direto ao filesystem do celular.
 
-A referência original permanece default pelo alias legado. Escolher explicitamente um item envia `references:[{source_root,path}]` no **novo i2v**, sem campos extras do catálogo. Arquivos já no PC e frames publicados entram pelo catálogo, nunca por acesso livre ao filesystem do celular. Upload PNG/JPEG/WebP tem guard de 32 MiB, não vazio, duplo clique e resultado incerto. Nenhum base64, multipart, leitura gigante do File ou blob persistido. A prévia usa a URL própria retornada após publicação. Upload escolhe a imagem, mas **não gera nem revisa**. A validação efetiva do conteúdo pertence ao FFmpeg no PC; os bytes são salvos em `.data` no PC mesmo quando enviados pelo celular.
+### Duração por bloco
 
-Rotas existentes preservadas:
+O antigo readonly e o payload fixo de 2.3 foram substituídos por entrada realmente ligada aos pedidos i2v **e** v2v. Default continua **2.3**; os grafos, fórmula, presets e benchmark permanecem congelados. `GET /app/config` acrescenta:
 
-- `GET /runs/{id}`: Run completo com `output.path`, erro e timestamps.
-- `GET /runs/{id}/sequence`: mantém `blocks` na ordem recebida, sem ordenar IDs, escolher irmãos ou montar frames.
-- `GET /runs/{id}/video`: player único, controls/playsinline/preload metadata/contain, sem autoplay. Exige estado `ready_for_review|accepted|rejected`, `output.path` no detalhe e URL própria explícita na coleção/cadeia. Falha, interrupção ou arquivo ausente não viram vídeo pronto.
-- `POST /runs/{id}/accept|reject`: apenas `ready_for_review`, ação explícita, sem body. Evidência rejeitada permanece.
-- `POST /runs/i2v`: `{seed,prompt,duration_seconds:2.3,image:"dance_reference.png"}` por default; seleção explícita troca apenas `image` por `references`.
-- `POST /runs/{accepted_parent_id}/v2v`: `{seed,prompt,duration_seconds:2.3,reference_tail_seconds:3,include_audio:true}`. **Sem nova referência**: identidade original do pai é herdada imutavelmente. Catálogo/upload ficam desabilitados nesse modo, com explicação visível.
+```json
+{"duration_capabilities":{"default_requested_seconds":2.3,"min_requested_seconds":0,"min_exclusive":true,"max_requested_seconds":10,"input_step":0.01,"fps":24,"frame_base":5,"frame_stride":17,"rounding":"half_even","max_frames":243,"max_actual_seconds":10.125}}
+```
 
-Seed aceita somente dígitos e inteiro seguro `0..9007199254740991` (não sinais, expoente, hexadecimal, decimal, espaços ou newline/CRLF). Prompt não vazio, até 12000 caracteres, preservado exatamente. Duração e parâmetros de geração continuam fixos. Montagem aparece somente com `assembly_enabled:true`, conforme o plano 22r2; false/flag ausente não faz requests de montagem.
+UI aceita decimal estrito positivo, ponto ou vírgula e até duas casas; não aceita branco, sinal, expoente, NaN/Infinity ou clamp silencioso. A UI replica **Python half-even**, não `Math.round`. Solicitação e vídeo não têm obrigatoriamente a mesma duração:
 
-## Eventos, admissão e recuperação
+| Solicitada | Frames alinhados | Tempo efetivo a 24 fps |
+| --- | --- | --- |
+| 2.3 s (default) | 56 | 2.333333 s |
+| 2.8 s / 3 s | 73 | 3.041667 s |
+| 5 s | 124 | 5.166667 s |
+| 10 s | 243 | 10.125 s |
 
-1. Config sem flags mantém comportamento legado, sem abrir EventSource ou pedir catálogo.
-2. Com SSE, registra listeners e espera o primeiro `open` **antes do snapshot** de catálogo/runs. Um erro inicial permite snapshot offline; o próximo open relê metadados. Não há timer, polling ou retry de POST.
-3. Hints aceitam paths `runs/…`, `inputs/…` e prefixo real `.data/…`; `.data`/invalidation sem path relê o snapshot inteiro. Telemetria, tmp e `.part` são ignorados. Bursts se agrupam em microtask, uma leitura ativa e um dirty flag; mudanças durante a leitura provocam uma releitura limitada após ela.
-4. Durante geração/revisão/upload, hints ficam dirty até o resultado. Epochs protegem seleção e coleção contra respostas antigas. Refresh de progresso não reassocia `video.src` quando a URL é a mesma. Pagehide fecha EventSource e aborta somente a espera local, **não cancela geração**.
-5. Geração explícita exige um POST **202** com ID real, seguido de exatamente um `GET /runs/{own_id}?wait=true`. Resultado vazio/de outro ID, wait perdido, admissão ambígua ou 5xx bloqueiam nova geração nesta sessão. Refresh/SSE nunca limpam esse bloqueio por suposição e nunca reenviam intenção.
-6. 400/404/409 explícitos não são repetidos. Upload desconhecido também permanece bloqueado para evitar duplicação silenciosa; consulte o catálogo. Uma falha de leitura após publicação confirmada não é tratada como falha de admissão.
+O limite de 10 s é **orçamento operacional**, não máximo do modelo ou prova de RAM/VRAM, prazo ou qualidade de gerações longas. Mais tempo custa mais recursos; não reduzimos resolução, sampler, passos, VAEs ou referências para compensar. Se capabilities não existem, o frontend legado fica readonly 2.3 com aviso. Capabilities malformadas falham fechadas, sem liberação presumida.
 
-Somente estado transitório em memória. textContent/createElement, labels, teclado, foco visível, aria-live, skip link e reduced-motion. CSP recomendado: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`. Sem scripts/styles inline no HTML.
+A revisão mostra a duração solicitada, alinhada e verificada separadamente. O benchmark continua request 2.3 × três blocos, 56 × 3 = 168 frames / 7 s, com seeds/referências originais. O contexto de continuação mantém tail **3 s** e áudio **true**, independentemente do tempo do filho. Nenhuma nova imagem é enviada à geração v2v.
 
-## Validação CPU e browser totalmente interceptado
+### Grok: ideia + imagem → proposta de texto
 
-Comandos fish (Playwright/Chromium já instalados; **não instalar npm/dependências**):
+O dono supersede a antiga restrição de entrada somente texto: **Detalhar ideia e imagem** envia explicitamente `system_prompt`, `prompt`, referência própria `{source_root,path}` e o ID persistido. Modelo fixo mostrado readonly: `grok-4.20-0309-non-reasoning`. `GET /grok/editor` lê configuração local; **Salvar instruções no PC** usa PUT separado do formulário nativo. Nenhuma autenticação/catálogo/provider é chamada ao abrir ou navegar.
+
+A imagem que será enviada é indicada antes do clique e registrada junto à proposta. O backend valida ownership, JPEG/PNG e máximo 20 MiB; upload para geração continua PNG/JPEG/WebP até 32 MiB. WebP/oversize recusado por Grok não vira resize/recompressão escondidos ou fallback para outra imagem. URLs arbitrárias, paths privados e credenciais nunca são contexto. Front envia somente identificador da referência, não base64 ou imagem inteira em JSON. Leia [contratos e limites do editor](grok.md).
+
+Grok devolve texto literal até 12000 caracteres, via `.value`/`textContent`, sem truncar/XSS. Não edita nem gera imagem/vídeo. Contexto/ideia/parent/duração/system alterados durante uma chamada tornam sua proposta antiga explícita. Elegibilidade/cota OAuth da conta e visão ao vivo não foram verificadas por mocks.
+
+### Contratos e segurança preservados
+
+- `/runs?limit=50&offset=0`, `/inputs?limit=50&offset=0`, `/runs/{id}`, `/runs/{id}/sequence`: leituras próprias, URLs same-origin, paths contidos. Publicação real exige estado jogável + path de output + URL explícita própria; estado terminal sozinho não prova arquivo.
+- `POST /runs/i2v`: seed, texto exato, duração escolhida; referência original legada ou `references:[{source_root,path}]`.
+- `POST /runs/{accepted_parent_id}/v2v`: seed, texto exato, duração escolhida, `reference_tail_seconds:3`, `include_audio:true`, sem novas fontes de identidade.
+- Seed é inteiro seguro de dígitos `0..9007199254740991`; texto não vazio até 12000. Enter nos inputs/editor/settings ou submissão de formulário invisível não gera vídeo.
+- Um POST 202, seguido de **um** `GET /runs/{own_id}?wait=true`. Espera perdida/ID errado/admissão incerta/5xx nunca causa replay. Navegação/SSE não limpa bloqueios independentes de native/Grok/upload/montagem.
+- EventSource se registra e abre antes do snapshot; hints invalidam paths normalizados, ignoram temporários/telemetria e se agrupam em microtask. Durante operação ficam dirty; reconexão só relê. Sem polling/timers de conclusão.
+- Pagehide fecha SSE e aborta espera **local**, não o job no PC. Não existe promessa de cancelar por fechar a página. Native mantém slot global, RAM floor e cancelamento próprio no backend.
+- Players usam controls/playsinline/preload metadata/contain, sem autoplay. Vídeo não recebe src inicial enquanto sua tela está invisível; esconder pausa playback local. Releitura/SSE com mesma URL não recarrega o player.
+
+Montagem mantém UUID criptográfico registrado na query **antes** do POST `/assemblies/{UUID}` com `{end_run_id}`; aguarda 200/arquivo publicado. Em resultado incerto, **Reler montagem**/reload/SSE consultam o mesmo ID; 404 não autoriza outro UUID/POST. Preview tem fim pronto ainda pendente; accepted sequence tem fim aceito. Aceitar fim não monta; uma nova revisão aceita exige novo clique explícito Montar. URL/download somente próprios, com completed + hashes + output verificados. Ordem/count não certificam equivalência perceptual ou bytes/pixels lossless.
+
+### Validação sem API/provider/GPU
+
+Comandos fish, Playwright/Chromium existentes (sem instalar dependências):
 
 ```fish
 node --check src/h3_backend/web/app.js
@@ -54,108 +70,8 @@ node --test tests/frontend_ui.test.mjs
 env H3_UI_TEST_CLIP=runs/02cf408f-c985-47a2-887d-731569d7827a/chunk.mp4 H3_UI_TEST_ASSEMBLY=.dumps/benchmarks/baseline-three-chunks/benchmark.mp4 node tests/frontend_browser_mock.mjs
 ```
 
-25 testes Node, incluindo os oito contratos originais, cinco de Grok, sete de montagem e os de roots/references, URLs inseguras, File bruto/duplo upload, normalização SSE e espera vazia/ID incorreto. Browser intercepta **todas** as requests de `http://h3.mock.invalid`, bloqueia origem externa e nunca abre processo API/Comfy. EventSource fake controlável reproduz abertura, reconexão, hints e close. POSTs de inferência, review, upload, Grok e montagem são separados e rotulados no relatório; upload/montagem fake não escrevem disco.
+50 testes Node passam: 31 puros de frontend e 19 do adapter MCP com worker inerte. Frontend cobre contratos anteriores, duração/capabilities/half-even/locale/payloads root+continue, imagem própria e snapshots atrasados. Browser intercepta **toda** request em `http://h3.mock.invalid`, bloqueia origem externa, simula SSE e POSTs separados; não abre servidor nem faz inferência/provider real. Execução final: 248 requests interceptadas, 21 POSTs fake explícitos, 43 auditorias de bounds/foco, zero exceções JavaScript ou requests inesperadas. Phone 393 × 852 / DPR2 / touch, 320/640/1440 e contexto desktop separado auditam um painel ativo, hidden/inert/foco, >=44 px, overflow e cards sem compressão. CTAs inteiras cabem no visual viewport, não intersectam o footer e passam hit-test no próprio botão. Após tap/scrollIntoView, ideia/proposta/duração focadas ficam acima dos controles fixos. Fixtures já existentes são só bytes prerecorded; um vídeo antigo usado pelo mock não é prova de geração de 5/10 s.
 
-O clip histórico é lido sem alteração e servido só pelo mock: dimensões 480×864, playback explícito/pausa, sem inferência. Testes cobrem 1440/390/320 sem overflow, XSS textual, estados sem arquivo, cadeia, duplo submit, payloads exatos, upload selecionado sem geração, snapshot SSE-first, burst bounded, dirty durante wait, seleção atrasada, reconexão sem POST e sem limpar incerteza, pagehide e config legado sem flags.
+Capturas somente após estado/console/rede/bounds auditados, em `.dumps/tests/ui-progressive/`, com `report.json`. Fixtures de falhas HTTP/rede têm erros esperados registrados, sem exceções JavaScript. Os cinco PNGs benignos `owner-library/context/proposal/generation-5s/review` são evidência visual separada dos fixtures XSS. Capturas nativas DPR2 (786 × 1704) usam clip explícito na origem do documento, foco/blur/frames renderizados e rede/media estabilizados para evitar scroll pendente do compositor mobile. Hashes de 205 recursos, prompts, assets, runs/inputs/assemblies reais antes/depois protegem originais; `.data/grok`/OAuth nunca são lidos ou hashed pelo harness. Nada de picker físico, elegibilidade de provider ou qualidade/RAM GPU longa é certificado pela emulação.
 
-Evidências locais novas (não sobrescrevem entrega R1):
-
-- `.dumps/tests/ui-paths/`: desktop/mobile, empty, API error, admission uncertain, failed evidence, reference gallery, upload selected e SSE refreshed.
-- `.dumps/tests/reports/frontend_paths.json`: requests, exceções, violações, contagens de fake inference e fake disk upload.
-- `.dumps/tests/reports/frontend_paths_before.json`: hashes de manifests/mídia existentes de `runs`, `.data/runs` e `assets`; verificação posterior separada.
-
-## Editor de cena Grok — plano 20, revisão 2
-
-Um botão **Detalhar com Grok** envia somente ideia atual + system prompt + modelo
-opcional a `POST /grok`. Texto estável volta ao campo editável; resposta velha vira
-proposta explícita. Não é chat, não recebe fotos/paths e nunca envia geração,
-aceitação, continuação ou montagem. Confira e use **Gerar** separadamente.
-
-Details **Configurar Grok** oferece system prompt e ID de modelo opcionais, mais
-**Salvar configuração no PC**. Fica fora do formulário nativo para Enter no modelo
-não enviar vídeo. `GET /grok/editor` é leitura local inerte no startup;
-`PUT /grok/editor` publica `.data/grok/editor.json`, nunca OAuth. Modelo vazio no
-pedido defere ao ambiente; nenhum modelo é escolhido automaticamente. Leia
-[contratos, autenticação e limites](grok.md). Sem calls remotas na abertura/SSE,
-sem catálogo/auth automático ou repetição de pedido incerto.
-
-Novos mocks cobrem conteúdo literal/XSS, ideia simples, system/model, PUT explícito,
-Grok duplo clique sem POST nativo, draft mais novo/proposta/Usar, geração somente
-pelo botão nativo, erro/oversize/unknown sem truncar/retry ou limpar incerteza nativa,
-config indisponível sem bloquear geração e Enter no modelo. A regressão de 12 cards
-longos verifica bounding boxes de todos os filhos em 1440/393/320. Phone real-emulado
-393×852, touch e escala 2, verifica detalhe sem envio nativo e sem overflow.
-
-Evidências desta revisão, separadas das anteriores:
-
-- `.dumps/tests/ui-grok/`: desktop/mobile e estados anteriores; `grok-detailed-desktop`,
-  `grok-stale-proposal`, `grok-oversized-error`, `grok-uncertain`,
-  `grok-phone-393-touch-2x` e `library-many-{1440,393,320}` PNGs.
-- `.dumps/tests/reports/grok_editor.json`: requests e contagens distintas de Grok
-  fake, PUT config, inferência/review/upload fake, erros e bloqueios externos.
-- `.dumps/tests/reports/library_bounds_after.json`: children/card, altura e shrink.
-- `.dumps/tests/reports/grok_editor_hashcheck.json`: 162 arquivos protegidos
-  originais/canônicos/assets comparados, sem credenciais.
-
-**Pendente do principal:** browser real read-only final com configuração Grok e
-correção dos cards, empacotamento/validação de assets e fechamento das tarefas.
-Testes Grok são offline; não provam elegibilidade/cobrança/provider real. Nenhum
-GPU, ajuste de geração, alteração de recursos ou certificação perceptual foi
-executado nesta entrega.
-
-## Montagem explícita — plano 22, revisão 2
-
-**Montar sequência** fica fora do formulário de geração. Só aparece com flag true
-e habilita quando o último bloco é pronto/aceito, todos os pais são aceitos e a
-cadeia origem → seleção tem IDs e URLs próprios publicados (até 100 blocos).
-Montar não aceita o último bloco, não altera revisão, não usa Grok nem gera novos
-chunks. O vídeo do bloco continua no player original.
-
-1. Antes do POST, o navegador gera um UUID criptográfico e grava somente o ponteiro
-   `?assembly=<UUID>` via history.replaceState, preservando outras queries e o
-   skiplink/hash `#viewer`. Preferência: crypto.randomUUID; em HTTP LAN sem essa
-   função, WebCrypto.getRandomValues com 16 bytes, version4/variant RFC4122. Nunca
-   Math.random. Sem WebCrypto, falha antes do POST.
-2. `POST /assemblies/{UUID}` recebe somente `{end_run_id:<UUID>}` e aguarda **200**
-   com montagem completa. Não há 202, fila ou GET wait nesse fluxo. Guard no botão
-   e cliente impede envio duplicado. Busy/409/collision são honestos e não repetidos.
-3. Erro incerto mantém o mesmo UUID/query e bloqueia outra intenção às cegas.
-   **Reler montagem**, reload e SSE fazem só GETs. 404 não autoriza novo UUID/replay.
-   Confirmar metadados terminais reconcilia apenas essa montagem; o mesmo intento
-   conhecido não é submetido novamente. Após prévia completed e aceite explícito do
-   último bloco, Montar pode criar uma nova revisão accepted com outro UUID; aceitar,
-   reload e SSE nunca criam esse ID/POST. A prévia anterior continua imutável e com
-   seu label original. Incerteza nativa/Grok continua independente.
-4. `GET /assemblies?end_run_id=<UUID>&limit=50&offset=0` redescobre registros do fim
-   escolhido; `GET /assemblies/{UUID}` recupera o ponteiro conhecido. A query não
-   guarda estado de negócio: JSON/commit em `.data` permanece a autoridade.
-5. Painel separado e recolhível, controls/playsinline/preload metadata/contain, sem
-   autoplay. URL/download só `/assemblies/{UUID}/video`, completed + hashes válidos
-   e output próprio. Lazy src ao abrir o painel. Seleção antiga/resposta tardia nunca
-   troca o player do bloco atual. SSE metadata usa o mesmo subscriber/coalescing,
-   sem timers e sem POST; tmp/request/video não iniciam montagem.
-6. Label: **Montagem de prévia — revisão pendente** para fim ready; **Montagem da
-   sequência aceita** para fim accepted. Metadados mostram ID, frames, fps e erro.
-   Ordem/count preservados não significam pixels/MP4 lossless ou qualidade artística.
-
-Mocks usam o filme histórico já existente de 7 s exclusivamente como bytes
-interceptados: 480×864, 168 frames/24 fps, playback explícito/pausa. Hash da fixture
-é verificado sem alteração; não houve FFmpeg/POST/API real pelo agente de UI.
-Casos: flag false sem requests, duplo clique, query/hash/UUID fallback, preview com
-terceiro ainda ready, accepted, stale selection, busy/collision, lost response +
-GET/reload mesmo ID, missing ID bloqueado, pais rejeitados/fim failed, URL externa
-rejeitada, SSE/reconnect sem POST nem reset dos players e 393×852 touch/2x + 320 sem
-overflow. Não é teste em celular físico.
-
-Evidências novas (preservam os relatórios e screenshots anteriores):
-
-- `.dumps/tests/ui-assembly/`: desktop/mobile, preview, accepted, stale, busy,
-  uncertain, missing ID e painel phone; também regressões anteriores.
-- `.dumps/tests/reports/assembly_ui.json`: requests, contagens fake por endpoint,
-  UUID fallback, hash da fixture e zero cloud/GPU/exceções externas.
-- `.dumps/tests/reports/assembly_ui_hashcheck.json`: 162 arquivos originais/data/
-  assets inalterados, sem leitura de credenciais.
-
-**Pendente do principal:** gate backend completo, integração real e UMA montagem
-CPU deliberada em revisão própria, preservando os vídeos/Runs/revisões originais.
-Frontend/mocks não concluem o plano 22 ou o objetivo inteiro do aplicativo.
+Evidências históricas anteriores permanecem em `.dumps/tests/ui-paths/`, `ui-grok/`, `ui-assembly/` e seus relatórios. Suas descrições de painéis empilhados, texto-only e duração fixa são históricas, não o contrato atual.

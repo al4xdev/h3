@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID, durationCapabilities, roundHalfEven, alignedFrames, parseDuration} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
@@ -186,6 +186,43 @@ test('lost assembly or conflict never creates another UUID or retries POST', asy
 test('assembly filesystem hints only invalidate metadata, not media/requests', () => {
   assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/metadata.json`, invalidation: true}), true);
   for (const file of ['request.json', 'video.mp4', '.part']) assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/${file}`, invalidation: true}), false);
+});
+const capsDTO = {default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
+test('duration capabilities are exact and missing legacy capabilities never unlock time', () => {
+  assert.equal(durationCapabilities(undefined), null);
+  assert.deepEqual(durationCapabilities(capsDTO), capsDTO);
+  assert.equal(parseDuration('2,30'), 2.3);
+  assert.throws(() => parseDuration('3'));
+  for (const value of [null, {}, {...capsDTO, max_frames: 240}, {...capsDTO, rounding: 'half_up'}, {...capsDTO, private: true}]) assert.throws(() => durationCapabilities(value));
+});
+test('native half-even rounding includes ties that JavaScript Math.round gets wrong', () => {
+  for (const [value, expected] of [[4.5, 4], [5.5, 6], [22.5, 22], [56.5, 56], [239.5, 240]]) assert.equal(roundHalfEven(value), expected);
+  for (const [seconds, frames] of [[0.01, 5], [2.3, 56], [2.8, 73], [3, 73], [5, 124], [10, 243], [22.5 / 24, 22], [56.5 / 24, 56]]) assert.equal(alignedFrames(seconds), frames);
+  assert.equal(alignedFrames(56.5 / 24 + 0.000001), 73);
+});
+test('strict decimal requested time supports local comma without clamp or coercion', () => {
+  for (const value of ['0.01', '2.3', '2,80', '3', '5.00', '10']) assert.equal(parseDuration(value, capsDTO), Number(value.replace(',', '.')));
+  for (const value of ['', ' ', '0', '-1', '+3', '1e1', '0x5', 'NaN', 'Infinity', '10.01', '2.333', '.5', '3.', '3\n', '1,2.3']) assert.throws(() => parseDuration(value, capsDTO));
+  assert.throws(() => parseDuration('100', {...capsDTO, max_requested_seconds: 1000}));
+});
+test('chosen time is sent exactly for roots and continuations with frozen tail/audio', () => {
+  for (const duration of ['2.3', '2.8', '3', '5', '10']) {
+    const base = {seed: 4, prompt: ' exact ', duration_seconds: Number(duration)};
+    assert.deepEqual(makePayload({seed: '4', prompt: ' exact ', duration, capabilities: capsDTO}), {...base, image: 'dance_reference.png'});
+    assert.deepEqual(makePayload({seed: '4', prompt: ' exact ', duration, capabilities: capsDTO, continuation: true, reference: {source_root: 'inputs', path: 'ignored.png'}}), {...base, reference_tail_seconds: 3, include_audio: true});
+  }
+});
+test('Grok image context is a strict own reference, separate from native generation', async () => {
+  const reference = {source_root: 'inputs', path: 'own/original.png', image_url: '/inputs/image?path=own%2Foriginal.png'};
+  const payload = grokPayload({system_prompt: 'system', prompt: 'idea', model: 'grok-4.20-0309-non-reasoning', reference});
+  assert.deepEqual(payload.reference, {source_root: 'inputs', path: 'own/original.png'});
+  assert.throws(() => grokPayload({...payload, reference: {source_root: 'inputs', path: '../oauth.json'}}));
+  const calls = [], client = createClient(async (path, options) => { calls.push([path, options.method, JSON.parse(options.body)]); return reply({text: 'editable'}); });
+  assert.equal(await client.detail(payload), 'editable'); assert.deepEqual(calls, [['/grok', 'POST', payload]]);
+});
+test('stale duration, image and originating parent drafts cannot pass Grok snapshot match', () => {
+  const before = {revision: 1, mode: 'continue', selected: rootID, draftKey: rootID, prompt: 'idea', system_prompt: 'system', model: 'pin', duration: '3', referenceKey: 'original', proposal: 'draft proposal'};
+  for (const [key, value] of Object.entries({duration: '5', referenceKey: 'other-image', draftKey: endID, revision: 2, proposal: 'manual edit'})) assert.equal(draftMatches(before, {...before, [key]: value}), false);
 });
 test('assets do not contain unsafe bindings, persistence, autoplay or polling', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');

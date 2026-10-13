@@ -87,9 +87,32 @@ export function assemblyRecord(value, id = value?.id) {
   if (value?.id !== id || !['running', 'failed', 'interrupted', 'completed'].includes(value.state) || !['preview', 'accepted_sequence'].includes(value.mode) || typeof value.request_sha256 !== 'string' || value.request_sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(value.request_sha256) || (value.state === 'completed' && !assemblyURL(value, value.end_run_id))) throw new Error('Metadados da montagem não confirmam o ID ou a publicação própria.');
   return value;
 }
-export function makePayload({seed, prompt, image = 'dance_reference.png', reference = null, continuation = false}) {
+// The backend owns the budget. Missing capabilities mean the old, fixed default;
+// malformed capabilities are not permission to guess an unlimited duration.
+export function durationCapabilities(value) {
+  if (value === undefined) return null;
+  const expected = {default_requested_seconds: 2.3, min_requested_seconds: 0, min_exclusive: true, max_requested_seconds: 10, input_step: 0.01, fps: 24, frame_base: 5, frame_stride: 17, rounding: 'half_even', max_frames: 243, max_actual_seconds: 10.125};
+  if (!value || Object.keys(value).length !== Object.keys(expected).length || Object.entries(expected).some(([key, item]) => value[key] !== item)) throw new Error('Capacidades de duração incompatíveis. Nenhum envio permitido.');
+  return Object.freeze({...value});
+}
+export function roundHalfEven(value) {
+  const floor = Math.floor(value), fraction = value - floor;
+  return fraction === 0.5 ? floor + (floor % 2) : fraction < 0.5 ? floor : floor + 1;
+}
+export function alignedFrames(seconds) {
+  const requested = Math.max(5, roundHalfEven(seconds * 24));
+  return requested + ((5 - requested % 17 + 17) % 17);
+}
+export function parseDuration(value, capabilities = null) {
+  if (capabilities !== null) capabilities = durationCapabilities(capabilities);
+  if (typeof value !== 'string' || !/^(?:[0-9]+)(?:[.,][0-9]{1,2})?$/.test(value)) throw new Error('Duração: use segundos positivos, com até duas casas decimais.');
+  const seconds = Number(value.replace(',', '.'));
+  if (!Number.isFinite(seconds) || seconds <= 0 || (capabilities ? seconds > capabilities.max_requested_seconds || alignedFrames(seconds) > capabilities.max_frames : seconds !== 2.3)) throw new Error(capabilities ? 'Duração solicitada deve ser maior que 0 e até 10 s.' : 'Este backend permite somente a duração padrão de 2,3 s.');
+  return seconds;
+}
+export function makePayload({seed, prompt, duration = '2.3', capabilities = null, image = 'dance_reference.png', reference = null, continuation = false}) {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma instrução de 1 a 12000 caracteres.');
-  const base = {seed: parseSeed(seed), prompt, duration_seconds: 2.3};
+  const base = {seed: parseSeed(seed), prompt, duration_seconds: parseDuration(duration, capabilities)};
   if (continuation) return {...base, reference_tail_seconds: 3, include_audio: true};
   if (reference) return {...base, references: [referenceValue(reference)]};
   if (image !== 'dance_reference.png') throw new Error('Use a referência original disponível.');
@@ -99,17 +122,17 @@ export function editorPayload({system_prompt, model = ''}) {
   if (typeof system_prompt !== 'string' || !system_prompt.trim() || system_prompt.length > 100000 || typeof model !== 'string' || model.length > 256 || (model && !model.trim())) throw new Error('Configuração Grok inválida: system prompt até 100000 caracteres e ID do modelo até 256.');
   return {system_prompt, model};
 }
-export function grokPayload({prompt, system_prompt, model = ''}) {
+export function grokPayload({prompt, system_prompt, model = '', reference = null}) {
   const config = editorPayload({system_prompt, model});
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma ideia de 1 a 12000 caracteres.');
-  return {system_prompt: config.system_prompt, prompt, ...(model ? {model} : {})};
+  return {system_prompt: config.system_prompt, prompt, ...(model ? {model} : {}), ...(reference ? {reference: referenceValue(reference)} : {})};
 }
 export function sceneText(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 12000) throw new Error('Grok não devolveu uma cena válida de até 12000 caracteres. O rascunho foi mantido, sem truncar.');
   return value;
 }
 export function draftMatches(before, after) {
-  return ['revision', 'mode', 'selected', 'prompt', 'system_prompt', 'model'].every(key => before[key] === after[key]);
+  return ['revision', 'mode', 'selected', 'prompt', 'proposal', 'system_prompt', 'model', 'duration', 'referenceKey', 'draftKey'].every(key => before[key] === after[key]);
 }
 export function playableURL(run, summary, block) {
   if (!run || !PLAYABLE.has(run.state)) return null;
@@ -196,10 +219,81 @@ export function startUI(document, client = createClient()) {
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  Object.assign(state, {screen: 'library', trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false});
+  const TITLES = {library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme'};
   function text(id, value) { $(id).textContent = value; }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
   const label = run => STATE_LABELS[run?.state] || 'Estado desconhecido';
+  const secondsLabel = seconds => new Intl.NumberFormat('pt-BR', {maximumFractionDigits: 3}).format(seconds);
+  function draft() {
+    if (!state.drafts.has(state.draftKey)) {
+      const idea = state.mode === 'continue' ? state.config?.continuation_prompt || '' : state.config?.default_prompt || '';
+      state.drafts.set(state.draftKey, {idea, proposal: '', chosenPrompt: idea, reference: state.reference, seed: '2026101205', duration: '2.3', revision: 0, proposalStale: false, proposalContext: '', lateProposal: null});
+    }
+    return state.drafts.get(state.draftKey);
+  }
+  function saveDraft() {
+    if (!state.config) return;
+    Object.assign(draft(), {idea: $('idea').value, proposal: $('grok-result').value, chosenPrompt: $('prompt').value, seed: $('seed').value, duration: $('duration').value, reference: state.reference});
+  }
+  function restoreDraft() {
+    const current = draft();
+    $('idea').value = current.idea; $('grok-result').value = current.proposal; $('prompt').value = current.chosenPrompt;
+    $('seed').value = current.seed; $('duration').value = current.duration; state.reference = current.reference;
+    text('proposal-context', current.proposalContext);
+    text('proposal-hint', current.proposalStale ? 'O contexto mudou após este pedido. Confira a imagem e a ideia originais antes de usar esta proposta antiga.' : 'Edite o texto antes de usar. Sua ideia foi mantida.');
+    const index = state.references.findIndex(item => item.source_root === state.reference?.source_root && item.path === state.reference?.path);
+    $('reference').value = state.reference ? index < 0 ? 'selected' : String(index) : 'dance_reference.png';
+    showReference(); durationPreview();
+  }
+  function contextReference() {
+    try {
+      if (state.mode === 'continue') return state.reference ? referenceValue(state.reference) : null;
+      return referenceValue(state.reference || {source_root: 'assets', path: 'dance_reference.png'});
+    } catch { return null; }
+  }
+  function contextLabel() {
+    const reference = contextReference();
+    return reference ? `${reference.source_root} / ${reference.path}${state.mode === 'continue' ? ` · identidade original do pai ${state.parent?.id}` : ''}` : 'Identidade original indisponível. Grok não receberá outra imagem por suposição.';
+  }
+  function durationPreview() {
+    try {
+      const seconds = parseDuration($('duration').value, state.capabilities), frames = alignedFrames(seconds);
+      message('duration-preview', `Solicitada ${secondsLabel(seconds)} s → ${frames} frames → ${secondsLabel(frames / 24)} s efetivos a 24 fps.`);
+    } catch (error) { message('duration-preview', error.message, true); }
+  }
+  function paintScreen({focus = false} = {}) {
+    for (const panel of document.querySelectorAll('[data-screen]')) {
+      const active = panel.dataset.screen === state.screen;
+      panel.hidden = !active; panel.inert = !active;
+    }
+    text('screen-title', state.screen === 'generation' && state.statusOnly ? 'Pedido no PC' : TITLES[state.screen]);
+    text('screen-eyebrow', ['context', 'proposal', 'generation', 'continuation'].includes(state.screen) ? state.mode === 'continue' ? 'CONTINUAÇÃO · RASCUNHO' : 'NOVA CENA · RASCUNHO' : 'ESTÚDIO LOCAL');
+    $('back').disabled = state.trail.length === 0;
+    $('nav-library').setAttribute('aria-current', String(state.screen === 'library'));
+    $('nav-new').setAttribute('aria-current', String(state.mode === 'new' && ['context', 'proposal', 'generation'].includes(state.screen)));
+    $('create-form').hidden = state.statusOnly; $('generation-status').hidden = !state.statusOnly;
+    if (state.screen !== 'review') $('player').pause();
+    if (state.screen !== 'assembly') $('assembly-player').pause();
+    if (state.screen === 'review') renderRun();
+    if (state.screen === 'assembly') renderAssembly();
+    if (focus) { $('screen-title').focus({preventScroll: true}); document.defaultView?.scrollTo({top: 0, behavior: 'instant'}); }
+  }
+  function navigate(screen, {remember = true, focus = true} = {}) {
+    if (!TITLES[screen] || (screen === 'assembly' && !state.config?.assembly_enabled)) return;
+    saveDraft();
+    if (remember && screen !== state.screen) state.trail.push(state.screen);
+    state.screen = screen;
+    paintScreen({focus}); controls();
+    const view = document.defaultView;
+    // A view pointer is never a persisted command. Preserve the assembly UUID and hash.
+    if (view?.history) {
+      const url = new URL(view.location.href); url.searchParams.set('screen', screen);
+      view.history.replaceState(view.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+  }
+  function back() { const screen = state.trail.pop() || 'library'; navigate(screen, {remember: false}); }
   function controls() {
     const run = state.selected;
     // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
@@ -208,10 +302,12 @@ export function startUI(document, client = createClient()) {
     $('assembly-refresh').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading || (!state.assemblyId && !state.assembly);
     text('assemble', state.assemblyBusy ? 'Montando no PC…' : 'Montar sequência');
     $('accept').disabled = $('reject').disabled = state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
+    $('review-decisions').hidden = run?.state !== 'ready_for_review';
+    $('review-next').hidden = run?.state !== 'accepted';
     $('continue-mode').disabled = state.busy || state.uncertain || run?.state !== 'accepted';
-    $('new-mode').disabled = state.busy || state.uncertain;
+    $('new-mode').disabled = $('nav-new').disabled = !state.config || state.busy || state.uploadBusy;
     $('create-fields').disabled = !state.config || state.busy || state.uncertain;
-    $('generate').disabled = !state.config || state.busy || state.assemblyBusy || state.uncertain || (state.mode === 'continue' && run?.state !== 'accepted');
+    $('generate').disabled = !state.config || state.busy || state.assemblyBusy || state.uncertain || (state.mode === 'continue' && state.parent?.state !== 'accepted');
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
     $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
@@ -220,19 +316,41 @@ export function startUI(document, client = createClient()) {
     $('upload').textContent = state.uploadBusy ? 'Enviando ao PC…' : 'Enviar imagem ao PC';
     $('continuation-note').hidden = state.mode !== 'continue';
     text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar novo bloco');
-    text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${run?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
-    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain;
+    text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${state.parent?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
+    $('grok-detail').disabled = !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference();
     $('grok-save').disabled = !state.editorReady || state.editorSaving;
     $('grok-system').disabled = $('grok-model').disabled = !state.editorReady;
-    text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar com Grok');
+    text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar ideia e imagem');
+    text('grok-context', `No seu clique, Grok receberá: ${contextLabel()}. Saída somente texto.`);
+    text('generation-context', `${contextLabel()} · 480 × 864 · parâmetros nativos preservados.`);
+    text('continuation-parent', `Pai aceito: ${state.parent?.id || '—'} · ${contextLabel()}`);
+    text('assembly-chain', (state.sequence?.blocks || []).map((block, index) => `${index + 1}. ${block.id.slice(0, 8)} · ${label(block)}`).join(' → ') || 'Nenhuma sequência selecionada.');
+    $('open-assembly').disabled = !state.config?.assembly_enabled || !state.selected;
+    $('continue-idea').disabled = state.parent?.state !== 'accepted';
+    $('use-idea').disabled = $('grok-use').disabled = $('use-late-proposal').disabled = state.busy || state.uploadBusy;
+    $('late-proposal-details').hidden = !draft().lateProposal;
+    $('late-proposal').value = draft().lateProposal?.text || '';
+    text('late-proposal-context', draft().lateProposal?.context || '');
+    $('show-proposal').hidden = !draft().proposal;
+    $('nav-status').hidden = !state.pendingRun && !state.uncertain;
+    text('status-state', state.pendingRun ? label(state.pendingRun) : state.uncertain ? 'Admissão incerta' : 'Sem pedido');
+    text('status-id', state.pendingRun?.id || 'ID não confirmado. Não envie novamente.');
+    $('status-review').disabled = !state.pendingRun || state.busy;
     $('previous').disabled = state.offset === 0;
     $('next').disabled = state.offset + state.limit >= state.total;
   }
   function setMode(mode) {
-    if (state.busy || state.uncertain || !state.config || (mode === 'continue' && state.selected?.state !== 'accepted')) return;
-    ++state.draftRevision;
+    if (state.busy || state.uploadBusy || !state.config || (mode === 'continue' && state.selected?.state !== 'accepted')) return;
+    saveDraft();
     state.mode = mode;
-    $('prompt').value = mode === 'continue' ? state.config.continuation_prompt : state.config.default_prompt;
+    state.parent = mode === 'continue' ? state.selected : null;
+    state.draftKey = mode === 'continue' ? state.parent.id : 'new';
+    if (!state.drafts.has(state.draftKey)) {
+      const identity = state.parent?.references?.find(ref => ref.type === 'image' && [undefined, null, 'identity'].includes(ref.role));
+      state.reference = mode === 'continue' ? identity ? {source_root: identity.source_root || 'assets', path: identity.source} : null : null;
+    }
+    restoreDraft(); state.statusOnly = false;
+    navigate(mode === 'continue' ? 'continuation' : 'context');
     controls();
   }
   function rememberAssembly(record) {
@@ -250,7 +368,7 @@ export function startUI(document, client = createClient()) {
     text('assembly-proof', record ? `ID ${record.id} · ${record.state} · ${record.frames ?? '—'} frames · ${record.fps ?? '—'} fps${record.error ? ` · ${record.error}` : ''}` : '');
     const player = $('assembly-player');
     player.hidden = !url;
-    if (url && $('assembly-result').open) { if (player.getAttribute('src') !== url) player.src = url; }
+    if (url && state.screen === 'assembly' && $('assembly-result').open) { if (player.getAttribute('src') !== url) player.src = url; }
     else if (!url) { player.pause(); player.removeAttribute('src'); }
     $('assembly-download').hidden = !url;
     if (url) $('assembly-download').href = url; else $('assembly-download').removeAttribute('href');
@@ -295,7 +413,7 @@ export function startUI(document, client = createClient()) {
     } finally { state.assemblyReading = false; controls(); }
   }
   async function assemble() {
-    if ($('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !canAssemble(state.selected, state.sequence)) return;
+    if (state.screen !== 'assembly' || $('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !canAssemble(state.selected, state.sequence)) return;
     const end = state.selected.id;
     let id;
     try {
@@ -318,7 +436,9 @@ export function startUI(document, client = createClient()) {
     } finally { state.assemblyBusy = false; controls(); drainChanges(); }
   }
   function editorDraft() {
-    return {revision: state.draftRevision, mode: state.mode, selected: state.selected?.id ?? null, prompt: $('prompt').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
+    saveDraft();
+    const reference = contextReference();
+    return {revision: draft().revision, proposal: draft().proposal, mode: state.mode, selected: state.parent?.id ?? null, draftKey: state.draftKey, duration: $('duration').value, referenceKey: JSON.stringify(reference), reference, prompt: $('idea').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
   }
   async function loadEditor() {
     try {
@@ -341,29 +461,40 @@ export function startUI(document, client = createClient()) {
     finally { state.editorSaving = false; controls(); }
   }
   async function detailScene() {
-    if (!state.editorReady || state.grokBusy || state.grokUncertain) return;
+    if (state.screen !== 'context' || !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy) return;
     const before = editorDraft();
     try { grokPayload(before); } catch (error) { message('grok-status', error.message, true); return; }
-    state.grokBusy = true; $('grok-proposal').hidden = true; controls();
-    message('grok-status', 'Enviando só a ideia e o system prompt ao Grok. Pode levar até 120 s; nenhum vídeo será gerado.');
+    if (!before.reference) { message('grok-status', 'A identidade original não foi comprovada. Nenhuma imagem foi enviada.', true); return; }
+    const origin = draft(), originContext = contextLabel();
+    state.grokBusy = true; controls();
+    message('grok-status', `Enviando ideia e imagem ${originContext}. Pode levar até 120 s. Grok devolve só texto; nenhum vídeo será gerado.`);
     try {
       const result = await client.detail(before);
       if (stopped) return;
-      if (draftMatches(before, editorDraft()) && !state.busy && !state.uncertain) {
-        $('prompt').value = result; ++state.draftRevision;
-        message('grok-status', 'Texto detalhado. Confira, edite se quiser e clique Gerar para enviar o vídeo.');
-      } else {
-        $('grok-result').value = result; $('grok-proposal').hidden = false;
-        message('grok-status', 'O rascunho ou bloco mudou. A proposta ficou separada; use somente se ainda fizer sentido.');
+      const unchanged = draftMatches(before, editorDraft()) && !state.busy && !state.uncertain;
+      // Late output belongs to its origin, but an intervening manual proposal edit
+      // is stronger than a provider response. Keep both without silently replacing it.
+      const editedProposal = origin.proposal !== before.proposal;
+      if (editedProposal) origin.lateProposal = {text: result, context: originContext};
+      else { origin.proposal = result; origin.proposalContext = originContext; origin.proposalStale = !unchanged; }
+      if (before.draftKey === state.draftKey) {
+        restoreDraft();
+        if (unchanged && state.screen === 'context') navigate('proposal');
       }
+      message('grok-status', unchanged ? 'Proposta pronta para conferir e editar. Usar não gera vídeo.' : 'O rascunho ou contexto mudou. A proposta antiga foi mantida no rascunho original, sem substituir sua ideia.');
     } catch (error) {
       state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500;
       message('grok-status', `Grok não confirmou uma cena: ${error.message}. ${state.grokUncertain ? 'Resultado incerto; não repita esta ideia às cegas nesta sessão.' : 'O rascunho foi mantido; corrija a configuração ou verifique a conexão.'}`, true);
     } finally { state.grokBusy = false; controls(); }
   }
   function useProposal() {
-    if (state.busy || state.uncertain) return;
-    try { $('prompt').value = sceneText($('grok-result').value); ++state.draftRevision; $('grok-proposal').hidden = true; message('grok-status', 'Proposta usada. Confira e clique Gerar; nenhum vídeo foi enviado.'); }
+    if (state.screen !== 'proposal' || state.busy || state.uploadBusy) return;
+    try { $('prompt').value = sceneText($('grok-result').value); ++draft().revision; saveDraft(); state.statusOnly = false; navigate('generation'); message('operation', 'Proposta usada. Confira os parâmetros. Gerar é outro clique.'); }
+    catch (error) { message('proposal-error', error.message, true); }
+  }
+  function useIdea() {
+    if (state.screen !== 'context' || state.busy || state.uploadBusy) return;
+    try { $('prompt').value = sceneText($('idea').value); ++draft().revision; saveDraft(); state.statusOnly = false; navigate('generation'); }
     catch (error) { message('grok-status', error.message, true); }
   }
   function renderLibrary() {
@@ -378,7 +509,7 @@ export function startUI(document, client = createClient()) {
       const stamp = Number.isNaN(created.getTime()) ? 'Data indisponível' : new Intl.DateTimeFormat('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}).format(created);
       const date = element('span', 'card-created', `Criado ${stamp}`); date.title = run.created_at || '';
       button.append(top, element('span', 'card-prompt', run.prompt || 'Sem instrução'), bottom, date);
-      button.addEventListener('click', () => select(run.id)); list.append(button);
+      button.addEventListener('click', async () => { await select(run.id); if (state.selected?.id === run.id) navigate('review'); }); list.append(button);
     }
     text('library-count', `${state.total} blocos`);
     text('page-label', state.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, state.total)}` : '0');
@@ -394,7 +525,7 @@ export function startUI(document, client = createClient()) {
       const seconds = Number(block.duration_seconds);
       button.append(element('span', 'shot-number', String(index + 1).padStart(2, '0')), element('span', 'shot-id', block.id.slice(0, 8)), element('span', 'shot-time', `${elapsed.toFixed(2)} → ${(elapsed + seconds).toFixed(2)} s`), element('span', 'shot-time', label(block)));
       button.setAttribute('aria-label', `Bloco ${index + 1}, ${label(block)}, ${block.id}`);
-      button.addEventListener('click', () => select(block.id)); li.append(button); $('sequence').append(li); elapsed += seconds;
+      button.addEventListener('click', async () => { await select(block.id); if (state.selected?.id === block.id) navigate('review'); }); li.append(button); $('sequence').append(li); elapsed += seconds;
     }
     text('sequence-message', blocks.length ? `${blocks.length} bloco(s) nesta cadeia · tempos de cada bloco, sem montagem automática.` : 'A cadeia segue os pais do bloco, sem misturar ramificações.');
   }
@@ -406,22 +537,24 @@ export function startUI(document, client = createClient()) {
     const url = playableURL(run, summary, block);
     const player = $('player');
     if (url) {
-      if (player.getAttribute('src') !== url) { player.pause(); player.src = url; player.load(); }
+      if (state.screen === 'review' && player.getAttribute('src') !== url) { player.pause(); player.src = url; player.load(); }
       player.hidden = false; $('screen-message').hidden = true;
     } else {
-      player.pause(); player.removeAttribute('src'); player.load(); player.hidden = true; $('screen-message').hidden = false;
+      player.pause(); if (player.hasAttribute('src')) { player.removeAttribute('src'); player.load(); } player.hidden = true; $('screen-message').hidden = false;
       $('screen-message').replaceChildren(element('span', 'frame-mark', '[ H3 ]'), element('p', '', run ? `${label(run)}. ${run.error || (PLAYABLE.has(run.state) ? 'Nenhum vídeo publicado disponível para este bloco.' : 'O vídeo não está disponível. Atualizar consulta apenas os metadados.')}` : 'Selecione um bloco para assistir ou prepare uma nova cena.'));
     }
     text('review-hint', run?.state === 'ready_for_review' ? 'Assista antes de decidir. Aceitar permite continuar.' : run?.state === 'accepted' ? 'Bloco aceito. A continuação exige um novo envio explícito.' : 'Somente blocos prontos podem ser aceitos ou rejeitados.');
     const metadata = $('metadata'); metadata.replaceChildren();
     if (run) for (const [name, value] of [['ID', run.id], ['Pai', run.parent_id || 'Origem'], ['Seed', run.seed], ['Duração', `${run.duration_seconds} s (solicitada)`], ['Criado', run.created_at], ['Atualizado', run.updated_at], ['Erro', run.error || '—']]) metadata.append(element('dt', '', name), element('dd', '', String(value ?? '—')));
     text('run-prompt', run?.prompt || '');
-    if (state.mode === 'continue' && run?.state !== 'accepted') state.mode = 'new';
+    const verified = run?.output?.probe?.streams?.find(stream => stream.codec_type === 'video')?.duration;
+    text('review-duration', run ? `Solicitada ${secondsLabel(run.duration_seconds)} s · alinhada ${alignedFrames(run.duration_seconds)} frames / ${secondsLabel(alignedFrames(run.duration_seconds) / 24)} s · verificada ${Number.isFinite(Number(verified)) && Number(verified) > 0 ? `${secondsLabel(Number(verified))} s` : 'não disponível'}.` : '');
     renderLibrary(); renderSequence(); renderAssembly();
   }
   function showReference() {
-    const item = state.reference || state.references.find(item => item.source_root === 'assets' && item.path === 'dance_reference.png');
-    text('reference-path', item ? `${item.source_root} / ${item.path}` : 'assets / dance_reference.png');
+    const selected = contextReference();
+    const item = state.reference?.image_url ? state.reference : state.references.find(item => item.source_root === selected?.source_root && item.path === selected?.path);
+    text('reference-path', selected ? `${selected.source_root} / ${selected.path}` : 'Identidade original indisponível');
     const url = imageURL(item?.image_url);
     $('reference-preview').hidden = !url;
     if (url) $('reference-preview').src = url; else $('reference-preview').removeAttribute('src');
@@ -443,12 +576,12 @@ export function startUI(document, client = createClient()) {
     showReference();
   }
   async function upload() {
-    if (state.busy || state.uploadBusy || state.uploadUncertain || state.mode === 'continue') return;
+    if (state.screen !== 'context' || state.busy || state.uploadBusy || state.uploadUncertain || state.mode === 'continue') return;
     const file = $('upload-file').files?.[0];
     try { validateUpload(file); } catch (error) { message('upload-status', error.message, true); return; }
     state.uploadBusy = true; controls(); message('upload-status', 'Enviando arquivo ao PC. Nenhuma geração será iniciada.');
     try {
-      state.reference = await client.upload(file); showReference();
+      state.reference = await client.upload(file); ++draft().revision; saveDraft(); showReference();
       message('upload-status', 'Imagem salva no PC e escolhida para uma nova cena.');
       try { await loadReferences(); } catch (error) { message('upload-status', `Imagem publicada; catálogo indisponível: ${error.message}`, true); }
     } catch (error) {
@@ -488,9 +621,11 @@ export function startUI(document, client = createClient()) {
   async function loadConfig() {
     const config = await client.get('/app/config');
     if (config.reference_image !== 'dance_reference.png' || config.duration_seconds !== 2.3 || typeof config.default_prompt !== 'string' || typeof config.continuation_prompt !== 'string') throw new Error('Configuração incompatível com os parâmetros preservados.');
-    state.config = config; $('prompt').value = config.default_prompt;
+    state.capabilities = durationCapabilities(config.duration_capabilities);
+    state.config = config; restoreDraft();
+    $('duration').readOnly = !state.capabilities; $('duration').setAttribute('aria-readonly', String(!state.capabilities));
+    text('duration-policy', state.capabilities ? 'Por bloco: maior que 0 e até 10 s solicitados, com até duas casas decimais. Mais tempo exige mais recursos; não há garantia de RAM, qualidade ou prazo. Máximo alinhado: 243 frames / 10,125 s.' : 'Backend legado: duração padrão fixa de 2,3 s. Atualize o backend para editar por bloco.');
     $('reference-library').hidden = !config.reference_library;
-    $('assembly-panel').hidden = !config.assembly_enabled;
     if (pointerError) message('assembly-status', `Ponteiro de montagem inválido: ${pointerError}. Nenhum POST.`, true);
     if (config.filesystem_events && !events && document.defaultView?.EventSource) {
       events = new document.defaultView.EventSource('/events');
@@ -509,6 +644,7 @@ export function startUI(document, client = createClient()) {
     text('profile', `Perfil: ${config.workflow_output_profile}`); controls();
   }
   async function syncConfirmedRun(run) {
+    if (state.pendingRun?.id === run.id) state.pendingRun = run;
     state.selected = run; state.sequence = null; renderRun();
     try { await loadLibrary(); await select(run.id, run); }
     catch (error) { message('notice', `Resultado confirmado; biblioteca não atualizada: ${error.message}. Atualizar faz apenas leitura.`, true); }
@@ -532,55 +668,76 @@ export function startUI(document, client = createClient()) {
       await loadLibrary();
       if (!state.busy && selectionEpoch === state.epoch) {
         if (state.selected) await select(state.selected.id);
-        else if (state.items.length) await select(state.items[0].id);
       }
       message('notice', state.uncertain ? 'Resultado anterior incerto. Consulte os IDs e não duplique o envio.' : 'Biblioteca atualizada. Gerar e revisar exigem ação explícita.');
     } catch (error) { message('notice', `Biblioteca indisponível: ${error.message}. Use Atualizar para consultar novamente.`, true); }
     finally { refreshActive = false; drainChanges(); }
   }
   async function decide(action) {
-    if (state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
+    if (state.screen !== 'review' || state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
     ++state.epoch; ++libraryEpoch;
     state.busy = true; controls();
     const id = state.selected.id;
     try {
       const run = await client.decide(id, action);
-      message('operation', action === 'accept' ? 'Bloco aceito.' : 'Bloco rejeitado. A evidência foi preservada.');
+      message('review-status', action === 'accept' ? 'Bloco aceito.' : 'Bloco rejeitado. A evidência foi preservada.');
       await syncConfirmedRun(run);
     } catch (error) {
       if (!(error instanceof HTTPError) || error.status >= 500) state.uncertain = true;
-      message('operation', `Decisão não confirmada: ${error.message}. Atualize os metadados antes de agir; não repita uma decisão incerta.`, true);
+      message('review-status', `Decisão não confirmada: ${error.message}. Atualize os metadados antes de agir; não repita uma decisão incerta.`, true);
     } finally { state.busy = false; controls(); drainChanges(); }
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.busy || state.assemblyBusy || state.uploadBusy || state.uncertain || !state.config) return;
+    if (state.screen !== 'generation' || state.statusOnly || state.busy || state.assemblyBusy || state.uploadBusy || state.uncertain || !state.config) return;
     const continuation = state.mode === 'continue';
-    if (continuation && state.selected?.state !== 'accepted') return;
+    if (continuation && state.parent?.state !== 'accepted') return;
     let payload;
-    try { payload = makePayload({seed: $('seed').value, prompt: $('prompt').value, reference: state.reference, continuation}); }
+    try { payload = makePayload({seed: $('seed').value, prompt: $('prompt').value, duration: $('duration').value, capabilities: state.capabilities, reference: state.reference, continuation}); }
     catch (error) { message('operation', error.message, true); return; }
-    const parent = continuation ? state.selected.id : null;
+    saveDraft();
+    const parent = continuation ? state.parent.id : null;
     const path = parent ? `/runs/${encodeURIComponent(parent)}/v2v` : '/runs/i2v';
     ++state.epoch; ++libraryEpoch;
-    state.busy = true; state.waitController = new AbortController(); controls();
+    state.busy = true; state.pendingRun = null; state.statusOnly = true; state.waitController = new AbortController(); paintScreen(); controls();
     message('operation', 'Enviando uma solicitação. A admissão ainda não foi confirmada.');
     let admittedID = null;
     try {
       const run = await client.generate(path, payload, admitted => {
-        admittedID = admitted.id; state.selected = admitted; state.sequence = null;
+        admittedID = admitted.id; state.pendingRun = admitted; state.selected = admitted; state.sequence = null;
         renderRun(); message('operation', `Admitido: ${admitted.id}. Aguardando este bloco; HTTP 202 não significa vídeo pronto.`);
       }, state.waitController.signal);
       message('operation', `${label(run)} · ${run.id}${run.error ? ` · ${run.error}` : ''}`);
+      state.pendingRun = run;
       await syncConfirmedRun(run);
     } catch (error) {
       // A lost response/5xx can follow durable admission. Never offer another
       // Generate button as recovery; read-only refresh is the safe next step.
       state.uncertain = admittedID !== null || !(error instanceof HTTPError) || error.status >= 500;
       message('operation', state.uncertain ? `Resultado incerto${admittedID ? ` para ${admittedID}` : ' da admissão'}: ${error.message}. Não envie novamente. Atualize a biblioteca para consultar o estado; fechar a página não cancela a geração.` : `Envio recusado: ${error.message}. Nenhuma repetição automática. Corrija a instrução ou aguarde o slot livre.`, true);
-    } finally { state.busy = false; state.waitController = null; controls(); drainChanges(); }
+    } finally { state.busy = false; state.statusOnly = state.uncertain || admittedID !== null; state.waitController = null; paintScreen(); controls(); drainChanges(); }
   }
-  for (const id of ['prompt', 'grok-system', 'grok-model']) $(id).addEventListener('input', () => { ++state.draftRevision; });
+  for (const id of ['idea', 'prompt', 'grok-result', 'seed', 'duration', 'grok-system']) $(id).addEventListener('input', () => { ++draft().revision; saveDraft(); if (id === 'duration') durationPreview(); if (id === 'grok-result') message('proposal-error', ''); });
+  // Only the visible generation submit is an execution action. Enter in metadata,
+  // seed, duration, editor settings or navigation cannot accidentally submit video.
+  $('create-form').addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.tagName === 'INPUT') event.preventDefault(); });
+  $('nav-library').addEventListener('click', () => navigate('library'));
+  $('nav-new').addEventListener('click', () => setMode('new'));
+  $('back').addEventListener('click', back);
+  $('nav-status').addEventListener('click', () => { state.statusOnly = true; navigate('generation'); });
+  $('status-review').addEventListener('click', async () => { if (!state.pendingRun || state.busy) return; await select(state.pendingRun.id); navigate('review'); });
+  $('use-idea').addEventListener('click', useIdea);
+  $('show-proposal').addEventListener('click', () => { restoreDraft(); navigate('proposal'); });
+  $('use-late-proposal').addEventListener('click', () => {
+    if (state.screen !== 'proposal' || state.busy || state.uploadBusy || !draft().lateProposal) return;
+    const current = draft(), late = current.lateProposal;
+    $('grok-result').value = late.text; current.proposalContext = late.context; current.proposalStale = true; current.lateProposal = null; ++current.revision;
+    saveDraft(); restoreDraft(); controls(); message('proposal-error', 'Resposta atrasada escolhida como proposta. Confira o contexto antes de usar; nenhum vídeo foi gerado.');
+  });
+  $('edit-idea').addEventListener('click', () => navigate('context'));
+  $('generation-edit').addEventListener('click', () => navigate('context'));
+  $('continue-idea').addEventListener('click', () => { if (state.parent?.state === 'accepted') navigate('context'); });
+  $('open-assembly').addEventListener('click', () => navigate('assembly'));
   $('assemble').addEventListener('click', assemble);
   $('assembly-refresh').addEventListener('click', () => readAssembly());
   $('assembly-result').addEventListener('toggle', renderAssembly);
@@ -588,7 +745,7 @@ export function startUI(document, client = createClient()) {
   $('grok-detail').addEventListener('click', detailScene);
   $('grok-save').addEventListener('click', saveEditor);
   $('grok-use').addEventListener('click', useProposal);
-  $('reference').addEventListener('change', () => { if (state.mode === 'continue' || state.busy) return; const value = $('reference').value; state.reference = value === 'dance_reference.png' ? null : state.references[Number(value)] || state.reference; showReference(); controls(); });
+  $('reference').addEventListener('change', () => { if (state.mode === 'continue' || state.busy || state.uploadBusy) return; const value = $('reference').value; state.reference = value === 'dance_reference.png' ? null : state.references[Number(value)] || state.reference; ++draft().revision; saveDraft(); showReference(); controls(); });
   $('upload').addEventListener('click', upload);
   $('refresh').addEventListener('click', () => refresh());
   $('previous').addEventListener('click', () => { if (state.offset > 0) { state.offset = Math.max(0, state.offset - state.limit); refresh(); } });
@@ -600,16 +757,21 @@ export function startUI(document, client = createClient()) {
   $('create-form').addEventListener('submit', generate);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('popstate', () => {
+    const screen = new URL(document.defaultView.location.href).searchParams.get('screen');
+    if (TITLES[screen] && !(['review', 'assembly'].includes(screen) && !state.selected)) navigate(screen, {remember: false});
+    else navigate('library', {remember: false});
+  });
   refreshActive = true;
   const ready = loadConfig().then(() => Promise.allSettled([
     loadEditor(),
     loadReferences(),
-    loadLibrary().then(() => state.items.length ? select(state.items[0].id) : undefined),
+    loadLibrary(),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
-    if (state.config?.assembly_enabled && pointer) await readAssembly({restoreSelection: true});
+    if (state.config?.assembly_enabled && pointer) { await readAssembly({restoreSelection: true}); navigate('assembly', {remember: false, focus: false}); }
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
-    controls(); refreshActive = false; drainChanges();
+    paintScreen(); controls(); refreshActive = false; drainChanges();
   });
   return {state, ready};
 }
