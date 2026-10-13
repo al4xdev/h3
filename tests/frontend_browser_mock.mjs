@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import {readFile, mkdir, writeFile} from 'node:fs/promises';
 import {resolve, relative} from 'node:path';
 import {createRequire} from 'node:module';
+import {createHash} from 'node:crypto';
 const require = createRequire(import.meta.url);
 const {chromium} = require('playwright');
 const root = resolve(new URL('..', import.meta.url).pathname);
-const artifacts = resolve(root, '.dumps/tests/ui-grok');
+const artifacts = resolve(root, '.dumps/tests/ui-assembly');
 await mkdir(artifacts, {recursive: true});
 const assets = Object.fromEntries(await Promise.all(['index.html', 'app.css', 'app.js'].map(async file => [file, await readFile(resolve(root, 'src/h3_backend/web', file))])));
 let media = null;
@@ -14,6 +15,12 @@ if (process.env.H3_UI_TEST_CLIP) {
   const path = resolve(root, process.env.H3_UI_TEST_CLIP);
   assert.ok(['runs/', '.data/'].some(prefix => relative(root, path).startsWith(prefix)), 'Media must be an explicitly supplied existing local H3 clip');
   media = await readFile(path);
+}
+let assemblyMedia = null, assemblyFixture = null, assemblyFixtureSHA = null;
+if (process.env.H3_UI_TEST_ASSEMBLY) {
+  assemblyFixture = resolve(root, process.env.H3_UI_TEST_ASSEMBLY);
+  assert.equal(relative(root, assemblyFixture), '.dumps/benchmarks/baseline-three-chunks/benchmark.mp4', 'Only the existing frozen baseline movie is an assembly fixture');
+  assemblyMedia = await readFile(assemblyFixture); assemblyFixtureSHA = createHash('sha256').update(assemblyMedia).digest('hex');
 }
 const malicious = '<img src=x onerror="window.hacked=true"> vestido preto & continuidade';
 const config = {default_prompt: 'Dança com vestido preto.', continuation_prompt: 'Pequeno salto. Vestido vermelho. Termina de costas.', reference_image: 'dance_reference.png', duration_seconds: 2.3, workflow_output_profile: 'final_only', filesystem_events: true, reference_library: true, assembly_enabled: false};
@@ -25,6 +32,9 @@ const requests = []; const exceptions = []; const violations = [];
 let editor = {system_prompt: 'Preserve ação, roupa, pose e ordem. Responda só com a cena.', model: ''};
 let grokMode = 'normal'; let grokGate = null; let releaseGrok;
 const detailedScene = 'Ela dá um salto. Durante o movimento, o vestido fica vermelho. Preserve a identidade original. <img onerror="window.hacked=true">';
+const chainRoot = '11111111-1111-4111-8111-111111111111', chainMid = '22222222-2222-4222-8222-222222222222', chainEnd = '33333333-3333-4333-8333-333333333333';
+let assemblyMode = 'normal', assemblies = [], assemblyGate = null, releaseAssembly;
+const mkAssembly = (id, end, state = 'completed') => ({id, end_run_id: end, state, mode: runs.find(run => run.id === end)?.state === 'accepted' ? 'accepted_sequence' : 'preview', created_at: '2026-10-13T00:00:00Z', updated_at: '2026-10-13T00:00:01Z', request_sha256: 'a'.repeat(64), output_sha256: state === 'completed' ? 'b'.repeat(64) : null, label: 'Server text is untrusted <img onerror=evil>', input_ids: [chainRoot, chainMid, chainEnd], frames: 168, fps: '24/1', video_url: state === 'completed' ? `/assemblies/${id}/video` : null, output: state === 'completed' ? {path: `.data/assemblies/${id}/video.mp4`} : null, error: null});
 let mode = 'normal'; let generated = 0; let releaseWait; let waitGate = null; let releaseDetail; let detailGate = null;
 const browser = await chromium.launch({headless: true});
 const context = await browser.newContext({viewport: {width: 1440, height: 1000}, reducedMotion: 'reduce', serviceWorkers: 'block'});
@@ -37,6 +47,28 @@ const routeRequest = async route => {
   if (path === '/') return route.fulfill({contentType: 'text/html', body: assets['index.html']});
   if (path === '/ui/app.css') return route.fulfill({contentType: 'text/css', body: assets['app.css']});
   if (path === '/ui/app.js') return route.fulfill({contentType: 'text/javascript', body: assets['app.js']});
+  if (path === '/assemblies' && method === 'GET') {
+    const end = url.searchParams.get('end_run_id');
+    const items = assemblies.filter(item => item.end_run_id === end);
+    return json({items, total: items.length, limit: 50, offset: 0});
+  }
+  if (path.startsWith('/assemblies/')) {
+    const match = path.match(/^\/assemblies\/([0-9a-f-]{36})(\/video)?$/); assert.ok(match, 'Only canonical own assembly routes allowed');
+    const id = match[1];
+    if (method === 'POST') {
+      const body = request.postDataJSON(); assert.deepEqual(Object.keys(body), ['end_run_id']);
+      assert.equal(new URL(request.frame().page().url()).searchParams.get('assembly'), id, 'UUID pointer must be recorded before POST');
+      if (assemblyMode === 'busy' || assemblyMode === 'collision') return json({detail: assemblyMode === 'busy' ? 'CPU ocupado' : 'UUID já existente'}, 409);
+      const record = mkAssembly(id, body.end_run_id); assemblies.unshift(record);
+      if (assemblyGate) await assemblyGate;
+      if (assemblyMode === 'lost') return route.abort('connectionfailed');
+      return json(record);
+    }
+    const record = assemblies.find(item => item.id === id);
+    if (!record) return json({detail: 'Montagem ainda não publicada'}, 404);
+    if (match[2]) return record.state === 'completed' && assemblyMedia ? route.fulfill({status: 200, contentType: 'video/mp4', body: assemblyMedia}) : route.fulfill({status: 404});
+    return json(record);
+  }
   if (path === '/grok/editor' && method === 'GET') return grokMode === 'editor-error' ? json({detail: 'Configuração local indisponível'}, 409) : json(editor);
   if (path === '/grok/editor' && method === 'PUT') { editor = request.postDataJSON(); return json(editor); }
   if (path === '/grok' && method === 'POST') {
@@ -92,7 +124,10 @@ const routeRequest = async route => {
 };
 await context.route('**/*', routeRequest);
 const mockStartup = () => {
-  window.mockEvents = []; window.startupOrder = [];
+  window.mockEvents = []; window.startupOrder = []; window.uuidDraws = 0;
+  const random = crypto.getRandomValues.bind(crypto);
+  Object.defineProperty(crypto, 'randomUUID', {value: undefined, configurable: true});
+  crypto.getRandomValues = bytes => { window.uuidDraws++; return random(bytes); };
   const fetch = window.fetch.bind(window);
   window.fetch = (...args) => { window.startupOrder.push(String(args[0])); return fetch(...args); };
   window.EventSource = class extends EventTarget {
@@ -348,7 +383,7 @@ try {
     if (media) await page.waitForFunction(() => document.getElementById('player').readyState >= 2);
     await capture({path: resolve(artifacts, `library-many-${width}.png`), fullPage: true});
   }
-  await writeFile(resolve(root, '.dumps/tests/reports/library_bounds_after.json'), JSON.stringify(bounds, null, 2));
+  await writeFile(resolve(root, '.dumps/tests/reports/assembly_library_bounds.json'), JSON.stringify(bounds, null, 2));
   const phone = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
   await phone.route('**/*', routeRequest); await phone.addInitScript(mockStartup);
   const phonePage = await phone.newPage(); phonePage.on('pageerror', error => exceptions.push(error.message));
@@ -369,10 +404,121 @@ try {
   await phonePage.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
   await phonePage.screenshot({path: resolve(artifacts, 'grok-phone-393-touch-2x.png'), fullPage: true});
   await phone.close();
+  assert.equal(await page.locator('#assembly-panel').isHidden(), true, 'Feature disabled in legacy config');
+  assert.equal(requests.filter(item => item.path.startsWith('/assemblies')).length, 0, 'Disabled config makes no assembly reads or submissions');
+  config.assembly_enabled = true; config.filesystem_events = true; config.reference_library = true;
+  runs = [mkRun(chainEnd, 'ready_for_review', chainMid), mkRun(chainMid, 'accepted', chainRoot), mkRun(chainRoot, 'accepted')];
+  const assemblyPosts = () => posts().filter(item => item.path.startsWith('/assemblies/'));
+  const assemblyReady = async (href = 'http://h3.mock.invalid/?other=keep#viewer') => { if (page.url() === href) await page.reload(); else await page.goto(href); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); };
+  await page.setViewportSize({width: 1440, height: 1000}); await assemblyReady();
+  await page.waitForFunction(() => !document.getElementById('assemble').disabled);
+  const nativeBeforeAssembly = nativePosts(), grokBeforeAssembly = grokPosts().length;
+  const generationBeforeAssembly = posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length;
+  const waitsBeforeAssembly = requests.filter(item => item.path.endsWith('?wait=true')).length;
+  const originalPlayer = await page.locator('#player').getAttribute('src');
+  await page.locator('#assemble').evaluate(button => { button.click(); button.click(); });
+  await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
+  const ownID = new URL(page.url()).searchParams.get('assembly');
+  assert.match(ownID, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(await page.evaluate(() => uuidDraws), 1, 'HTTP LAN fallback uses one WebCrypto UUID draw');
+  assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep');
+  assert.equal(assemblyPosts().length, 1); assert.deepEqual(assemblyPosts()[0].body, {end_run_id: chainEnd});
+  assert.equal(nativePosts(), nativeBeforeAssembly); assert.equal(grokPosts().length, grokBeforeAssembly);
+  assert.equal(await page.locator('#player').getAttribute('src'), originalPlayer);
+  assert.equal(await page.locator('#run-state').textContent(), 'Pronto para revisão');
+  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente');
+  assert.equal(await page.locator('#assembly-download').getAttribute('href'), `/assemblies/${ownID}/video`);
+  assert.equal(await page.locator('#assemble').isDisabled(), true, 'A committed own intent is not blindly reassembled');
+  if (assemblyMedia) {
+    await page.waitForFunction(() => { const video = document.getElementById('assembly-player'); return video.videoWidth === 480 && video.videoHeight === 864 && Math.abs(video.duration - 7) < .01; });
+    await page.locator('#assembly-player').evaluate(async video => { await video.play(); });
+    await page.waitForFunction(() => document.getElementById('assembly-player').currentTime > .1);
+    await page.locator('#assembly-player').evaluate(video => video.pause());
+  }
+  await capture({path: resolve(artifacts, 'assembly-preview-1440.png'), fullPage: true});
+  const assembledSrc = await page.locator('#assembly-player').getAttribute('src');
+  await page.evaluate(id => { for (let i = 0; i < 10; i++) mockEvents[0].emit('change', {path: `.data/assemblies/${id}/metadata.json`, invalidation: true}); mockEvents[0].emit('open'); }, ownID);
+  await page.locator('#notice').filter({hasText: 'Biblioteca atualizada'}).waitFor();
+  assert.equal(assemblyPosts().length, 1); assert.equal(await page.locator('#player').getAttribute('src'), originalPlayer); assert.equal(await page.locator('#assembly-player').getAttribute('src'), assembledSrc);
+  await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get('assembly'), ownID); assert.equal(assemblyPosts().length, 1);
+  assert.ok(requests.some(item => item.method === 'GET' && item.path === `/assemblies/${ownID}`), 'Reload recovers the known ID read-only');
+  await assemblyReady(); assemblyGate = new Promise(resolve => { releaseAssembly = resolve; });
+  await page.locator('#assemble').click();
+  await page.locator('#assembly-status').filter({hasText: 'Montando no PC'}).waitFor();
+  const staleID = new URL(page.url()).searchParams.get('assembly');
+  await page.locator('.clip-card').filter({hasText: chainRoot.slice(0, 8)}).click();
+  await page.waitForFunction(id => document.getElementById('metadata').textContent.includes(id), chainRoot);
+  const newerSrc = await page.locator('#player').getAttribute('src'); releaseAssembly(); assemblyGate = null;
+  await page.locator('#assembly-status').filter({hasText: 'seleção mudou'}).waitFor();
+  assert.equal(await page.locator('#player').getAttribute('src'), newerSrc); assert.equal(await page.locator('#assembly-result').isHidden(), true);
+  assert.equal(assemblies.find(item => item.id === staleID).end_run_id, chainEnd);
+  await capture({path: resolve(artifacts, 'assembly-stale-selection.png'), fullPage: true});
+  assemblyMode = 'busy'; await assemblyReady(); await page.locator('#assemble').click();
+  await page.locator('#assembly-status').filter({hasText: 'CPU ocupado'}).waitFor();
+  const busyCount = assemblyPosts().length;
+  await capture({path: resolve(artifacts, 'assembly-busy.png'), fullPage: true});
+  assemblyMode = 'collision'; await page.locator('#assemble').click();
+  await page.locator('#assembly-status').filter({hasText: 'UUID já existente'}).waitFor(); assert.equal(assemblyPosts().length, busyCount + 1, 'Collision is not auto retried');
+  assemblyMode = 'lost'; await assemblyReady(); await page.locator('#assemble').click();
+  await page.locator('#assembly-status').filter({hasText: 'Resultado incerto'}).waitFor();
+  const lostID = new URL(page.url()).searchParams.get('assembly'), lostPosts = assemblyPosts().length;
+  assert.equal(await page.locator('#assemble').isDisabled(), true);
+  await capture({path: resolve(artifacts, 'assembly-uncertain.png'), fullPage: true});
+  await page.locator('#assembly-refresh').click();
+  await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor();
+  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
+  await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
+  const missingID = '99999999-9999-4999-8999-999999999999'; assemblyMode = 'normal';
+  await assemblyReady(`http://h3.mock.invalid/?other=keep&assembly=${missingID}#viewer`);
+  assert.equal(await page.locator('#assemble').isDisabled(), true); assert.equal(assemblyPosts().length, lostPosts);
+  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'não confirmada'}).waitFor();
+  assert.equal(assemblyPosts().length, lostPosts); assert.equal(new URL(page.url()).searchParams.get('assembly'), missingID);
+  await capture({path: resolve(artifacts, 'assembly-missing-id.png'), fullPage: true});
+  runs[1].state = 'rejected'; await assemblyReady(); assert.equal(await page.locator('#assemble').isDisabled(), true);
+  runs[1].state = 'accepted'; runs[0].state = 'failed'; await assemblyReady(); assert.equal(await page.locator('#assemble').isDisabled(), true);
+  assert.equal(await page.locator('#player').isHidden(), true); assert.equal(assemblyPosts().length, lostPosts);
+  runs[0].state = 'ready_for_review'; await assemblyReady(`http://h3.mock.invalid/?other=keep&assembly=${lostID}#viewer`);
+  assert.equal(await page.locator('#assemble').isDisabled(), true);
+  const oldPreview = JSON.stringify(assemblies.find(item => item.id === lostID));
+  const cpuBeforeReview = assemblyPosts().length;
+  await page.locator('#accept').click();
+  await page.waitForFunction(() => document.getElementById('run-state').textContent === 'Aceito' && !document.getElementById('assemble').disabled);
+  assert.equal(assemblyPosts().length, cpuBeforeReview, 'Accept changes review only, not assembly intent');
+  assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
+  assert.equal(JSON.stringify(assemblies.find(item => item.id === lostID)), oldPreview, 'Previous preview remains immutable');
+  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente');
+  await page.locator('#assemble').click();
+  await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
+  assert.notEqual(new URL(page.url()).searchParams.get('assembly'), lostID, 'Accepted revision has a new UUID only on explicit Montar');
+  assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem da sequência aceita');
+  assert.equal(runs[0].state, 'accepted'); await capture({path: resolve(artifacts, 'assembly-accepted.png'), fullPage: true});
+  runs[0].state = 'ready_for_review'; const safeURL = assemblies[0].video_url; assemblies[0].video_url = 'https://outside.invalid/movie';
+  await assemblyReady(); assert.equal(await page.locator('#assembly-result').isHidden(), true);
+  await page.locator('#assembly-status').filter({hasText: 'publicação própria'}).waitFor(); assemblies[0].video_url = safeURL;
+  const assemblyPhone = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
+  await assemblyPhone.route('**/*', routeRequest); await assemblyPhone.addInitScript(mockStartup);
+  const ap = await assemblyPhone.newPage(); ap.on('pageerror', error => exceptions.push(error.message));
+  await ap.goto('http://h3.mock.invalid/?other=keep#viewer'); await ap.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  await ap.locator('#assemble').tap(); await ap.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
+  assert.equal(await ap.evaluate(() => uuidDraws), 1); assert.ok(await ap.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  if (assemblyMedia) { await ap.locator('#assembly-player').evaluate(async video => { await video.play(); }); await ap.waitForFunction(() => document.getElementById('assembly-player').currentTime > .1); await ap.locator('#assembly-player').evaluate(video => video.pause()); }
+  await ap.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
+  await ap.screenshot({path: resolve(artifacts, 'assembly-phone-393-touch-2x.png'), fullPage: true});
+  await ap.locator('#assembly-panel').screenshot({path: resolve(artifacts, 'assembly-phone-panel-393.png')});
+  await ap.setViewportSize({width: 320, height: 852}); assert.ok(await ap.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await ap.screenshot({path: resolve(artifacts, 'assembly-phone-320.png'), fullPage: true});
+  await assemblyPhone.close();
+  assert.equal(nativePosts(), nativeBeforeAssembly + 1, 'Only the explicit extra review was native; no inference'); assert.equal(grokPosts().length, grokBeforeAssembly);
+  assert.equal(posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, generationBeforeAssembly);
+  assert.equal(requests.filter(item => item.path.endsWith('?wait=true')).length, waitsBeforeAssembly);
+  assert.equal(runs[0].state, 'ready_for_review');
+  if (assemblyFixture) assert.equal(createHash('sha256').update(await readFile(assemblyFixture)).digest('hex'), assemblyFixtureSHA, 'Frozen assembly movie unchanged');
   assert.deepEqual(exceptions, []); assert.deepEqual(violations, []);
   assert.equal(await page.evaluate(() => localStorage.length), 0);
   console.log(`PASS mock browser: ${requests.length} intercepted requests, ${posts().length} fake POSTs, zero live API/GPU requests`);
 } finally {
-  await writeFile(resolve(root, '.dumps/tests/reports/grok_editor.json'), JSON.stringify({requests, exceptions, violations, media: Boolean(media), fakeInferencePosts: posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, fakeDiskUploads: posts().filter(item => item.body?.diskUploadFake).length, fakeGrokPosts: posts().filter(item => item.path === '/grok').length, fakeEditorSaves: requests.filter(item => item.path === '/grok/editor' && item.method === 'PUT').length, phone: {width: 393, height: 852, touch: true, scale: 2}, protectedProof: '.dumps/tests/reports/grok_editor_hashcheck.json', cloudRequests: 0, gpuRequests: 0}, null, 2));
+  await writeFile(resolve(root, '.dumps/tests/reports/assembly_ui.json'), JSON.stringify({requests, exceptions, violations, media: Boolean(media), fakeInferencePosts: posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v')).length, fakeDiskUploads: posts().filter(item => item.body?.diskUploadFake).length, fakeGrokPosts: posts().filter(item => item.path === '/grok').length, fakeEditorSaves: requests.filter(item => item.path === '/grok/editor' && item.method === 'PUT').length, phone: {width: 393, height: 852, touch: true, scale: 2}, protectedProof: '.dumps/tests/reports/assembly_ui_hashcheck.json', assemblyFixtureSHA, fakeAssemblyPosts: posts().filter(item => item.path.startsWith('/assemblies/')).length, uuidFallback: 'WebCrypto.getRandomValues; one16-byte draw/version4/variantRFC4122; HTTP mock, not physical phone', cloudRequests: 0, gpuRequests: 0}, null, 2));
   await browser.close();
 }

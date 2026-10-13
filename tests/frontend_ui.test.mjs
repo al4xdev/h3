@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source = await readFile(new URL('../src/h3_backend/web/app.js', import.meta.url), 'utf8');
-const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {parseSeed, makePayload, playableURL, createClient, HTTPError, referenceValue, imageURL, validateUpload, relevantChange, editorPayload, grokPayload, sceneText, draftMatches, canonicalUUID, canAssemble, assemblyURL, assemblyRecord, assemblyPointer, assemblyLocation, newAssemblyUUID} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const reply = (data, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => data});
 
 test('strict seed boundaries, no float/exponent/sign/whitespace coercion', () => {
   assert.equal(parseSeed('0'), 0);
   assert.equal(parseSeed('9007199254740991'), Number.MAX_SAFE_INTEGER);
-  for (const seed of ['-1', '+1', '1.0', '1e3', ' 1', '1 ', '', 'NaN', 'Infinity', '9007199254740992']) assert.throws(() => parseSeed(seed));
+  for (const seed of ['-1', '+1', '1.0', '1e3', ' 1', '1 ', '1\n', '1\r\n', '', 'NaN', 'Infinity', '9007199254740992']) assert.throws(() => parseSeed(seed));
 });
 test('fixed payloads preserve exact prompt and no private knobs', () => {
   const prompt = '  <img src=x onerror=alert(1)>\ntexto  ';
@@ -133,6 +133,59 @@ test('Grok snapshots reject older draft, mode, selection or editor response', ()
   const before = {revision: 1, mode: 'new', selected: 'one', prompt: 'jump', system_prompt: 'system', model: ''};
   assert.equal(draftMatches(before, {...before}), true);
   for (const [key, value] of Object.entries({revision: 2, mode: 'continue', selected: 'other', prompt: 'new draft', system_prompt: 'new system', model: 'chosen'})) assert.equal(draftMatches(before, {...before, [key]: value}), false);
+});
+const rootID = '11111111-1111-4111-8111-111111111111';
+const endID = '22222222-2222-4222-8222-222222222222';
+const assemblyID = '33333333-3333-4333-8333-333333333333';
+const assembled = () => ({id: assemblyID, end_run_id: endID, state: 'completed', mode: 'preview', request_sha256: 'a'.repeat(64), output_sha256: 'b'.repeat(64), frames: 168, fps: '24/1', video_url: `/assemblies/${assemblyID}/video`, output: {path: `.data/assemblies/${assemblyID}/video.mp4`}});
+test('assembly requires canonical UUID and preserves query/hash recovery pointer only', () => {
+  assert.equal(canonicalUUID(endID), endID);
+  for (const id of ['AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA', `${endID}\n`, '../escape', 'own']) assert.throws(() => canonicalUUID(id));
+  const location = assemblyLocation('http://local/?other=one#viewer', assemblyID);
+  assert.equal(location, `/?other=one&assembly=${assemblyID}#viewer`);
+  assert.equal(assemblyPointer(`http://local${location}`), assemblyID);
+  assert.equal(assemblyPointer('http://local/#viewer'), null);
+  for (const suffix of ['?assembly=../escape', `?assembly=${assemblyID}&assembly=${assemblyID}`]) assert.throws(() => assemblyPointer(`http://local/${suffix}`));
+});
+test('native UUID preferred; LAN fallback uses exactly one cryptographic16-byte v4 draw', () => {
+  let calls = 0;
+  assert.equal(newAssemblyUUID({randomUUID: () => assemblyID, getRandomValues: () => { throw new Error('unused'); }}), assemblyID);
+  const id = newAssemblyUUID({getRandomValues: bytes => { calls++; assert.equal(bytes.length, 16); bytes.fill(255); return bytes; }});
+  assert.equal(id, 'ffffffff-ffff-4fff-bfff-ffffffffffff'); assert.equal(calls, 1); assert.equal(canonicalUUID(id), id);
+  assert.throws(() => newAssemblyUUID({}));
+});
+test('assembly eligibility keeps accepted ancestors and ready or accepted end in exact order', () => {
+  const run = {id: endID, state: 'ready_for_review', output: {path: '.data/runs/end/chunk.mp4'}};
+  const blocks = [{id: rootID, parent_id: null, state: 'accepted', video_url: `/runs/${rootID}/video`}, {id: endID, parent_id: rootID, state: 'ready_for_review', video_url: `/runs/${endID}/video`}];
+  const sequence = {root_id: rootID, end_run_id: endID, blocks};
+  assert.equal(canAssemble(run, sequence), true);
+  assert.equal(canAssemble({...run, state: 'accepted'}, {...sequence, blocks: [blocks[0], {...blocks[1], state: 'accepted'}]}), true);
+  for (const state of ['rejected', 'failed', 'running', 'interrupted']) assert.equal(canAssemble({...run, state}, sequence), false);
+  assert.equal(canAssemble(run, {...sequence, blocks: [{...blocks[0], state: 'rejected'}, blocks[1]]}), false);
+  assert.equal(canAssemble(run, {...sequence, blocks: blocks.toReversed()}), false);
+  assert.equal(canAssemble(run, {...sequence, blocks: []}), false);
+  assert.equal(canAssemble(run, {...sequence, blocks: Array(101).fill(blocks[0])}), false);
+});
+test('assembly never exposes foreign URLs, incomplete proof or noncompleted movie', () => {
+  const record = assembled(); assert.equal(assemblyURL(record, endID), record.video_url); assert.equal(assemblyRecord(record), record);
+  for (const update of [{state: 'running'}, {output_sha256: null}, {request_sha256: 'a'.repeat(64) + '\n'}, {video_url: 'https://evil/video'}, {video_url: `/assemblies/${rootID}/video`}, {output: {path: 'arbitrary.mp4'}}, {frames: 0}]) assert.equal(assemblyURL({...record, ...update}, endID), null);
+  assert.equal(assemblyURL(record, rootID), null); assert.throws(() => assemblyRecord({...record, video_url: 'https://evil/video'}));
+});
+test('one assembly POST awaits200 without native wait or double submission', async () => {
+  const calls = []; let release; const gate = new Promise(resolve => { release = resolve; });
+  const client = createClient(async (url, options) => { calls.push([url, options.method, JSON.parse(options.body)]); await gate; return reply(assembled()); });
+  const first = client.assemble(assemblyID, endID); await assert.rejects(client.assemble(assemblyID, endID), /montagem/); release(); await first;
+  assert.deepEqual(calls, [[`/assemblies/${assemblyID}`, 'POST', {end_run_id: endID}]]);
+});
+test('lost assembly or conflict never creates another UUID or retries POST', async () => {
+  for (const mode of ['network', '409', '202', 'wrong-end']) {
+    const calls = []; const client = createClient(async (url, options) => { calls.push([url, options.method]); if (mode === 'network') throw new Error('lost assembly'); if (mode === '409') return reply({detail: 'busy or collision'}, 409); return reply(mode === 'wrong-end' ? {...assembled(), end_run_id: rootID} : assembled(), mode === '202' ? 202 : 200); });
+    await assert.rejects(client.assemble(assemblyID, endID)); assert.deepEqual(calls, [[`/assemblies/${assemblyID}`, 'POST']]);
+  }
+});
+test('assembly filesystem hints only invalidate metadata, not media/requests', () => {
+  assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/metadata.json`, invalidation: true}), true);
+  for (const file of ['request.json', 'video.mp4', '.part']) assert.equal(relevantChange({path: `.data/assemblies/${assemblyID}/${file}`, invalidation: true}), false);
 });
 test('assets do not contain unsafe bindings, persistence, autoplay or polling', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');

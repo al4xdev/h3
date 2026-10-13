@@ -1,7 +1,7 @@
 const PLAYABLE = new Set(['ready_for_review', 'accepted', 'rejected']);
 export const STATE_LABELS = Object.freeze({queued: 'Na fila', running: 'Em geração', ready_for_review: 'Pronto para revisão', accepted: 'Aceito', rejected: 'Rejeitado', failed: 'Falhou', interrupted: 'Interrompido'});
 export function parseSeed(value) {
-  if (!/^[0-9]+$/.test(value)) throw new Error('Seed deve ser um inteiro de 0 a 9007199254740991.');
+  if (typeof value !== 'string' || !value || /[^0-9]/.test(value)) throw new Error('Seed deve ser um inteiro de 0 a 9007199254740991.');
   const seed = Number(value);
   if (!Number.isSafeInteger(seed) || seed < 0) throw new Error('Seed fora do intervalo de 0 a 9007199254740991.');
   return seed;
@@ -34,7 +34,58 @@ export function relevantChange(event) {
   if (!event.path || event.path === '.data') return true;
   if (typeof event.path !== 'string') return false;
   const path = event.path.replace(/^\.data\//, '');
-  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path));
+  return !/(?:^|\/)(?:tmp|[^/]*\.part)(?:\/|$)/.test(path) && (/^runs\/[^/]+\/(?:manifest|request)\.json$/.test(path) || /^inputs\//.test(path) || /^assemblies\/[0-9a-f-]+\/metadata\.json$/.test(path));
+}
+export function canonicalUUID(value) {
+  if (typeof value !== 'string' || value.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) throw new Error('ID deve ser um UUID canônico local.');
+  return value;
+}
+export function newAssemblyUUID(crypto) {
+  if (typeof crypto?.randomUUID === 'function') return canonicalUUID(crypto.randomUUID());
+  if (typeof crypto?.getRandomValues !== 'function') throw new Error('WebCrypto não está disponível nesta conexão; nenhuma montagem foi enviada.');
+  const bytes = new Uint8Array(16); crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  return canonicalUUID(`${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`);
+}
+export function assemblyPointer(href) {
+  const values = new URL(href).searchParams.getAll('assembly');
+  if (!values.length) return null;
+  if (values.length !== 1) throw new Error('Ponteiro de montagem duplicado.');
+  return canonicalUUID(values[0]);
+}
+export function assemblyLocation(href, id) {
+  canonicalUUID(id);
+  const url = new URL(href); url.searchParams.set('assembly', id);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+export function canAssemble(run, sequence) {
+  try {
+    canonicalUUID(run?.id);
+    const blocks = sequence?.blocks;
+    if (!['ready_for_review', 'accepted'].includes(run.state) || !run.output?.path || !Array.isArray(blocks) || !blocks.length || blocks.length > 100 || sequence.end_run_id !== run.id || sequence.root_id !== blocks[0].id) return false;
+    const seen = new Set(); let parent = null;
+    for (const [index, block] of blocks.entries()) {
+      canonicalUUID(block.id);
+      if (seen.has(block.id) || block.parent_id !== parent || block.video_url !== `/runs/${block.id}/video` || block.state !== (index === blocks.length - 1 ? run.state : 'accepted')) return false;
+      seen.add(block.id); parent = block.id;
+    }
+    return parent === run.id;
+  } catch { return false; }
+}
+export function assemblyURL(record, end) {
+  try {
+    canonicalUUID(record?.id); canonicalUUID(record.end_run_id);
+    const hash = value => typeof value === 'string' && value.length === 64 && /^[a-f0-9]{64}$/.test(value);
+    const expected = `/assemblies/${record.id}/video`;
+    if (record.end_run_id !== end || record.state !== 'completed' || !['preview', 'accepted_sequence'].includes(record.mode) || !hash(record.request_sha256) || !hash(record.output_sha256) || !Number.isSafeInteger(record.frames) || record.frames <= 0 || record.video_url !== expected || record.output?.path !== `.data/assemblies/${record.id}/video.mp4`) return null;
+    return expected;
+  } catch { return null; }
+}
+export function assemblyRecord(value, id = value?.id) {
+  canonicalUUID(id); canonicalUUID(value?.end_run_id);
+  if (value?.id !== id || !['running', 'failed', 'interrupted', 'completed'].includes(value.state) || !['preview', 'accepted_sequence'].includes(value.mode) || typeof value.request_sha256 !== 'string' || value.request_sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(value.request_sha256) || (value.state === 'completed' && !assemblyURL(value, value.end_run_id))) throw new Error('Metadados da montagem não confirmam o ID ou a publicação própria.');
+  return value;
 }
 export function makePayload({seed, prompt, image = 'dance_reference.png', reference = null, continuation = false}) {
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 12000) throw new Error('Escreva uma instrução de 1 a 12000 caracteres.');
@@ -85,7 +136,18 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
   let submitting = false;
   let uploading = false;
   let detailing = false;
+  let assembling = false;
   return {
+    async assemble(id, end) {
+      canonicalUUID(id); canonicalUUID(end);
+      if (assembling) throw new Error('Uma montagem já está em andamento.');
+      assembling = true;
+      try {
+        const result = assemblyRecord(await request(`/assemblies/${id}`, {method: 'POST', body: {end_run_id: end}, expectedStatus: 200}), id);
+        if (result.end_run_id !== end || result.state !== 'completed') throw new Error('Montagem não confirmou a conclusão da sequência pedida.');
+        return result;
+      } finally { assembling = false; }
+    },
     saveEditor: payload => request('/grok/editor', {method: 'PUT', body: editorPayload(payload)}),
     async detail(payload) {
       if (detailing) throw new Error('Grok já está detalhando uma ideia.');
@@ -129,19 +191,27 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
 
 export function startUI(document, client = createClient()) {
   const $ = id => document.getElementById(id);
-  let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0;
-  const state = {editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  let events = null, refreshActive = false, dirty = false, stopped = false, libraryEpoch = 0, assemblyEpoch = 0;
+  let pointer = null, pointerError = null;
+  try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
+  catch (error) { pointerError = error.message; }
+  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 50, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   function text(id, value) { $(id).textContent = value; }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
   function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value !== undefined) node.textContent = value; return node; }
   const label = run => STATE_LABELS[run?.state] || 'Estado desconhecido';
   function controls() {
     const run = state.selected;
-    $('accept').disabled = $('reject').disabled = state.busy || state.uncertain || run?.state !== 'ready_for_review';
+    // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
+    const reviewedPreview = state.assembly?.id === state.assemblyId && state.assembly?.state === 'completed' && state.assemblyMode === 'preview' && run?.state === 'accepted';
+    $('assemble').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyUncertain || state.busy || !canAssemble(run, state.sequence) || (state.assemblyLocked && state.assemblyEnd === run?.id && !reviewedPreview);
+    $('assembly-refresh').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading || (!state.assemblyId && !state.assembly);
+    text('assemble', state.assemblyBusy ? 'Montando no PC…' : 'Montar sequência');
+    $('accept').disabled = $('reject').disabled = state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
     $('continue-mode').disabled = state.busy || state.uncertain || run?.state !== 'accepted';
     $('new-mode').disabled = state.busy || state.uncertain;
     $('create-fields').disabled = !state.config || state.busy || state.uncertain;
-    $('generate').disabled = !state.config || state.busy || state.uncertain || (state.mode === 'continue' && run?.state !== 'accepted');
+    $('generate').disabled = !state.config || state.busy || state.assemblyBusy || state.uncertain || (state.mode === 'continue' && run?.state !== 'accepted');
     $('new-mode').setAttribute('aria-pressed', String(state.mode === 'new'));
     $('continue-mode').setAttribute('aria-pressed', String(state.mode === 'continue'));
     $('reference').disabled = state.mode === 'continue' || state.uploadBusy;
@@ -164,6 +234,88 @@ export function startUI(document, client = createClient()) {
     state.mode = mode;
     $('prompt').value = mode === 'continue' ? state.config.continuation_prompt : state.config.default_prompt;
     controls();
+  }
+  function rememberAssembly(record) {
+    if (record.id !== state.assemblyId) return;
+    state.assemblyEnd = record.end_run_id;
+    state.assemblyMode = record.mode;
+    state.assemblyUncertain = record.state === 'running';
+    state.assemblyLocked = true;
+  }
+  function renderAssembly() {
+    const record = state.assembly?.end_run_id === state.selected?.id ? state.assembly : null;
+    const url = assemblyURL(record, state.selected?.id);
+    $('assembly-result').hidden = !record;
+    text('assembly-label', record?.mode === 'preview' ? 'Montagem de prévia — revisão pendente' : 'Montagem da sequência aceita');
+    text('assembly-proof', record ? `ID ${record.id} · ${record.state} · ${record.frames ?? '—'} frames · ${record.fps ?? '—'} fps${record.error ? ` · ${record.error}` : ''}` : '');
+    const player = $('assembly-player');
+    player.hidden = !url;
+    if (url && $('assembly-result').open) { if (player.getAttribute('src') !== url) player.src = url; }
+    else if (!url) { player.pause(); player.removeAttribute('src'); }
+    $('assembly-download').hidden = !url;
+    if (url) $('assembly-download').href = url; else $('assembly-download').removeAttribute('href');
+    if (!state.assemblyBusy) text('assembly-hint', canAssemble(state.selected, state.sequence) ? state.selected.state === 'ready_for_review' ? 'A prévia mantém o último bloco pendente de revisão. Montar não aceita o bloco.' : 'Montagem dos blocos aceitos, na ordem da cadeia.' : 'Selecione um bloco pronto ou aceito, com todos os pais aceitos e vídeos publicados.');
+    controls();
+  }
+  async function loadAssemblies() {
+    if (!state.config?.assembly_enabled) return;
+    const end = state.selected?.id;
+    try { canonicalUUID(end); } catch { return; }
+    const epoch = ++assemblyEpoch;
+    try {
+      const result = await client.get(`/assemblies?end_run_id=${encodeURIComponent(end)}&limit=50&offset=0`);
+      if (epoch !== assemblyEpoch || end !== state.selected?.id || stopped) return;
+      if (!Array.isArray(result.items)) throw new Error('Catálogo de montagens inválido.');
+      const records = result.items.map(item => assemblyRecord(item));
+      if (records.some(item => item.end_run_id !== end)) throw new Error('Catálogo retornou outra sequência.');
+      state.assembly = records.find(item => item.id === state.assemblyId) || records.find(item => assemblyURL(item, end)) || records[0] || null;
+      if (state.assembly) rememberAssembly(state.assembly);
+      renderAssembly();
+    } catch (error) { if (epoch === assemblyEpoch) message('assembly-status', `Montagens indisponíveis: ${error.message}. Nenhum pedido foi repetido.`, true); }
+  }
+  async function readAssembly({restoreSelection = false} = {}) {
+    if (!state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading) return;
+    const id = state.assemblyId || state.assembly?.id;
+    if (!id) return;
+    state.assemblyReading = true; controls();
+    const selectionEpoch = state.epoch;
+    try {
+      const record = assemblyRecord(await client.get(`/assemblies/${canonicalUUID(id)}`), id);
+      if (stopped) return;
+      rememberAssembly(record);
+      if (restoreSelection && selectionEpoch === state.epoch && state.selected?.id !== record.end_run_id) await select(record.end_run_id);
+      if (state.selected?.id === record.end_run_id && (restoreSelection || selectionEpoch === state.epoch)) state.assembly = record;
+      renderAssembly();
+      message('assembly-status', `Montagem ${id}: ${record.state}. Apenas metadados relidos; nenhum POST.`, record.state === 'failed' || record.state === 'interrupted');
+    } catch (error) {
+      // A missing or unreadable known ID is not permission to create another intent.
+      if (id === state.assemblyId) state.assemblyUncertain = true;
+      message('assembly-status', `Montagem ${id} não confirmada: ${error.message}. Use Reler montagem; não repita o pedido.`, true);
+      await loadAssemblies();
+    } finally { state.assemblyReading = false; controls(); }
+  }
+  async function assemble() {
+    if ($('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !canAssemble(state.selected, state.sequence)) return;
+    const end = state.selected.id;
+    let id;
+    try {
+      id = newAssemblyUUID(document.defaultView.crypto);
+      const view = document.defaultView;
+      view.history.replaceState(view.history.state, '', assemblyLocation(view.location.href, id));
+    } catch (error) { message('assembly-status', `Não foi possível registrar um ID seguro antes de montar: ${error.message}. Nenhum POST foi enviado.`, true); return; }
+    state.assemblyId = id; state.assemblyEnd = end; state.assemblyMode = state.selected.state === 'accepted' ? 'accepted_sequence' : 'preview'; state.assemblyBusy = true; state.assemblyLocked = true; ++assemblyEpoch; controls();
+    message('assembly-status', `Montando no PC · ID ${id}. A resposta só confirma quando o arquivo estiver publicado.`);
+    try {
+      const record = await client.assemble(id, end);
+      if (stopped) return;
+      rememberAssembly(record);
+      if (state.selected?.id === end) { state.assembly = record; $('assembly-result').open = true; renderAssembly(); }
+      message('assembly-status', `Montagem publicada · ${id}. ${state.selected?.id === end ? 'Confira o filme; a revisão dos blocos não mudou.' : 'A seleção mudou; o resultado pertence à sequência anterior.'}`);
+    } catch (error) {
+      state.assemblyUncertain = !(error instanceof HTTPError) || error.status >= 500;
+      state.assemblyLocked = state.assemblyUncertain;
+      message('assembly-status', `Montagem ${id} não confirmada: ${error.message}. ${state.assemblyUncertain ? 'Resultado incerto: Reler montagem consulta este mesmo ID; não envia outro pedido.' : 'Pedido recusado. Nenhuma repetição automática.'}`, true);
+    } finally { state.assemblyBusy = false; controls(); drainChanges(); }
   }
   function editorDraft() {
     return {revision: state.draftRevision, mode: state.mode, selected: state.selected?.id ?? null, prompt: $('prompt').value, system_prompt: $('grok-system').value, model: $('grok-model').value};
@@ -265,7 +417,7 @@ export function startUI(document, client = createClient()) {
     if (run) for (const [name, value] of [['ID', run.id], ['Pai', run.parent_id || 'Origem'], ['Seed', run.seed], ['Duração', `${run.duration_seconds} s (solicitada)`], ['Criado', run.created_at], ['Atualizado', run.updated_at], ['Erro', run.error || '—']]) metadata.append(element('dt', '', name), element('dd', '', String(value ?? '—')));
     text('run-prompt', run?.prompt || '');
     if (state.mode === 'continue' && run?.state !== 'accepted') state.mode = 'new';
-    renderLibrary(); renderSequence(); controls();
+    renderLibrary(); renderSequence(); renderAssembly();
   }
   function showReference() {
     const item = state.reference || state.references.find(item => item.source_root === 'assets' && item.path === 'dance_reference.png');
@@ -328,6 +480,7 @@ export function startUI(document, client = createClient()) {
       if (epoch !== state.epoch) return;
       if (!Array.isArray(sequence.blocks)) throw new Error('Resposta inválida da cadeia.');
       state.sequence = sequence; renderRun();
+      await loadAssemblies();
     } catch (error) {
       if (epoch === state.epoch) { message('notice', `Não foi possível abrir o bloco: ${error.message}`, true); text('sequence-message', `Cadeia indisponível: ${error.message}`); }
     }
@@ -337,6 +490,8 @@ export function startUI(document, client = createClient()) {
     if (config.reference_image !== 'dance_reference.png' || config.duration_seconds !== 2.3 || typeof config.default_prompt !== 'string' || typeof config.continuation_prompt !== 'string') throw new Error('Configuração incompatível com os parâmetros preservados.');
     state.config = config; $('prompt').value = config.default_prompt;
     $('reference-library').hidden = !config.reference_library;
+    $('assembly-panel').hidden = !config.assembly_enabled;
+    if (pointerError) message('assembly-status', `Ponteiro de montagem inválido: ${pointerError}. Nenhum POST.`, true);
     if (config.filesystem_events && !events && document.defaultView?.EventSource) {
       events = new document.defaultView.EventSource('/events');
       const change = event => { try { if (relevantChange(JSON.parse(event.data))) queueRefresh(); } catch { /* Malformed hints are not commands. */ } };
@@ -360,14 +515,14 @@ export function startUI(document, client = createClient()) {
   }
   function queueRefresh() { dirty = true; drainChanges(); }
   function drainChanges() {
-    if (stopped || refreshActive || state.busy || state.uploadBusy || !dirty) return;
+    if (stopped || refreshActive || state.busy || state.assemblyBusy || state.uploadBusy || !dirty) return;
     dirty = false;
     // One microtask coalesces a burst, without a timer or completion polling.
     refreshActive = true;
     queueMicrotask(() => refresh(true));
   }
   async function refresh(fromEvent = false) {
-    if (!fromEvent && (refreshActive || state.busy || state.uploadBusy)) { dirty = true; return; }
+    if (!fromEvent && (refreshActive || state.busy || state.assemblyBusy || state.uploadBusy)) { dirty = true; return; }
     refreshActive = true;
     const selectionEpoch = state.epoch;
     message('notice', 'Atualizando metadados… Nenhuma geração será iniciada.');
@@ -384,7 +539,7 @@ export function startUI(document, client = createClient()) {
     finally { refreshActive = false; drainChanges(); }
   }
   async function decide(action) {
-    if (state.busy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
+    if (state.busy || state.assemblyBusy || state.uncertain || state.selected?.state !== 'ready_for_review') return;
     ++state.epoch; ++libraryEpoch;
     state.busy = true; controls();
     const id = state.selected.id;
@@ -399,7 +554,7 @@ export function startUI(document, client = createClient()) {
   }
   async function generate(event) {
     event.preventDefault();
-    if (state.busy || state.uploadBusy || state.uncertain || !state.config) return;
+    if (state.busy || state.assemblyBusy || state.uploadBusy || state.uncertain || !state.config) return;
     const continuation = state.mode === 'continue';
     if (continuation && state.selected?.state !== 'accepted') return;
     let payload;
@@ -426,6 +581,10 @@ export function startUI(document, client = createClient()) {
     } finally { state.busy = false; state.waitController = null; controls(); drainChanges(); }
   }
   for (const id of ['prompt', 'grok-system', 'grok-model']) $(id).addEventListener('input', () => { ++state.draftRevision; });
+  $('assemble').addEventListener('click', assemble);
+  $('assembly-refresh').addEventListener('click', () => readAssembly());
+  $('assembly-result').addEventListener('toggle', renderAssembly);
+  $('assembly-player').addEventListener('error', () => message('assembly-status', 'O vídeo montado não carregou. Use Reler montagem para verificar a publicação, sem novo POST.', true));
   $('grok-detail').addEventListener('click', detailScene);
   $('grok-save').addEventListener('click', saveEditor);
   $('grok-use').addEventListener('click', useProposal);
@@ -440,13 +599,14 @@ export function startUI(document, client = createClient()) {
   $('reject').addEventListener('click', () => decide('reject'));
   $('create-form').addEventListener('submit', generate);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
-  document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('pagehide', () => { stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   refreshActive = true;
   const ready = loadConfig().then(() => Promise.allSettled([
     loadEditor(),
     loadReferences(),
     loadLibrary().then(() => state.items.length ? select(state.items[0].id) : undefined),
-  ]), error => [{status: 'rejected', reason: error}]).then(results => {
+  ]), error => [{status: 'rejected', reason: error}]).then(async results => {
+    if (state.config?.assembly_enabled && pointer) await readAssembly({restoreSelection: true});
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     controls(); refreshActive = false; drainChanges();

@@ -42,6 +42,19 @@
           <div class="section-head"><h2 id="sequence-title">Linha de continuidade</h2><span class="caption">origem → seleção</span></div>
           <ol id="sequence" class="film-strip"></ol>
           <p id="sequence-message" class="caption">A cadeia segue os pais do bloco, sem misturar ramificações.</p>
+          <section id="assembly-panel" class="assembly-panel" aria-labelledby="assembly-title" hidden>
+            <h2 id="assembly-title">Montagem da sequência</h2>
+            <p id="assembly-hint" class="caption">Todos os pais precisam estar aceitos. O último bloco pode estar pronto para revisão.</p>
+            <div class="actions"><button id="assemble" type="button" disabled>Montar sequência</button><button id="assembly-refresh" type="button" disabled>Reler montagem</button></div>
+            <p id="assembly-status" class="operation" role="status" aria-live="polite"></p>
+            <details id="assembly-result" hidden>
+              <summary id="assembly-label"></summary>
+              <video id="assembly-player" controls playsinline preload="metadata" aria-label="Vídeo da sequência montada" hidden></video>
+              <a id="assembly-download" download="montagem.mp4" hidden>Baixar montagem</a>
+              <p id="assembly-proof" class="caption"></p>
+            </details>
+            <p class="caption">Montar não aceita blocos nem gera novos. Mantém a ordem e todos os frames; não promete arquivo ou pixels idênticos.</p>
+          </section>
         </section>
         <details class="metadata"><summary>Ficha do bloco</summary><dl id="metadata"></dl><p id="run-prompt" class="prompt-copy"></p></details>
       </section>
