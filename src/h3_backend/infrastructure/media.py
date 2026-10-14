@@ -7,7 +7,10 @@ import hashlib
 import json
 import math
 import os
+import stat
+import struct
 import uuid
+import zlib
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -72,6 +75,68 @@ async def _verify_image(path: Path) -> dict[str, Any]:
     if not counts or counts[-1] != 1:
         raise ValueError("Identity image must be a single still")
     return {key: header[key] for key in ("width", "height", "format")}
+
+
+def prepare_png_upload(path: Path) -> bool:
+    """Copy a CRC-valid PNG prefix without its trailer; no pixel decode or re-encode.
+
+    Some mobile screenshots append opaque bytes which FFmpeg reads as a broken
+    second frame. Preserve the received file and validate the clean copy separately.
+    """
+    path = _guard_path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    signature = b"\x89PNG\r\n\x1a\n"
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024**2:
+            raise ValueError("Upload must be a bounded regular file")
+        if source.read(8) != signature:
+            return False
+        first = True
+        while True:
+            header = source.read(8)
+            if len(header) != 8:
+                raise ValueError("Truncated PNG chunk header")
+            length, kind = struct.unpack(">I4s", header)
+            if first and (kind != b"IHDR" or length != 13):
+                raise ValueError("Invalid PNG header")
+            first = False
+            if length > info.st_size - source.tell() - 4:
+                raise ValueError("Truncated PNG chunk")
+            crc = zlib.crc32(kind)
+            remaining = length
+            while remaining:
+                block = source.read(min(65536, remaining))
+                if not block:
+                    raise ValueError("Truncated PNG chunk")
+                crc = zlib.crc32(block, crc)
+                remaining -= len(block)
+            stored_crc = source.read(4)
+            if len(stored_crc) != 4 or struct.unpack(">I", stored_crc)[0] != crc:
+                raise ValueError("Invalid PNG chunk CRC")
+            if kind == b"IEND":
+                if length != 0:
+                    raise ValueError("Invalid PNG end chunk")
+                break
+        end = source.tell()
+        if end == info.st_size:
+            return False
+        if source.read(8) == signature:
+            raise ValueError("Identity image must be a single still, not concatenated PNGs")
+        destination = _guard_path(path.with_name(".clean.part"))
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        source.seek(0)
+        with os.fdopen(fd, "wb") as output:
+            remaining = end
+            while remaining:
+                block = source.read(min(65536, remaining))
+                if not block:
+                    raise ValueError("Upload changed during PNG preparation")
+                output.write(block)
+                remaining -= len(block)
+            output.flush()
+            os.fsync(output.fileno())
+        return True
 
 
 def verify_image(path: Path) -> dict[str, Any]:

@@ -313,8 +313,8 @@ class Store:
             os.close(fd)
             return input_id, part
 
-    def publish_input(self, input_id: str, name: str, info: dict, digest: str) -> dict:
-        """Publish original encoded bytes without overwrite; metadata is the last commit marker."""
+    def publish_input(self, input_id: str, name: str, info: dict, digest: str, *, normalized: bool = False) -> dict:
+        """Publish validated encoded bytes; retain received evidence when stripping a PNG trailer."""
         if str(UUID(input_id)) != input_id:
             raise ValueError("Invalid input id")
         suffix = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}[info["format"]]
@@ -329,8 +329,23 @@ class Store:
             marker = safe_path(directory, "metadata.json")
             if marker.exists():
                 raise FileExistsError("Input metadata already exists")
+            candidate = safe_path(directory, ".clean.part") if normalized else part
+            normalization = None
+            if normalized:
+                if info["format"] != "PNG" or not candidate.is_file() or not 0 < candidate.stat().st_size < part.stat().st_size:
+                    raise ValueError("Invalid prepared PNG upload")
+                with part.open("rb") as received:
+                    received_digest = hashlib.file_digest(received, "sha256").hexdigest()
+                normalization = {
+                    "operation": "png_trailing_bytes_removed", "received_file": ".upload",
+                    "received_sha256": received_digest, "received_bytes": part.stat().st_size,
+                    "published_bytes": candidate.stat().st_size,
+                    "removed_bytes": part.stat().st_size - candidate.stat().st_size,
+                }
+                # Private evidence is never served as a reference or listed in the catalog.
+                os.link(part, safe_path(directory, ".upload"))
             # Any collision retains .part evidence and does not replace the original.
-            os.link(part, destination)
+            os.link(candidate, destination)
             for path in (directory, base):
                 fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
                 try:
@@ -339,6 +354,8 @@ class Store:
                     os.close(fd)
             metadata = {"id": input_id, "source_root": "inputs", "path": source,
                         "name": name, **info, "sha256": digest, "created_at": timestamp()}
+            if normalization is not None:
+                metadata["normalization"] = normalization
             fd, temporary = tempfile.mkstemp(prefix=".metadata-", dir=directory)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -354,6 +371,8 @@ class Store:
             finally:
                 os.unlink(temporary)
             part.unlink()
+            if normalized:
+                candidate.unlink()
             return self._image_item("inputs", source, name=name, info=info)
 
     def relative_artifact(self, run_id: str, filename: str) -> str:

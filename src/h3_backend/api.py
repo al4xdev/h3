@@ -21,7 +21,7 @@ from .generation.v2v import router as v2v_router
 from .generation.workflow import DEFAULT_DURATION_SECONDS, duration_capabilities
 from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
-from .infrastructure.media import sha256_file, verify_image
+from .infrastructure.media import prepare_png_upload, sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
 from .library import router as library_router
 from .pwa import router as pwa_router
@@ -209,9 +209,11 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
                 await asyncio.to_thread(os.fsync, stream.fileno())
             if total == 0:
                 raise ValueError("Image upload cannot be empty")
-            info = await asyncio.to_thread(verify_image, part)
-            digest = await asyncio.to_thread(sha256_file, part)
-            return await asyncio.to_thread(store.publish_input, input_id, name, info, digest)
+            normalized = await asyncio.to_thread(prepare_png_upload, part)
+            candidate = part.with_name(".clean.part") if normalized else part
+            info = await asyncio.to_thread(verify_image, candidate)
+            digest = await asyncio.to_thread(sha256_file, candidate)
+            return await asyncio.to_thread(store.publish_input, input_id, name, info, digest, normalized=normalized)
 
     @app.get("/inputs/image")
     def input_image(path: str = Query(min_length=1, max_length=1024)):
