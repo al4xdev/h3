@@ -505,6 +505,17 @@ test('actual STOP callback reports no request for blocked or changed sources and
   const lost = stopFixture(); lost.client.stopRun = async () => { throw new Error('response lost'); }; const result = await lost.stop('run'); assert.equal(result.requested, true); assert.match(result.status, /não confirmada/); assert.equal(lost.state.stopUncertain, true);
 });
 
+test('direct story retry opens its exact source before preparing and preserves live fences', async () => {
+  const handler = source.slice(source.indexOf('  async function prepareStoryRetry('), source.indexOf('  async function storyNext('));
+  for (const scenario of ['ready', 'blocked', 'bridge', 'changed-story', 'changed-selection', 'left-review']) {
+    const story = {doc: {id}}, state = {screen: 'story', selected: null}, calls = [], attempt = {run: {id: intent}, origin: scenario === 'bridge' ? 'bridge' : 'native'};
+    const deps = {story, state, retryBlocked: () => scenario === 'blocked', openStoryAttempt: async value => { calls.push(['open', value]); state.screen = scenario === 'left-review' ? 'library' : 'review'; state.selected = {id: scenario === 'changed-selection' ? block : intent}; if (scenario === 'changed-story') story.doc = {id: block}; }, prepareRetry: async () => calls.push(['prepare'])};
+    const prepare = new Function(...Object.keys(deps), `${handler}; return prepareStoryRetry;`)(...Object.values(deps));
+    await prepare(attempt);
+    assert.deepEqual(calls.map(call => call[0]), scenario === 'ready' ? ['open', 'prepare'] : ['blocked', 'bridge'].includes(scenario) ? [] : ['open'], scenario);
+  }
+});
+
 test('batch requires exact saved Grok instructions while explicit Save updates snapshot without changing manual draft text', async () => {
   const saved = {system_prompt: 'Exact English system\n', model: 'fixed'}, current = {...saved}; assert.equal(savedEditorMatches(saved, current), true);
   current.system_prompt = 'Unsaved custom English instructions'; assert.equal(savedEditorMatches(saved, current), false); assert.equal(savedEditorMatches(saved, saved, true), false);

@@ -994,7 +994,7 @@ export function createGrokWaiting(document, timers = document.defaultView) {
 }
 
 export function blockedActionReason(button, state, story, context = {}) {
-  const id = button.id, is = (...ids) => ids.includes(id);
+  const id = button.dataset.storyRetry ? 'retry-mode' : button.id, is = (...ids) => ids.includes(id);
   if (id === 'back') return 'Você já está na primeira tela. Toque em Estúdio local para abrir a biblioteca.';
   if (id === 'settings-open') return 'Os ajustes já estão abertos. Use Voltar para retornar.';
   if (id === 'load-more') return 'A próxima página está carregando. Aguarde a leitura dos vídeos.';
@@ -1030,7 +1030,7 @@ export function blockedActionReason(button, state, story, context = {}) {
     if (state.batchReading) return 'O lote está sendo consultado. Aguarde a confirmação do pedido existente.';
     if (!context.savedBatchEditor) return 'Salve o prompt de Vídeos sequenciais em Ajustes antes de gerar o lote.';
     if (story.editing || story.candidate || context.nameChanged || !context.batchDraftsClean) return 'Salve ou resolva as edições e propostas pendentes antes de gerar o lote.';
-    return 'O lote exige um trecho aceito seguido de blocos nunca enviados. Revise os vídeos pendentes ou prepare outra tentativa para blocos recusados/interrompidos.';
+    return 'O lote exige um trecho aceito seguido de blocos nunca enviados. Revise os vídeos pendentes ou use Preparar nova tentativa no cartão do bloco recusado/interrompido.';
   }
   if (is('grok-detail', 'story-detail', 'grok-save') && !state.editorReady) return 'A configuração do Grok não foi carregada. Abra Ajustes ou atualize a biblioteca para consultar novamente.';
   if (is('grok-detail', 'story-detail') && state.mode === 'continue' && state.lastFrame?.state !== 'ready') return 'O último frame do pai aceito ainda não está disponível. Aguarde ou consulte novamente o bloco.';
@@ -1589,6 +1589,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('retry-context').hidden = !draft().sourceId;
     text('retry-context', draft().sourceId ? `Nova tentativa baseada no bloco ${draft().sourceId}. A tentativa anterior permanece no histórico, com seu registro e decisão preservados.` : '');
     $('retry-mode').disabled = retryBlocked() || !['rejected', 'interrupted'].includes(run?.state);
+    for (const button of document.querySelectorAll('[data-story-retry]')) button.disabled = retryBlocked();
     text('retry-mode', state.retryPreparing ? 'Conferindo os registros…' : 'Preparar nova tentativa');
     $('settings-draft-fields').disabled = !settingsEditable();
     $('duration').readOnly = !state.capabilities || !settingsEditable();
@@ -2033,6 +2034,10 @@ export function startUI(document, client = createClient(), stories = createStory
       li.append(element('p', 'block-preview', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
       const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
       edit.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (batchBlocked() && !latest.latest) return; if (latest.latest) void openStoryAttempt(latest.accepted || latest.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...current}; renderStory(); } }); li.append(edit);
+      if (!info.accepted && info.latest?.origin !== 'bridge' && ['rejected', 'interrupted'].includes(info.latest?.run?.state)) {
+        const retry = element('button', '', 'Preparar nova tentativa'); retry.type = 'button'; retry.dataset.storyRetry = 'true'; retry.disabled = retryBlocked();
+        retry.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (!latest.accepted && latest.latest?.origin !== 'bridge' && ['rejected', 'interrupted'].includes(latest.latest?.run?.state)) void prepareStoryRetry(latest.latest); }); li.append(retry);
+      }
       if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
     }
     if (!info.frozen) {
@@ -2131,6 +2136,12 @@ export function startUI(document, client = createClient(), stories = createStory
     if (!state.drafts.has(state.draftKey)) state.drafts.set(state.draftKey, {idea: block.action, chosenPrompt: block.prompt, proposal: '', seed: String(block.seed), duration: String(block.duration_seconds), reference: story.doc.reference, revision: 0, submitted: false, promptOrigin: 'roteiro'});
     restoreDraft(); state.statusOnly = draft().submitted; storyURL(); navigate('generation'); text('story-neighbors', storyContext(story.doc, block.id, draft().duration));
   }
+  async function prepareStoryRetry(attempt) {
+    if (attempt.origin === 'bridge' || retryBlocked()) return;
+    const owner = story.doc?.id, source = attempt.run?.id;
+    await openStoryAttempt(attempt);
+    if (story.doc?.id === owner && state.selected?.id === source && state.screen === 'review') await prepareRetry();
+  }
   async function storyNext() {
     const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted);
     if (!next) {
@@ -2139,7 +2150,7 @@ export function startUI(document, client = createClient(), stories = createStory
       await select(last.run.id, last.run); if (navigation === state.navigationEpoch && state.selected?.id === last.run.id) { state.storyAssembly = owner; state.assembly = null; state.assemblyLocked = false; navigate('assembly'); } return;
     }
     const latest = storyBlockState(story.doc, next).latest;
-    if (latest) { await openStoryAttempt(latest); if (['rejected', 'interrupted'].includes(latest.run?.state)) await prepareRetry(); } else await prepareStoryBlock(next);
+    if (latest) { if (latest.origin !== 'bridge' && ['rejected', 'interrupted'].includes(latest.run?.state)) await prepareStoryRetry(latest); else await openStoryAttempt(latest); } else await prepareStoryBlock(next);
   }
   async function readStoryIntent() {
     if (!ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner) || state.busy) return;

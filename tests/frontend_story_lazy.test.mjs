@@ -83,6 +83,24 @@ test('real block histories build version rows only on opening and once per cache
   history.querySelector('button').dispatchEvent(new Event('click')); assert.deepEqual(opened, [attempts[0]]);
 });
 
+test('terminal story cards offer a direct retry that uses the latest attempt without submitting', () => {
+  for (const state of ['rejected', 'interrupted']) {
+    const f = fixture(), block = {id: 'block', action: 'Dance', duration_seconds: 8};
+    const attempt = {block_id: block.id, intent_id: 'original-intent', run_id: 'original-run', run: {state}};
+    const story = {doc: {id: 'story', blocks: [block], attempts: [attempt]}}, retries = [];
+    let blocked = false;
+    const deps = {story, storyBlocks: () => story.doc.blocks, element: (tag, classes, text) => { const node = new f.Element(tag); node.textContent = text; return node; }, storyBlockState, alignedFrames: () => 192, batchBlocked: () => false, retryBlocked: () => blocked, editFence: () => false, edit: {lists: new Map()}, prepareStoryRetry: value => retries.push(value), STATE_LABELS: {}};
+    const text = source.slice(source.indexOf('  function renderStoryBlock('), source.indexOf('  function renderStory()'));
+    const render = new Function(...Object.keys(deps), `${text}; return renderStoryBlock;`)(...Object.values(deps));
+    const node = render(block, 0, [block]), retry = node.querySelectorAll('button').find(button => button.textContent === 'Preparar nova tentativa');
+    assert.ok(retry, `${state}: retry is available on the block card`);
+    const latest = {...attempt, intent_id: 'latest-intent', run_id: 'latest-run'}; story.doc.attempts.push(latest);
+    retry.dispatchEvent(new Event('click')); assert.deepEqual(retries, [latest]);
+    blocked = true; assert.equal(render(block, 0, [block]).querySelectorAll('button').find(button => button.dataset.storyRetry).disabled, true);
+    latest.origin = 'bridge'; assert.ok(render(block, 0, [block]).querySelectorAll('button').some(button => button.textContent === 'Ver tentativa'));
+  }
+});
+
 test('elastic presentation stays passive and settles on motion preference, hidden state and navigation', () => {
   const f = fixture(), leaf = new f.Element('h3'); f.list.append(leaf); f.list.querySelectorAll = () => [leaf]; let epoch = 0, enabled = true, cancelled = 0;
   leaf.animate = () => ({cancel() { cancelled++; }, finished: new Promise(() => {})});
