@@ -501,6 +501,8 @@ export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   const easing = 'cubic-bezier(.2,.8,.2,1)';
   if (kind === 'enter') return {frames: [{opacity: .65, transform: `translateX(${direction < 0 ? -12 : 12}px)`}, {opacity: 1, transform: 'translateX(0)'}], options: {duration: 360, delay, easing}};
   if (kind === 'confirm') return {frames: [{opacity: .75, transform: 'scale(.985)'}, {opacity: 1, transform: 'scale(1)'}], options: {duration: 480, easing}};
+  if (kind === 'favorite') return {frames: [{transform: 'scale(1) rotate(0deg)'}, {transform: 'scale(1.22) rotate(-12deg)', offset: .45}, {transform: 'scale(1) rotate(0deg)'}], options: {duration: 560, easing}};
+  if (kind === 'unfavorite') return {frames: [{opacity: .65, transform: 'rotate(10deg)'}, {opacity: 1, transform: 'rotate(0deg)'}], options: {duration: 440, easing}};
   return {frames: [{opacity: .78}, {opacity: 1}], options: {duration: 320, easing}};
 }
 export function createLoadingScreen(document) {
@@ -605,7 +607,7 @@ export function createPresentationMotion(document) {
   const view = document.defaultView, preference = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
   const active = new Map(), signatures = new Map();
   let disposed = false;
-  const allowed = new Set(['library', 'reference', 'review', 'sequence', 'assembly', 'duration-preview', 'notice', 'operation', 'upload-status', 'grok-status', 'grok-config-status', 'proposal-error', 'proposal-context', 'proposal-hint', 'late-proposal-context', 'review-status', 'assembly-status', 'assembly-proof', 'status-state']);
+  const allowed = new Set(['library', 'story', 'reference', 'review', 'sequence', 'assembly', 'duration-preview', 'notice', 'operation', 'upload-status', 'grok-status', 'grok-config-status', 'proposal-error', 'proposal-context', 'proposal-hint', 'late-proposal-context', 'review-status', 'assembly-status', 'assembly-proof', 'status-state', 'story-summary', 'story-status', 'story-detail-status', 'tail-status', 'favorites-status', 'batch-status', 'conversion-status']);
   function stop() { for (const animation of active.values()) animation.cancel(); active.clear(); }
   function preferenceChanged() { stop(); document.documentElement?.classList.toggle('motion-paused', disposed || Boolean(preference?.matches) || Boolean(document.hidden)); }
   function play(node, kind = 'cue', options = {}) {
@@ -1440,12 +1442,15 @@ export function startUI(document, client = createClient(), stories = createStory
   function favoriteButton(kind, id) {
     const selected = favoriteItems.some(item => item.kind === kind && item.id === id);
     const button = element('button', 'favorite-toggle card-icon'); button.type = 'button'; cardIcon(button, 'star', selected ? 'Remover dos favoritos' : 'Adicionar aos favoritos'); button.setAttribute('aria-pressed', String(selected)); button.disabled = favoriteBusy || !favoritesReady;
+    button.dataset.favoriteKey = `${kind}:${id}`;
     button.addEventListener('click', async () => {
       if (favoriteBusy || !favoritesReady) return;
+      let confirmedChange = false;
       favoriteBusy = true; for (const node of document.querySelectorAll('.favorite-toggle')) node.disabled = true;
-      try { const result = await libraries.favorite(kind, id, !selected); if (!Array.isArray(result.items)) throw new Error('Catálogo de favoritos inválido.'); favoriteItems = result.items; message('favorites-status', 'Favoritos salvos no PC.'); }
+      motion.busy(button, true);
+      try { const result = await libraries.favorite(kind, id, !selected); if (!Array.isArray(result.items)) throw new Error('Catálogo de favoritos inválido.'); favoriteItems = result.items; confirmedChange = favoriteItems.some(item => item.kind === kind && item.id === id) !== selected; message('favorites-status', 'Favoritos salvos no PC.'); }
       catch (error) { favoritesReady = false; message('favorites-status', `${error.message} Releia a biblioteca para confirmar.`, true); }
-      finally { favoriteBusy = false; renderLibrary(); await storyLibrary(); }
+      finally { favoriteBusy = false; renderLibrary(); await storyLibrary(); if (confirmedChange) for (const node of document.querySelectorAll('.favorite-toggle')) if (node.dataset.favoriteKey === `${kind}:${id}`) motion.play(node.querySelector('svg'), node.getAttribute('aria-pressed') === 'true' ? 'favorite' : 'unfavorite'); }
     });
     return button;
   }
@@ -1603,6 +1608,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-adopt').hidden = story.doc.adopted && !story.candidate; $('story-next').hidden = !story.doc.adopted || Boolean(story.candidate);
     const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted), info = next && storyBlockState(story.doc, next);
     text('story-next', !next ? 'Preparar montagem' : info.latest ? ['rejected', 'interrupted'].includes(info.latest.run?.state) ? 'Preparar outra tentativa' : info.latest.run?.state === 'ready_for_review' ? 'Revisar bloco' : 'Consultar envio do bloco' : `Preparar bloco ${story.doc.blocks.indexOf(next) + 1}`);
+    motion.changed('story', `${story.doc.id}:${story.doc.revision}:${story.candidate ? JSON.stringify(blocks.map(block => [block.id, block.action])) : ''}:${accepted}`, [...$('story-blocks').querySelectorAll('h3')], 'enter');
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
     if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true;

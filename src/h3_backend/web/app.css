@@ -173,3 +173,23 @@ button:disabled { pointer-events: none; }
 .grok-wait-paused .grok-wait-icon { animation-play-state: paused; }
 @keyframes grok-wait-drift { 0%,100% { transform: translateY(0) rotate(-12deg); opacity: .55; } 50% { transform: translateY(-3px) rotate(12deg); opacity: 1; } }
 @media(prefers-reduced-motion:reduce) { .grok-wait-icon { animation: none; } }
+button { transition: background 360ms ease, border-color 360ms ease, color 360ms ease, opacity 320ms ease; }
+.card-icon svg { transform-origin: center; transition: fill 360ms ease, stroke 360ms ease, opacity 320ms ease, transform 360ms var(--motion-ease); }
+.card-icon:active:not(:disabled) svg { transform: rotate(-8deg); }
+#back>span:first-child { display: inline-block; transition: transform 360ms var(--motion-ease); }
+#back:active:not(:disabled)>span:first-child { transform: translateX(-3px); }
+input,textarea,select { transition: border-color 360ms ease, background-color 360ms ease; }
+input:focus-visible,textarea:focus-visible,select:focus-visible { border-color: var(--copper); }
+details:not(.library-group):not(.settings-section)>summary { cursor: pointer; display: flex; align-items: center; gap: 10px; min-height: 44px; list-style: none; transition: color 320ms ease; }
+details:not(.library-group):not(.settings-section)>summary::-webkit-details-marker { display: none; }
+details:not(.library-group):not(.settings-section)>summary::after { content: '⌄'; display: inline-block; margin-inline-start: auto; color: var(--copper); font-size: 24px; transition: transform 440ms var(--motion-ease); }
+details[open]:not(.library-group):not(.settings-section)>summary::after { transform: rotate(180deg); }
+details[open]:not(.library-group):not(.settings-section)>summary { color: var(--paper); }
+.blocked-action-feedback:not([hidden]) { animation: feedback-arrive 360ms var(--motion-ease); }
+@keyframes feedback-arrive { from { opacity: .3; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@media(hover:hover) and (pointer:fine) { .card-icon:hover:not(:disabled) svg { transform: rotate(-8deg); } #back:hover:not(:disabled)>span:first-child { transform: translateX(-3px); } }
+@supports (interpolate-size:allow-keywords) and (transition-behavior:allow-discrete) {
+  details:not(.library-group):not(.settings-section):not(:has(video)) { interpolate-size: allow-keywords; }
+  details:not(.library-group):not(.settings-section):not(:has(video))::details-content { height: 0; overflow: clip; opacity: 0; transition: height 440ms var(--motion-ease), opacity 360ms ease, content-visibility 440ms allow-discrete; }
+  details[open]:not(.library-group):not(.settings-section):not(:has(video))::details-content { height: auto; opacity: 1; }
+}

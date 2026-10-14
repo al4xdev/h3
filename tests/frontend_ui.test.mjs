@@ -318,7 +318,7 @@ test('motion tokens are bounded, directional and compositor-only, with six-card 
   assert.equal(motionSpec('enter', {index: 6}).options.delay, 0);
   assert.equal(motionSpec('confirm').options.duration, 480);
   assert.equal(motionSpec('cue').options.duration, 320);
-  for (const kind of ['enter', 'confirm', 'cue']) for (const frame of motionSpec(kind).frames) assert.ok(Object.keys(frame).every(key => ['transform', 'opacity'].includes(key)));
+  for (const kind of ['enter', 'confirm', 'cue', 'favorite', 'unfavorite']) for (const frame of motionSpec(kind).frames) assert.ok(Object.keys(frame).every(key => ['transform', 'opacity', 'offset'].includes(key)));
 });
 test('motion signatures survive recreated cards and cannot grow from arbitrary identifiers', () => {
   const f = motionFixture(), motion = createPresentationMotion(f.document);
@@ -327,6 +327,26 @@ test('motion signatures survive recreated cards and cannot grow from arbitrary i
   for (let id = 0; id < 1000; ++id) assert.equal(motion.changed(`untrusted-${id}`, id, [f.node()]), false);
   assert.equal(motion.channelCount, 1); assert.equal(f.calls.length, 1);
   motion.destroy();
+});
+test('favorite icon feedback follows confirmed persistence and never acknowledges a failed write', async () => {
+  const handler = source.slice(source.indexOf('  function favoriteButton('), source.indexOf('  function renderFavorites('));
+  for (const outcome of ['added', 'removed', 'failed', 'unchanged']) {
+    const id = '11111111-1111-4111-8111-111111111111', nodes = [], animations = [], initial = outcome === 'removed' ? [{kind: 'roteiro', id}] : [];
+    let release, providerCalls = 0, runtime;
+    const deps = {initial, element: () => ({dataset: {}, attrs: {}, icon: {}, setAttribute(key, value) { this.attrs[key] = value; }, getAttribute(key) { return this.attrs[key]; }, addEventListener(_key, callback) { this.click = callback; }, querySelector() { return this.icon; }}), cardIcon() {}, message() {}, motion: {busy() {}, play(node, kind) { animations.push({node, kind}); }}, document: {querySelectorAll: () => nodes}, libraries: {favorite: () => { providerCalls++; return new Promise((resolve, reject) => { release = outcome === 'failed' ? () => reject(new Error('lost')) : () => resolve({items: outcome === 'added' ? [{kind: 'roteiro', id}] : []}); }); }}, renderLibrary() { nodes.splice(0, nodes.length, runtime.favoriteButton('roteiro', id)); }, storyLibrary: async () => {}};
+    runtime = new Function(...Object.keys(deps), `let favoriteBusy = false, favoritesReady = true, favoriteItems = initial; ${handler}; return {favoriteButton};`)(...Object.values(deps));
+    const button = runtime.favoriteButton('roteiro', id); nodes.push(button); const pending = button.click();
+    assert.equal(animations.length, 0); assert.equal(button.disabled, true); release(); await pending;
+    assert.equal(providerCalls, 1); assert.equal(animations.length, ['added', 'removed'].includes(outcome) ? 1 : 0, outcome);
+    if (animations.length) { assert.equal(animations[0].node, nodes[0].icon); assert.equal(animations[0].kind, outcome === 'added' ? 'favorite' : 'unfavorite'); }
+  }
+});
+test('favorite leaf motion respects reduced motion and cancels a superseded reaction', () => {
+  const f = motionFixture(), motion = createPresentationMotion(f.document), icon = f.node();
+  assert.equal(motion.play(icon, 'favorite'), true); assert.equal(f.calls[0].options.duration, 560);
+  motion.play(icon, 'unfavorite'); assert.equal(f.calls[0].animation.cancelled, 1);
+  f.preference.matches = true; f.preferenceListeners.get('change')(); assert.equal(motion.activeCount, 0);
+  assert.equal(motion.play(icon, 'favorite'), false); motion.destroy();
 });
 test('reduce preference is immediate and a dynamic change cancels running animations', () => {
   const f = motionFixture(), motion = createPresentationMotion(f.document);

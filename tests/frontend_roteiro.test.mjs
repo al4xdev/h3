@@ -9,12 +9,12 @@ const response = (data, status = 200) => ({ok: status < 400, status, json: async
 test('actual story renderer opens pending blocks and attaches organization actions', async () => {
   const handler = source.slice(source.indexOf('  function renderStory()'), source.indexOf('  async function saveStoryBlocks'));
   const nodes = new Map(), saved = [];
-  const element = (tag, classes, value) => ({tag, textContent: value, children: [], dataset: {}, listeners: {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, addEventListener(event, callback) { this.listeners[event] = callback; }});
+  const element = (tag, classes, value) => ({tag, textContent: value, children: [], dataset: {}, listeners: {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, querySelectorAll(tag) { return this.children.flatMap(node => [node, ...node.children]).filter(node => node.tag === tag); }, addEventListener(event, callback) { this.listeners[event] = callback; }});
   const $ = key => { if (!nodes.has(key)) nodes.set(key, element('div')); return nodes.get(key); };
   const doc = fixture();
   doc.blocks.push({...doc.blocks[0], id: intent});
   const story = {doc};
-  const deps = {story, $, element, storyBlocks: () => doc.blocks, storyBlockState, alignedFrames: () => 192, text: (key, value) => { $(key).textContent = value; }, batchBlocked: () => false, saveStoryBlocks: async blocks => { saved.push(blocks); }, STATE_LABELS: {}, document: {defaultView: {confirm: () => true}}};
+  const deps = {motion: {changed() {}}, story, $, element, storyBlocks: () => doc.blocks, storyBlockState, alignedFrames: () => 192, text: (key, value) => { $(key).textContent = value; }, batchBlocked: () => false, saveStoryBlocks: async blocks => { saved.push(blocks); }, STATE_LABELS: {}, document: {defaultView: {confirm: () => true}}};
   const render = new Function(...Object.keys(deps), `${handler}; return renderStory;`)(...Object.values(deps));
   render();
   assert.equal($('story-blocks').children.length, 2);
