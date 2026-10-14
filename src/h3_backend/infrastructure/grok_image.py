@@ -336,6 +336,14 @@ CONTINUATION_LABEL = (
     "clothing and scene state. Preserve the identity from the first and continuity "
     "from the second, respecting only the changes in the user's instruction below."
 )
+EDIT_LABEL = (
+    "Analyze ALL THREE images in order: the first is the original identity/appearance reference; "
+    "the second is the actual previous last frame of the accepted parent, showing the starting "
+    "pose, clothing and scene state; the third is the actual following FIRST frame of the "
+    "accepted destination video, showing the destination pose, clothing and scene state. "
+    "Preserve identity from the first and describe a transition from the second to the third, "
+    "respecting the user's instruction below."
+)
 
 
 def _parent(root: Path, parent_id: str):
@@ -360,9 +368,13 @@ def _parent(root: Path, parent_id: str):
     references = manifest.get("references")
     if not isinstance(references, list) or any(not isinstance(row, dict) for row in references):
         raise ValueError("Invalid parent identity metadata")
-    if any((row.get("type"), row.get("role")) not in {
+    allowed_roles = {
         ("image", "identity"), ("image", "initial_frame"), ("video", "motion_video"),
-    } for row in references):
+    }
+    info = manifest.get("input_info")
+    if isinstance(info, dict) and info.get("operation") == "bridge":
+        allowed_roles.add(("image", "target_frame"))
+    if any((row.get("type"), row.get("role")) not in allowed_roles for row in references):
         raise ValueError("Unsupported or ambiguous parent reference roles")
     identities = [row for row in references if row.get("role") == "identity"]
     if len(identities) != 1 or identities[0].get("type") != "image":
@@ -405,7 +417,7 @@ async def _thread(operation, *arguments):
         raise
 
 
-async def _final_frame(video, frame):
+async def _final_frame(video, frame, *, edge: Literal["first", "last"] = "last"):
     descriptor = video.fileno()
     path = f"/proc/self/fd/{descriptor}"
     header = json.loads(await _command(
@@ -432,7 +444,7 @@ async def _final_frame(video, frame):
     await _command(
         (descriptor, frame.fileno()), "ffmpeg", "-v", "error", "-xerror", "-nostdin", "-y",
         "-protocol_whitelist", "file,pipe", "-f", "mov", "-i", path, "-map", "0:v:0", "-vf",
-        f"select=eq(n\\,{count - 1}),format=rgb24,setsar=0", "-fps_mode", "passthrough",
+        f"select=eq(n\\,{0 if edge == 'first' else count - 1}),format=rgb24,setsar=0", "-fps_mode", "passthrough",
         "-frames:v", "1", "-an", "-map_metadata", "-1", "-c:v", "png", "-pix_fmt", "rgb24",
         "-fs", str(IMAGE_MAX_BYTES + 1), "-f", "image2pipe", f"/proc/self/fd/{frame.fileno()}",
     )
@@ -453,8 +465,11 @@ async def _final_frame(video, frame):
 
 
 @asynccontextmanager
-async def continuation_frame(root: Path, parent_id: str, reference: EditorReference | None = None):
+async def continuation_frame(root: Path, parent_id: str, reference: EditorReference | None = None,
+                             *, edge: Literal["first", "last"] = "last"):
     """Read-only publication proof; only private anonymous editor scratch is written."""
+    if edge not in {"first", "last"}:
+        raise ValueError("Owned frame edge must be first or last")
     proof = await _thread(_parent, root, parent_id)
     _, original, digest, _, published_video_digest = proof
     if reference is not None and reference != original:
@@ -464,7 +479,10 @@ async def continuation_frame(root: Path, parent_id: str, reference: EditorRefere
         video_proof = await _thread(_file_digest, root, parts, VIDEO_MAX_BYTES, video)
         if published_video_digest is not None and video_proof[1] != published_video_digest:
             raise ValueError("Migrated video SHA disagrees with verified publication")
-        await _final_frame(video, frame)
+        if edge == "last":
+            await _final_frame(video, frame)
+        else:
+            await _final_frame(video, frame, edge=edge)
 
         def recheck():
             if _parent(root, parent_id) != proof:
@@ -501,9 +519,9 @@ async def encoded_chunks(snapshot):
 
 def images_json_body(model: str, system: str, prompt: str, images, *,
                      output_text: dict | None = None, max_output_tokens: int = 12_000):
-    """One or two flat Responses images, no media-sized Python allocation."""
-    if len(images) not in (1, 2):
-        raise ValueError("Editor requires one image or both continuation contexts")
+    """Flat Responses images, no media-sized Python allocation."""
+    if len(images) not in (1, 2, 3):
+        raise ValueError("Editor requires identity and any complete video boundary contexts")
     sizes = [os.fstat(snapshot.fileno()).st_size for snapshot, _ in images]
     if any(not 0 < size <= IMAGE_MAX_BYTES for size in sizes):
         raise ValueError("Editor image exceeds encoded byte budget")
@@ -513,6 +531,9 @@ def images_json_body(model: str, system: str, prompt: str, images, *,
     prefix += b'{"role":"user","content":['
     if len(images) == 2:
         prefix += json.dumps({"type": "input_text", "text": CONTINUATION_LABEL},
+                             ensure_ascii=False).encode() + b","
+    elif len(images) == 3:
+        prefix += json.dumps({"type": "input_text", "text": EDIT_LABEL},
                              ensure_ascii=False).encode() + b","
     heads = [b'{"type":"input_image","image_url":"data:' + mime.encode("ascii") + b";base64,"
              for _, mime in images]

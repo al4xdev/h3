@@ -210,15 +210,24 @@ async def _reference_loader_count(path: Path) -> int:
 
 async def prepare_last_frame(parent_video: Path, destination: Path) -> dict[str, Any]:
     """Decode the counted final frame, rather than guessing a timestamp near EOF."""
+    return await _prepare_frame(parent_video, destination, last=True)
+
+
+async def prepare_first_frame(target_video: Path, destination: Path) -> dict[str, Any]:
+    return await _prepare_frame(target_video, destination, last=False)
+
+
+async def _prepare_frame(parent_video: Path, destination: Path, *, last: bool) -> dict[str, Any]:
     parent_video = _guard_path(parent_video)
     destination = _destination(destination)
     video = _video_stream(await probe(parent_video))
     count = _frame_count(video)
+    index = count - 1 if last else 0
     temporary = destination.parent / f".{destination.stem}-{uuid.uuid4().hex}.part.png"
     try:
         await _command(
             "ffmpeg", "-v", "error", "-n", "-i", str(parent_video),
-            "-map", "0:v:0", "-vf", f"select=eq(n\\,{count - 1}),format=rgb24,setsar=0",
+            "-map", "0:v:0", "-vf", f"select=eq(n\\,{index}),format=rgb24,setsar=0",
             "-fps_mode", "passthrough", "-frames:v", "1", "-an", "-map_metadata", "-1",
             "-c:v", "png", "-pix_fmt", "rgb24", str(temporary),
         )
@@ -241,7 +250,7 @@ async def prepare_last_frame(parent_video: Path, destination: Path) -> dict[str,
     return {
         "path": str(destination),
         "source_frame_count": count,
-        "source_frame_index": count - 1,
+        "source_frame_index": index,
         "width": width,
         "height": height,
         "format": "PNG",

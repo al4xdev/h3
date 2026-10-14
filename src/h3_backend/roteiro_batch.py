@@ -261,13 +261,17 @@ class RoteiroBatch:
                             if pending:
                                 raise Conflict("Automatic batch requires an accepted prefix and never-sent suffix")
                             observations = [self.roteiro.observed(attempt) for attempt in attempts]
-                            observed = observations[-1]
+                            selected = self.roteiro.selected_attempt(doc, block.id)
+                            observed = self.roteiro.observed(selected)
                             prior_terminal = {"rejected", "interrupted", "not_admitted", "failed"}
+                            if doc.selected_runs:
+                                prior_terminal.add("accepted")
                             if (observed["state"] != "accepted" or observed["admission"] != "admitted"
                                     or any(old["state"] not in prior_terminal
-                                           for old in observations[:-1])):
+                                           for attempt, old in zip(attempts, observations, strict=True)
+                                           if attempt.run_id != selected.run_id)):
                                 raise Conflict("Resolve every previous attempt explicitly before a batch")
-                            parent_id = attempts[-1].run_id
+                            parent_id = selected.run_id
                         else:
                             pending.append(block.model_dump())
                     if not pending:
@@ -407,15 +411,15 @@ class RoteiroBatch:
     def context(self, doc, index):
         accepted = []
         for previous in doc.blocks[:index]:
-            attempts = [a for a in doc.attempts if a.block_id == previous.id]
-            observed = self.roteiro.observed(attempts[-1]) if attempts else None
+            selected = self.roteiro.selected_attempt(doc, previous.id)
+            observed = self.roteiro.observed(selected) if selected else None
             if not observed or observed["state"] != "accepted":
                 raise Conflict("Story context requires confirmed accepted intentions")
             label = ("IMMEDIATELY PREVIOUS ACCEPTED BLOCK" if previous == doc.blocks[index - 1]
                      else "EARLIER ACCEPTED BLOCK")
             accepted.append(f"{label}\nPlanned action: {previous.action}\n"
                             "BEGIN HISTORICAL PROMPT ACTUALLY SUBMITTED FOR THIS COMPLETED BLOCK\n"
-                            f"{attempts[-1].snapshot.prompt}\nEND HISTORICAL PROMPT")
+                            f"{selected.snapshot.prompt}\nEND HISTORICAL PROMPT")
         block = doc.blocks[index]
         past = "\n\n".join(accepted) or "First block."
         future = doc.blocks[index + 1].action if index + 1 < len(doc.blocks) else "This is the final block."

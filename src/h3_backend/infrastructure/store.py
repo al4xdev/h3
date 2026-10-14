@@ -84,6 +84,7 @@ IMAGE_NAMES = frozenset({"initial_frame.png", "last_frame.png"})
 
 ARTIFACTS = frozenset({
     "chunk.mp4", "initial_frame.png", "last_frame.png", "reference_tail.mp4",
+    "target_frame.png", "bridge_parent.mp4", "bridge_target.mp4",
     "workflow_api.json", "prompt.md", "telemetry.jsonl", "telemetry_error.json",
 })
 
@@ -420,14 +421,18 @@ class Store:
                 or run.output or run.progress or run.timings or run.decision is not None
                 or run.error is not None or run.publication_mode is not None):
             raise ValueError("Request must be an untouched queued admission snapshot")
-        if set(run.input_info) != {
+        expected_keys = {
             "mode", "operation", "continuation", "workflow_provenance", "comfy_extra_pnginfo",
-        }:
+        }
+        if run.input_info.get("operation") == "bridge":
+            expected_keys.add("bridge_anchors")
+        if set(run.input_info) != expected_keys:
             raise ValueError("Request contains non-admission input metadata")
         if (not isinstance(run.input_info["operation"], str)
-                or run.input_info["operation"] not in {"i2v", "v2v"}):
+                or run.input_info["operation"] not in {"i2v", "v2v", "bridge"}):
             raise ValueError("Unsupported materialized operation")
-        if not 1 <= len(run.references) <= (9 if run.parent_id is None else 8):
+        maximum = 7 if run.input_info["operation"] == "bridge" else (9 if run.parent_id is None else 8)
+        if not 1 <= len(run.references) <= maximum:
             raise ValueError("Invalid admitted identity count")
         sources = set()
         for reference in run.references:
@@ -458,6 +463,31 @@ class Store:
                 raise ValueError("Invalid admitted image geometry or format")
         if run.parent_id is not None and str(UUID(run.parent_id)) != run.parent_id:
             raise ValueError("Invalid request parent")
+        if run.input_info["operation"] == "bridge":
+            if not isinstance(run.input_info["continuation"], dict):
+                raise ValueError("Bridge requires its explicit continuation options")
+            anchors = run.input_info["bridge_anchors"]
+            if not isinstance(anchors, dict) or set(anchors) != {"parent", "target"}:
+                raise ValueError("Bridge requires exactly two frozen anchors")
+            for role, anchor in anchors.items():
+                if not isinstance(anchor, dict) or set(anchor) != {
+                    "run_id", "video_path", "video_sha256", "manifest_sha256",
+                }:
+                    raise ValueError("Invalid bridge anchor metadata")
+                identifier = anchor["run_id"]
+                if (not isinstance(identifier, str) or str(UUID(identifier)) != identifier
+                        or anchor["video_path"] != f".data/runs/{identifier}/chunk.mp4"):
+                    raise ValueError("Bridge anchors must own their video")
+                for field in ("video_sha256", "manifest_sha256"):
+                    digest = anchor[field]
+                    if (not isinstance(digest, str) or len(digest) != 64
+                            or any(c not in "0123456789abcdef" for c in digest)):
+                        raise ValueError("Invalid bridge anchor hash")
+                if role == "parent" and identifier != run.parent_id:
+                    raise ValueError("Bridge parent disagrees with frozen anchor")
+            if (anchors["target"]["run_id"] != run.input_info["continuation"].get("target_run_id")
+                    or anchors["target"]["run_id"] == run.parent_id):
+                raise ValueError("Bridge requires a distinct target matching its request")
 
     @staticmethod
     def input_projection(run: Run) -> dict:
@@ -474,7 +504,7 @@ class Store:
             ],
             "input_info": {key: run.input_info.get(key) for key in (
                 "mode", "operation", "continuation", "workflow_provenance", "comfy_extra_pnginfo",
-            )},
+            ) + (("bridge_anchors",) if run.input_info.get("operation") == "bridge" else ())},
         }
 
     def request(self, run_id: str) -> Run:

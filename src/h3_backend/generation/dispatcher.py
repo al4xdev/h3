@@ -359,7 +359,12 @@ class RunService:
             return run
 
     def _hydrate(self, run: Run):
-        # Native verticals remain the only two business routes, not a generic command registry.
+        if run.input_info.get("operation") == "bridge":
+            from .bridge import BridgePipe
+
+            pipe = BridgePipe.from_run(self, run)
+            pipe.verify_anchors(run)
+            return pipe
         if run.input_info.get("operation") == "i2v":
             from .i2v import I2VPipe
 
@@ -373,10 +378,13 @@ class RunService:
                           if reference.get("type") == "image"
                           and reference.get("role") in (None, "identity")]
             keys = ("source", "sha256")
+            parent_roles = (None, "identity", "initial_frame") + (
+                ("target_frame",) if parent.input_info.get("operation") == "bridge" else ()
+            )
             if (parent.state != "accepted"
                     or [(r.get("source_root", "assets"), *(r.get(k) for k in keys)) for r in identities]
                     != [(r["source_root"], *(r.get(k) for k in keys)) for r in run.references]
-                    or any(r.get("role") not in (None, "identity", "initial_frame")
+                    or any(r.get("role") not in parent_roles
                            for r in parent.references if r.get("type") == "image")):
                 raise Conflict("Continuation request no longer matches its accepted original identity")
             return pipe

@@ -53,6 +53,10 @@ async def test_plan_actual_parent_and_explicit_atomic_adoption_preserve_prefix(t
     assert fake.calls[0].continuation_parent_id == parent_id
     assert fake.calls[0].reference == doc.reference
     assert "Future frames are unknown" in fake.calls[0].prompt
+    prefix = json.loads(fake.calls[0].prompt)["accepted_prefix"]
+    assert prefix[0]["prompt"] == doc.attempts[0].snapshot.prompt
+    assert prefix[0]["run_id"] == parent_id
+    assert prefix[0]["editorial_intention"] == doc.blocks[0].action
     assert fake.schemas[0]["schema_name"] == "h3_roteiro"
     assert op.get(doc.id) == doc
     assert op.get_tail(doc.id, ident)["raw_text"] == fake.text

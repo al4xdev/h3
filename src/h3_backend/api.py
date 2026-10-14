@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from .favorites import router as favorites_router
 from .generation.assembly import router as assembly_router
+from .generation.bridge import router as bridge_router
 from .generation.dispatcher import Conflict, RunService
 from .generation.i2v import router as i2v_router
 from .generation.models import CONTINUATION_PROMPT, DEFAULT_PROMPT, Run, Settings
@@ -27,6 +28,7 @@ from .pwa import router as pwa_router
 from .roteiro import router as roteiro_router
 from .roteiro_batch import RoteiroBatch
 from .roteiro_batch import router as roteiro_batch_router
+from .roteiro_edit import router as roteiro_edit_router
 
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_INPUT_BYTES = 32 * 1024**2
@@ -61,16 +63,22 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
         try:
             if app.state.roteiro_batch is not None:
                 await app.state.roteiro_batch.startup()
+                from .roteiro_edit import RoteiroEdit
+                RoteiroEdit(app.state.service).recover()
             yield
         finally:
-            if app.state.roteiro_batch is not None:
-                await app.state.roteiro_batch.shutdown()
-            await app.state.service.shutdown()
+            try:
+                if app.state.roteiro_batch is not None:
+                    await app.state.roteiro_batch.shutdown()
+            finally:
+                await app.state.service.shutdown()
 
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
     app.include_router(roteiro_router)
     app.include_router(roteiro_batch_router)
+    app.include_router(roteiro_edit_router)
+    app.include_router(bridge_router)
     app.include_router(library_router)
     app.include_router(favorites_router)
     app.include_router(pwa_router)

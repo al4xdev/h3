@@ -7,4 +7,4 @@ cd -- "$PROJECT_DIR"
 
 # LAN only: this bridge exposes local operations; do not publish it online.
 export PYTHONDONTWRITEBYTECODE=1
-exec uv run --no-sync uvicorn h3_backend.api:app --host 0.0.0.0 --port 8888
+exec uv run --no-sync uvicorn h3_backend.api:app --host 0.0.0.0 --port 8888 --timeout-graceful-shutdown 5

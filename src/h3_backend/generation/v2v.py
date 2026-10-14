@@ -163,7 +163,8 @@ class V2VPipe:
             if reference.get("type") != "image":
                 continue
             role = reference.get("role")
-            if role == "initial_frame":
+            if role == "initial_frame" or (role == "target_frame"
+                                            and parent.input_info.get("operation") == "bridge"):
                 continue
             if role not in (None, "identity"):
                 raise ValueError("Ambiguous parent image role")
@@ -227,12 +228,15 @@ class V2VPipe:
         self._sealed = True
         return run
 
-    async def _prepare(self, run: Run, request: ContinueRequest) -> list[dict]:
+    async def _prepare(
+        self, run: Run, request: ContinueRequest, *, parent_video: Path | None = None,
+    ) -> list[dict]:
         service = self.dispatcher
         references = []
+        parent_video = parent_video or service.video_path(run.parent_id)
         frame = contained(service.store.directory(run.id), "initial_frame.png")
         frame_info = await service.media.prepare_last_frame(
-            service.video_path(run.parent_id), frame
+            parent_video, frame
         )
         if Path(frame_info["path"]).resolve() != frame.resolve() or not frame.is_file():
             raise ValueError("Last frame preparation returned an unexpected path")
@@ -272,7 +276,7 @@ class V2VPipe:
             )
         tail = contained(service.store.directory(run.id), "reference_tail.mp4")
         tail_info = await service.media.prepare_tail(
-            service.video_path(run.parent_id),
+            parent_video,
             tail,
             request.reference_tail_seconds,
             include_audio=request.include_audio,

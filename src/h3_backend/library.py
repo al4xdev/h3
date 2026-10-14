@@ -43,7 +43,84 @@ class Library:
             return self.store.run_image_parts(reference.get("path", reference.get("source", "")))[0] in selected
         return False
 
+    def bridge_target(self, run):
+        if run.input_info.get("operation") != "bridge":
+            return None
+        anchors = run.input_info.get("bridge_anchors")
+        if not isinstance(anchors, dict) or set(anchors) != {"parent", "target"}:
+            raise Conflict("Bridge dependencies cannot be verified")
+        try:
+            target = canonical(anchors["target"]["run_id"])
+            parent = canonical(anchors["parent"]["run_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise Conflict("Bridge dependencies cannot be verified") from exc
+        if parent != run.parent_id or target == parent:
+            raise Conflict("Bridge dependencies disagree with its native parent")
+        return target
+
+    def protect_edits(self, selected, documents, owner):
+        from .generation.bridge import BridgePipe
+        from .infrastructure.store import Store
+        from .roteiro_edit import RoteiroEdit
+
+        edits = RoteiroEdit(self.service)
+        for doc in documents:
+            with _directory(self.root, (".data", "roteiros", doc.id)) as directory:
+                names = [name for name in os.listdir(directory)
+                         if name.startswith("edit-") and name.endswith(".json")]
+            if len(names) > 1000:
+                raise Conflict("Edit history exceeds removal audit capacity")
+            for name in names:
+                try:
+                    record = edits.read(doc.id, name[5:-5])
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise Conflict("Edit dependencies cannot be verified before removal") from exc
+                if record["state"] == "applied":
+                    if not any(a.origin == "bridge" and a.run_id == record["run_id"]
+                               for a in doc.attempts):
+                        raise Conflict("Applied edit ownership cannot be verified before removal")
+                    continue
+                run_id = record["run_id"]
+                if record["state"] == "discarded":
+                    if (run_id is None or not self.store.directory(run_id).exists()
+                            or self.store.removed(run_id)):
+                        continue
+                    try:
+                        admitted = self.store.request(run_id)
+                        run = self.store.get(run_id)
+                        BridgePipe.from_run(self.service, admitted)
+                        identities = [(r["source_root"], r["source"], r["sha256"])
+                                      for r in admitted.references]
+                        if (Store.input_projection(admitted) != Store.input_projection(run)
+                                or run.state not in {"accepted", "rejected", "interrupted", "failed"}
+                                or (run.parent_id, run.prompt, run.seed, run.duration_seconds,
+                                    admitted.input_info["continuation"]["target_run_id"])
+                                != (record["previous_run_id"], record["prompt"], record["seed"],
+                                    record["duration_seconds"], record["next_run_id"])
+                                or identities != [(record["reference"]["source_root"],
+                                                    record["reference"]["path"],
+                                                    record["reference_sha256"])]):
+                            raise ValueError("Discarded edit native ownership is not confirmed")
+                    except (OSError, ValueError, KeyError, TypeError) as exc:
+                        raise Conflict("Discarded edit media cannot be verified before removal") from exc
+                    if doc.id == owner:
+                        selected.add(run_id)
+                    continue
+                if record["state"] == "failed" and (
+                    run_id is None or not self.store.directory(run_id).exists()
+                ):
+                    continue
+                dependencies = {record["previous_run_id"], record["next_run_id"]}
+                if run_id is not None:
+                    dependencies.add(run_id)
+                if doc.id == owner or dependencies.intersection(selected):
+                    raise Conflict(
+                        "An unapplied or uncertain edit owns this roteiro or media; "
+                        "resolve the edit before removing it"
+                    )
+
     def prepare(self, selected, documents, owner):
+        self.protect_edits(selected, documents, owner)
         if not selected:
             return [], {}
         runs, total = self.store.list_runs(limit=100)
@@ -57,13 +134,17 @@ class Library:
             if run.state in {"queued", "running"}:
                 raise Conflict("Active or uncertain generation cannot be removed")
         for run in runs:
-            if run.id not in selected and (run.parent_id in selected or any(
-                    self.dependency_reference(ref, selected) for ref in run.references)):
+            target = self.bridge_target(run)
+            if run.id not in selected and (run.parent_id in selected or target in selected or any(
+                    self.dependency_reference(ref, selected) for ref in run.references
+                    if ref.get("type") in (None, "image")
+                    and ref.get("role") in (None, "identity"))):
                 raise Conflict("Another block depends on this media")
         for doc in documents:
             if doc.id == owner:
                 continue
-            if any(a.run_id in selected or a.snapshot.parent_id in selected for a in doc.attempts):
+            if any(a.run_id in selected or a.snapshot.parent_id in selected
+                   or a.target_run_id in selected for a in doc.attempts):
                 raise Conflict("Another roteiro owns or depends on this block")
             if self.dependency_reference(doc.reference.model_dump(), selected):
                 raise Conflict("Another roteiro uses this identity image")
@@ -203,6 +284,7 @@ class Library:
                 owner = ident if revision is not None else None
                 if owner:
                     doc = self.roteiro.get(ident)
+                    self.protect_edits(set(), documents, owner)
                     self.roteiro.check_revision(doc, revision)
                     selected = set()
                     for attempt in doc.attempts:

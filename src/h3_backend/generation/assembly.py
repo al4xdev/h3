@@ -80,18 +80,26 @@ class AssemblyIntent(BaseModel):
     created_at: str
     mode: Literal["preview", "accepted_sequence"]
     inputs: list[AssemblyInput] = Field(min_length=1, max_length=100)
+    roteiro_id: str | None = None
+    roteiro_revision: int | None = Field(default=None, ge=1)
+    roteiro_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def ordered_chain(self):
         canonical_id(self.id)
         canonical_id(self.end_run_id)
+        editorial = self.roteiro_id is not None
+        if editorial:
+            canonical_id(self.roteiro_id)
+        if editorial != (self.roteiro_revision is not None) or editorial != (self.roteiro_sha256 is not None):
+            raise ValueError("Editorial assembly requires a complete roteiro revision proof")
         previous = None
         signature = None
         seen = set()
         for index, clip in enumerate(self.inputs):
-            if clip.run_id in seen or clip.parent_id != previous:
+            if clip.run_id in seen or not editorial and clip.parent_id != previous:
                 raise ValueError("Assembly intent is not an ordered ancestor chain")
-            if index < len(self.inputs) - 1 and clip.state != "accepted":
+            if (editorial or index < len(self.inputs) - 1) and clip.state != "accepted":
                 raise ValueError("Every assembly ancestor must be accepted")
             current = (clip.width, clip.height, Fraction(clip.fps), clip.codec, clip.pixel_format, clip.has_audio)
             if signature is not None and signature != current:
@@ -124,6 +132,8 @@ class AssemblyState:
     id: str | None = None
     end_run_id: str | None = None
     save_output: bool = False
+    roteiro_id: str | None = None
+    roteiro_revision: int | None = None
 
 
 def _directory(root: Path, assembly_id: str) -> Path:
@@ -314,7 +324,9 @@ def get_assembly(root: Path, assembly_id: str) -> dict:
                     raise ValueError("Assembly video size disagrees with its output proof")
             if not isinstance(output.get("sha256"), str) or len(output["sha256"]) != 64:
                 raise ValueError("Assembly video hash proof is missing")
-        return {**meta.model_dump(), "label": "Montagem de prévia — revisão pendente" if meta.mode == "preview"
+        editorial = ({"roteiro_id": intent.roteiro_id, "roteiro_revision": intent.roteiro_revision,
+                      "roteiro_sha256": intent.roteiro_sha256} if intent.roteiro_id is not None else {})
+        return {**meta.model_dump(), **editorial, "label": "Montagem de prévia — revisão pendente" if meta.mode == "preview"
                 else "Montagem da sequência aceita", "input_ids": [clip.run_id for clip in intent.inputs],
                 "frames": sum(clip.frames for clip in intent.inputs), "fps": intent.inputs[0].fps,
                 "video_url": f"/assemblies/{assembly_id}/video" if output else None, "output": output}
@@ -393,7 +405,14 @@ class AssemblyPipe:
         return self
 
     def from_end(self, end_run_id: str):
-        self._compose(end_run_id=canonical_id(end_run_id))
+        self._compose(end_run_id=canonical_id(end_run_id), roteiro_id=None, roteiro_revision=None)
+        return self
+
+    def from_roteiro(self, roteiro_id: str, expected_revision: int):
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("Editorial assembly requires a positive roteiro revision")
+        self._compose(roteiro_id=canonical_id(roteiro_id), roteiro_revision=expected_revision,
+                      end_run_id=None)
         return self
 
     def save_video(self):
@@ -409,29 +428,40 @@ class AssemblyPipe:
         service, state = self.dispatcher, self.state
         if _directory(service.settings.project_root, state.id).exists():
             raise FileExistsError("Assembly UUID is already reserved; no overwrite or replay")
-        # Cap traversal BEFORE calling the existing read-only sequence method.
-        current, seen = state.end_run_id, set()
-        while current is not None:
-            if current in seen or len(seen) >= 100:
-                raise ValueError("Assembly chain exceeds capacity or contains a cycle")
-            seen.add(current)
-            run = service.store.get(current)
-            if run.state not in ({"ready_for_review", "accepted"} if current == state.end_run_id else {"accepted"}):
-                raise Conflict("End must be ready or accepted; every ancestor must be accepted")
-            current = run.parent_id
-        sequence = service.store.sequence(state.end_run_id)
+        roteiro_sha256 = None
+        if state.roteiro_id is not None:
+            run_ids, roteiro_sha256 = await _thread(
+                self._editorial_snapshot, state.roteiro_id, state.roteiro_revision)
+            end_run_id = run_ids[-1]
+        else:
+            # Cap traversal BEFORE calling the existing read-only sequence method.
+            current, seen = state.end_run_id, set()
+            while current is not None:
+                if current in seen or len(seen) >= 100:
+                    raise ValueError("Assembly chain exceeds capacity or contains a cycle")
+                seen.add(current)
+                run = service.store.get(current)
+                if run.state not in ({"ready_for_review", "accepted"} if current == state.end_run_id else {"accepted"}):
+                    raise Conflict("End must be ready or accepted; every ancestor must be accepted")
+                current = run.parent_id
+            sequence = service.store.sequence(state.end_run_id)
+            run_ids = [block["id"] for block in sequence["blocks"]]
+            end_run_id = state.end_run_id
         inputs = []
-        for block in sequence["blocks"]:
-            run = service.store.get(block["id"])
+        for run_id in run_ids:
+            run = service.store.get(run_id)
             path = service.video_path(run.id)
             size, digest = await _thread(_digest, path)
             details = _timing(await service.media.probe(path))
             inputs.append(AssemblyInput(run_id=run.id, parent_id=run.parent_id,
                                         path=run.output.get("path", service.store.relative_artifact(run.id, "chunk.mp4")),
                                         sha256=digest, bytes=size, state=run.state, **details))
-        intent = AssemblyIntent(id=state.id, end_run_id=state.end_run_id, created_at=timestamp(),
+        intent = AssemblyIntent(id=state.id, end_run_id=end_run_id, created_at=timestamp(),
                                 mode="preview" if inputs[-1].state == "ready_for_review" else "accepted_sequence",
-                                inputs=inputs)
+                                inputs=inputs, roteiro_id=state.roteiro_id,
+                                roteiro_revision=state.roteiro_revision, roteiro_sha256=roteiro_sha256)
+        if state.roteiro_id is not None:
+            await _thread(self._check_editorial, intent)
         with storage_guard(service.settings.project_root):
             directory = _directory(service.settings.project_root, intent.id)
             directory.parent.mkdir(exist_ok=True)
@@ -451,7 +481,30 @@ class AssemblyPipe:
                 _set_state(service.settings.project_root, intent.id, terminal, error=f"{type(exc).__name__}: {exc}"[:2000])
                 raise
 
+    def _editorial_snapshot(self, roteiro_id: str, revision: int) -> tuple[list[str], str]:
+        from ..roteiro import Roteiro
+
+        path = safe_path(self.dispatcher.settings.project_root, f".data/roteiros/{roteiro_id}/plan.json")
+        before = _digest(path)
+        roteiro = Roteiro(self.dispatcher)
+        doc = roteiro.get(roteiro_id)
+        if doc.revision != revision:
+            raise Conflict("Roteiro revision changed before editorial assembly")
+        run_ids = roteiro.selected_run_ids(doc)
+        if not run_ids or len(run_ids) > 50 or len(set(run_ids)) != len(run_ids):
+            raise ValueError("Editorial assembly requires unique selected owned clips")
+        if _digest(path) != before:
+            raise ValueError("Roteiro changed during editorial assembly preparation")
+        return run_ids, before[1]
+
+    def _check_editorial(self, intent: AssemblyIntent):
+        if intent.roteiro_id is not None:
+            actual = self._editorial_snapshot(intent.roteiro_id, intent.roteiro_revision)
+            if actual != ([clip.run_id for clip in intent.inputs], intent.roteiro_sha256):
+                raise ValueError("Editorial selection or roteiro proof changed during assembly")
+
     def _sources(self, intent: AssemblyIntent) -> list[Path]:
+        self._check_editorial(intent)
         sources = []
         for clip in intent.inputs:
             run = self.dispatcher.store.get(clip.run_id)
@@ -462,10 +515,12 @@ class AssemblyPipe:
             if _digest(path) != (clip.bytes, clip.sha256):
                 raise ValueError("Assembly source changed after admission")
             sources.append(path)
+        self._check_editorial(intent)
         return sources
 
     async def arun(self) -> dict:
-        if self._started or not (self.state.id and self.state.end_run_id and self.state.save_output):
+        if self._started or not (self.state.id and (self.state.end_run_id or self.state.roteiro_id)
+                                 and self.state.save_output):
             raise Conflict("Assembly requires one sealed composition and a preknown UUID")
         self._started = True
         root, ident = self.dispatcher.settings.project_root, self.state.id

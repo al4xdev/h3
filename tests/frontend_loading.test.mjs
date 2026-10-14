@@ -94,7 +94,7 @@ function openingFixture() {
   let release, active = null;
   const loadingScreen = {get key() { return active?.key; }, begin(label, detail, options) { active = {...options, label, detail}; return active; }, end(ticket) { if (active === ticket) active = null; }, cancel() { active.onCancel(); active = null; }};
   const handler = source.slice(source.indexOf('  async function openStory('), source.indexOf('  function storyBlocks('));
-  const deps = {state, story, loadingScreen, stopped: false, stories: {read: async id => { reads.push(id); return new Promise(resolve => { release = resolve; }); }}, renderStory() {}, storyURL() {}, navigate: screen => { state.screen = screen; state.navigationEpoch++; navigations.push(screen); }, message: (...args) => messages.push(args)};
+  const deps = {state, story, loadingScreen, stopped: false, stories: {read: async id => { reads.push(id); return new Promise(resolve => { release = resolve; }); }}, renderStory() {}, loadStoryEdits() {}, storyURL() {}, navigate: screen => { state.screen = screen; state.navigationEpoch++; navigations.push(screen); }, message: (...args) => messages.push(args)};
   const open = new Function(...Object.keys(deps), `${handler}; return openStory;`)(...Object.values(deps));
   return {state, story, loadingScreen, reads, navigations, messages, open, reply: doc => release(doc)};
 }

@@ -29,6 +29,10 @@ V2V_CONFIG = WorkflowConfig(
     "v2v", "continuation", ("272", 0), ("272", "274", "276"), 0,
     ("initial_frame", "identity", "motion_video"), 8, 9, 1,
 )
+BRIDGE_CONFIG = WorkflowConfig(
+    "bridge", "bridge", ("bridge:guide", 0), V2V_CONFIG.guide_helpers, 0,
+    ("initial_frame", "identity", "target_frame", "motion_video"), 7, 9, 1,
+)
 
 OutputProfile = Literal["baseline", "final_only"]
 PREVIEW_NODES = ("18", "176", "177")
@@ -108,9 +112,10 @@ class WorkflowBuilder:
             raise ValueError("Workflow output profile must be baseline or final_only")
         self._output_profile = output_profile
         # Constructor aliases are for old callers; production dispatches per build.
-        aliases = {"normal": "i2v", "continuation": "v2v", "i2v": "i2v", "v2v": "v2v"}
+        aliases = {"normal": "i2v", "continuation": "v2v", "i2v": "i2v", "v2v": "v2v",
+                   "bridge": "bridge"}
         if mode not in aliases:
-            raise ValueError("Workflow mode must be normal, continuation, i2v or v2v")
+            raise ValueError("Workflow mode must be normal, continuation, i2v, v2v or bridge")
         self._default_operation = aliases[mode]
         self.mode = self.config_for(self._default_operation).mode
         directory = project_root / "workflows"
@@ -126,7 +131,7 @@ class WorkflowBuilder:
         }
         self.allowed_inputs = manifest["allowed_inputs"]
         self.extra_pnginfo = copy.deepcopy(manifest["extra_pnginfo"])
-        for operation in ("i2v", "v2v"):
+        for operation in ("i2v", "v2v", "bridge"):
             self._verify_links(self.effective_baseline_for(operation), operation)
 
     @staticmethod
@@ -135,7 +140,9 @@ class WorkflowBuilder:
             return I2V_CONFIG
         if operation == "v2v":
             return V2V_CONFIG
-        raise ValueError("Workflow operation must be i2v or v2v")
+        if operation == "bridge":
+            return BRIDGE_CONFIG
+        raise ValueError("Workflow operation must be i2v, v2v or bridge")
 
     def baseline_for(self, operation: str) -> dict[str, Any]:
         config = self.config_for(operation)
@@ -145,6 +152,13 @@ class WorkflowBuilder:
             if node_id not in config.guide_helpers:
                 del graph[node_id]
         graph["125:14"]["inputs"]["conditioning"] = list(config.conditioning)
+        if operation == "bridge":
+            graph["bridge:guide"] = copy.deepcopy(graph["272"])
+            graph["bridge:guide"]["inputs"].update(
+                frame_idx=-1, positive=["272", 0], image=["bridge:resize", 0],
+            )
+            graph["bridge:resize"] = copy.deepcopy(graph["274"])
+            graph["bridge:resize"]["inputs"]["image"] = ["417", 2]
         return graph
 
     @property
@@ -169,11 +183,13 @@ class WorkflowBuilder:
 
     def hash_for(self, operation: str) -> str:
         self.config_for(operation)
+        if operation == "bridge":
+            return self.payload_hash(self.baseline_for(operation))
         # Legacy workflow_hash identifies the raw golden export, not a run payload.
         return self._manifests[operation]["api_sha256"]
 
     def provenance(self, operation: str) -> dict[str, Any]:
-        return {
+        proof = {
             "canonical_template_hash": self.canonical_template_hash,
             "workflow_hash": self.hash_for(operation),
             "operation": operation,
@@ -182,6 +198,12 @@ class WorkflowBuilder:
             "removed_preview_nodes": list(PREVIEW_NODES) if self.output_profile == "final_only" else [],
             "effective_baseline_hash": self.payload_hash(self.effective_baseline_for(operation)),
         }
+        if operation == "bridge":
+            proof["derived_from_operation"] = "v2v"
+            proof["derived_from_workflow_hash"] = self.hash_for("v2v")
+            proof["added_nodes"] = ["bridge:guide", "bridge:resize"]
+            proof["target_guide_frame"] = -1
+        return proof
 
     @staticmethod
     def payload_hash(graph: dict[str, Any]) -> str:
@@ -241,6 +263,24 @@ class WorkflowBuilder:
             ])
         elif any(node in graph for node in ("272", "274", "276")):
             raise ValueError("Initial workflow must not activate first-frame guide")
+        if config.operation == "bridge":
+            for node_id, native in (("bridge:guide", "272"), ("bridge:resize", "274")):
+                if graph.get(node_id, {}).get("class_type") != self._canonical[native]["class_type"]:
+                    raise ValueError(f"Missing native bridge helper {node_id}")
+            links.extend([
+                ("bridge:guide", "frame_idx", -1),
+                ("bridge:guide", "positive", ["272", 0]),
+                ("bridge:guide", "latent", ["520", 0]),
+                ("bridge:guide", "vae", ["171:2", 0]),
+                ("bridge:guide", "audio_vae", ["171:1", 0]),
+                ("bridge:guide", "image", ["bridge:resize", 0]),
+                ("bridge:resize", "width", ["276", 0]),
+                ("bridge:resize", "height", ["276", 1]),
+            ])
+            slot = graph["bridge:resize"]["inputs"].get("image")
+            if (not isinstance(slot, list) or len(slot) != 2 or slot[0] != "417"
+                    or type(slot[1]) is not int or not 2 <= slot[1] <= 8):
+                raise ValueError("Bridge target must use its dedicated native picture slot")
         for node_id, field, expected in links:
             if graph.get(node_id, {}).get("inputs", {}).get(field) != expected:
                 raise ValueError(f"Missing or changed native link {node_id}.{field}")
@@ -291,7 +331,16 @@ class WorkflowBuilder:
             or "%" in filename_prefix
         ):
             raise ValueError("Saver prefix must be a safe relative path under h3_backend/")
-        if config.guide_helpers:
+        if operation == "bridge":
+            if not 4 <= len(references) <= config.max_identities + 3:
+                raise ValueError("Bridge requires initial frame, one to seven identities, target and motion")
+            expected = [("image", "initial_frame")]
+            expected += [("image", "identity")] * (len(references) - 3)
+            expected += [("image", "target_frame"), ("video", "motion_video")]
+            if [(r.get("type"), r.get("role")) for r in references] != expected:
+                raise ValueError("Bridge references must be ordered initial, identity, target, motion")
+            self._verify_continuation_roles(references[:-2] + references[-1:])
+        elif config.guide_helpers:
             self._verify_continuation_roles(references, config)
         elif any(
             ref.get("role") is not None and (
@@ -311,6 +360,8 @@ class WorkflowBuilder:
         graph["16"]["inputs"]["seed"] = seed
         graph["22:23"]["inputs"]["value"] = duration_seconds
         graph["416"]["inputs"]["media_state"] = json.dumps(entries)
+        if operation == "bridge":
+            graph["bridge:resize"]["inputs"]["image"] = ["417", pictures - 1]
         graph["34"]["inputs"]["filename_prefix"] = filename_prefix
         if self.output_profile == "baseline":
             graph["18"]["inputs"]["filename_prefix"] = str(prefix.with_name("preview"))
@@ -333,14 +384,22 @@ class WorkflowBuilder:
             if node["inputs"].keys() != original["inputs"].keys():
                 raise ValueError(f"Unexpected input change: {node_id}")
             allowed = self.allowed_inputs.get(node_id, [])
+            if operation == "bridge" and node_id == "bridge:resize":
+                allowed = ["image"]
             for field, value in original["inputs"].items():
                 if field not in allowed and node["inputs"][field] != value:
                     raise ValueError(f"Frozen input changed: {node_id}.{field}")
         self._verify_links(graph, operation)
+        if operation == "bridge":
+            entries = json.loads(graph["416"]["inputs"]["media_state"])
+            pictures = sum(entry.get("kind") == "picture" for entry in entries)
+            if graph["bridge:resize"]["inputs"]["image"] != ["417", pictures - 1]:
+                raise ValueError("Bridge target guide must anchor the last native picture slot")
 
     def validate_object_info(
         self, object_info: dict[str, Any], operation: str | None = None,
     ) -> None:
+        operation = self._default_operation if operation is None else operation
         baseline = self.effective_baseline_for(
             self._default_operation if operation is None else operation,
         )
@@ -372,3 +431,11 @@ class WorkflowBuilder:
             choices = schema[0]
             if isinstance(choices, list) and node["inputs"][field] not in choices:
                 raise ValueError(f"Unavailable workflow option: {node_id}.{field}")
+        if operation == "bridge":
+            frame_schema = object_info["MiniMaxH3AddGuide"].get("input", {}).get("required", {}).get(
+                "frame_idx", [],
+            )
+            if (len(frame_schema) < 2 or not isinstance(frame_schema[1], dict)
+                    or frame_schema[1].get("min", 0) > -1
+                    or frame_schema[1].get("max", -2) < 0):
+                raise ValueError("Installed MiniMax H3 guide must support first and last frame indices")

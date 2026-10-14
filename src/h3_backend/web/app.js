@@ -196,8 +196,8 @@ export function referencePreviewURL(reference) {
 export function draftSettingsAllowed({screen, originScreen = screen, statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain}) {
   return ['context', 'proposal', 'generation', 'continuation'].includes(originScreen) && ![statusOnly, submitted, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain].some(Boolean);
 }
-export function nativeExecutionBlocked({config, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted, pendingRun, mode, parent, batchUncertain, batchRecord, conversionUncertain, conversionBusy, batchDiscoveryUncertain, globalBatchRecord, stopBusy, stopUncertain}) {
-  return !config || [stopBusy, stopUncertain, batchDiscoveryUncertain, globalBatchRecord?.state === 'active', batchUncertain, batchRecord?.state === 'active', conversionUncertain, conversionBusy, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted].some(Boolean) || ['queued', 'running'].includes(pendingRun?.state) || (mode === 'continue' && parent?.state !== 'accepted');
+export function nativeExecutionBlocked({config, editPending, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted, pendingRun, mode, parent, batchUncertain, batchRecord, conversionUncertain, conversionBusy, batchDiscoveryUncertain, globalBatchRecord, stopBusy, stopUncertain}) {
+  return !config || [editPending, stopBusy, stopUncertain, batchDiscoveryUncertain, globalBatchRecord?.state === 'active', batchUncertain, batchRecord?.state === 'active', conversionUncertain, conversionBusy, statusOnly, busy, uncertain, uploadBusy, uploadUncertain, assemblyBusy, assemblyUncertain, retryPreparing, submitted].some(Boolean) || ['queued', 'running'].includes(pendingRun?.state) || (mode === 'continue' && parent?.state !== 'accepted');
 }
 export function editorPayload({system_prompt, model = ''}) {
   if (typeof system_prompt !== 'string' || !system_prompt.trim() || system_prompt.length > 100000 || typeof model !== 'string' || model.length > 256 || (model && !model.trim())) throw new Error('Configuração Grok inválida: system prompt até 100000 caracteres e ID do modelo até 256.');
@@ -328,8 +328,8 @@ export function tailEnd(doc) {
   if (!doc?.adopted || !doc.blocks?.length || doc.blocks.length >= 50 || !Array.isArray(doc.attempts)) return null;
   let parent = null;
   for (const block of doc.blocks) {
-    const latest = storyBlockState(doc, block).latest, run = latest?.run;
-    if (!run || run.state !== 'accepted' || run.id !== latest.run_id || ![`.data/runs/${run.id}/chunk.mp4`, `runs/${run.id}/chunk.mp4`].includes(run.output?.path) || run.parent_id !== parent) return null;
+    const info = storyBlockState(doc, block), latest = doc.selected_runs ? info.selected : info.latest, run = latest?.run;
+    if (!run || run.state !== 'accepted' || run.id !== latest.run_id || ![`.data/runs/${run.id}/chunk.mp4`, `runs/${run.id}/chunk.mp4`].includes(run.output?.path) || !doc.selected_runs && run.parent_id !== parent) return null;
     try { canonicalUUID(run.id); const ref = ownedIdentity(run); if (ref.source_root !== doc.reference.source_root || ref.path !== doc.reference.path || ref.sha256 !== doc.reference_sha256) return null; } catch { return null; }
     parent = run.id;
   }
@@ -400,7 +400,48 @@ export async function readOwnedStoryIntent(client, doc, block, intent, owner) {
 }
 export function storyBlockState(doc, block) {
   const attempts = doc.attempts.filter(item => item.block_id === block.id);
-  return {attempts, accepted: attempts.findLast(item => item.run?.state === 'accepted' && item.run?.output?.path), latest: attempts.at(-1), frozen: attempts.length > 0};
+  const selection = doc.selected_runs?.[block.id], selected = selection ? attempts.find(item => item.run_id === selection) : attempts.at(-1);
+  const accepted = selection ? selected?.run?.state === 'accepted' && selected.run.output?.path ? selected : undefined : attempts.findLast(item => item.run?.state === 'accepted' && item.run?.output?.path);
+  return {attempts, selected, accepted, latest: attempts.at(-1), frozen: attempts.length > 0};
+}
+export function storyEditContext(doc, blockId, mode) {
+  if (!['replace', 'insert_before', 'insert_after'].includes(mode)) throw new Error('Escolha como editar o vídeo.');
+  const index = doc?.blocks?.findIndex(block => block.id === blockId);
+  if (!doc?.adopted || index === undefined || index < 0) throw new Error('Abra um bloco de um roteiro salvo.');
+  const previousIndex = mode === 'insert_after' ? index : index - 1, nextIndex = mode === 'insert_before' ? index : index + 1;
+  if (previousIndex < 0) throw new Error('Esta edição precisa de um vídeo anterior aceito. A abertura não possui essa âncora.');
+  if (nextIndex >= doc.blocks.length) throw new Error('Esta edição precisa de um vídeo seguinte aceito. Use Continuar roteiro · Tail para acrescentar ao fim.');
+  const own = position => {
+    const attempt = storyBlockState(doc, doc.blocks[position]).selected, run = attempt?.run;
+    if (!run || run.state !== 'accepted' || run.id !== attempt.run_id || ![`.data/runs/${run.id}/chunk.mp4`, `runs/${run.id}/chunk.mp4`].includes(run.output?.path)) throw new Error(`Aceite e selecione a versão do bloco ${position + 1} para usá-la como âncora.`);
+    canonicalUUID(run.id); const identity = ownedIdentity(run);
+    if (identity.source_root !== doc.reference.source_root || identity.path !== doc.reference.path || identity.sha256 !== doc.reference_sha256) throw new Error('A identidade original das âncoras não corresponde ao roteiro.');
+    return {...run, prompt: sceneText(run.prompt)};
+  };
+  return {previous: own(previousIndex), next: own(nextIndex), reference: referenceValue(doc.reference)};
+}
+export function selectedStoryRuns(doc) {
+  if (!doc?.adopted || !doc.blocks?.length) return null;
+  const runs = doc.blocks.map(block => storyBlockState(doc, block).selected?.run);
+  if (runs.some(run => !run || run.state !== 'accepted' || ![`.data/runs/${run.id}/chunk.mp4`, `runs/${run.id}/chunk.mp4`].includes(run.output?.path))) return null;
+  return runs.map(run => canonicalUUID(run.id));
+}
+export function storyAssemblyMatches(record, owner) {
+  return Boolean(record && owner && record.roteiro_id === owner.id && record.roteiro_revision === owner.revision && typeof record.roteiro_sha256 === 'string' && /^[a-f0-9]{64}$/.test(record.roteiro_sha256) && JSON.stringify(record.input_ids) === JSON.stringify(owner.run_ids));
+}
+export function storyEditPointer(href) {
+  const params = new URL(href).searchParams;
+  if (!params.has('edit')) return null;
+  for (const key of ['edit', 'roteiro']) if (params.getAll(key).length !== 1) throw new Error('Ponteiro de edição inválido.');
+  return {id: canonicalUUID(params.get('edit')), roteiro: canonicalUUID(params.get('roteiro'))};
+}
+export function verifiedStoryEdit(value, owner) {
+  if (!value || value.id !== owner.id || value.roteiro_id !== owner.roteiro || !Number.isSafeInteger(value.source_revision) || value.source_revision < 1 || !['replace', 'insert_before', 'insert_after'].includes(value.mode) || !['improving', 'proposed', 'generating', 'applied', 'discarded', 'uncertain', 'failed'].includes(value.state)) throw new Error('O registro da edição não corresponde ao pedido. Consulte o mesmo ID.');
+  for (const id of [value.block_id, value.previous_run_id, value.next_run_id]) canonicalUUID(id);
+  if (value.run_id) canonicalUUID(value.run_id);
+  if (value.run && (value.run.id !== value.run_id || !STATE_LABELS[value.run.state])) throw new Error('O vídeo recebido não corresponde à edição.');
+  if (value.prompt !== null) sceneText(value.prompt);
+  return value;
 }
 // A refused admission has no native Run to copy. Validate its durable snapshot
 // against the exact owner and current history before offering a fresh draft.
@@ -462,7 +503,18 @@ export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
   const tailPath = (id, tail) => `${path(id)}/tail/${canonicalUUID(tail)}`;
   const batchPath = (id, batch) => `${path(id)}/batches/${canonicalUUID(batch)}`;
   const attemptPath = (id, block, intent) => `${path(id)}/blocks/${canonicalUUID(block)}/attempts/${canonicalUUID(intent)}`;
+  const editPath = (id, edit) => `${path(id)}/edits/${canonicalUUID(edit)}`;
+  const once = (key, operation) => { if (used.has(key)) throw new Error('Ação já enviada; consulte o mesmo ID.'); used.add(key); return operation(); };
   return {list: () => request('/roteiros'), read: id => request(path(id)), create: body => request('/roteiros', 'POST', body), save: (id, body) => request(path(id), 'PUT', body), remove: (id, revision) => request(path(id), 'DELETE', {expected_revision: revision}), proposal: (id, body) => request(`${path(id)}/proposal`, 'POST', body), editor: () => request('/roteiros/editor'), saveEditor: system_prompt => request('/roteiros/editor', 'PUT', {system_prompt}), readIntent: (id, block, intent) => request(attemptPath(id, block, intent)),
+    editEditor: () => request('/roteiro-edits/editor'), saveEditEditor: system_prompt => request('/roteiro-edits/editor', 'PUT', {system_prompt}),
+    edits: id => request(`${path(id)}/edits`), readEdit: (id, edit) => request(editPath(id, edit)),
+    proposeEdit: (id, edit, body) => once(editPath(id, edit), () => request(editPath(id, edit), 'POST', body)),
+    generateEdit: (id, edit, prompt) => once(`${editPath(id, edit)}/generate`, () => request(`${editPath(id, edit)}/generate`, 'POST', {prompt})),
+    applyEdit: (id, edit, revision) => once(`${editPath(id, edit)}/apply:${revision}`, () => request(`${editPath(id, edit)}/apply`, 'POST', {expected_revision: revision})),
+    discardEdit: (id, edit) => once(`${editPath(id, edit)}/discard`, () => request(`${editPath(id, edit)}/discard`, 'POST', {})),
+    retryEdit: (id, oldEdit, newEdit, revision) => once(`${editPath(id, oldEdit)}/retry/${canonicalUUID(newEdit)}`, () => request(`${editPath(id, oldEdit)}/retry/${newEdit}`, 'POST', {expected_revision: revision})),
+    selectVersion: (id, block, run, revision) => request(`${path(id)}/blocks/${canonicalUUID(block)}/versions/${canonicalUUID(run)}`, 'POST', {expected_revision: revision}),
+    assembleStory: (id, assembly, revision) => once(`${path(id)}/assemblies/${canonicalUUID(assembly)}`, () => request(`${path(id)}/assemblies/${assembly}`, 'POST', {expected_revision: revision})),
     async convertFreestyle(end, id) { const key = `/roteiros/from-freestyle/${canonicalUUID(end)}`; canonicalUUID(id); if (used.has(`${key}:${id}`)) throw new Error('Conversão já enviada; consulte o mesmo roteiro.'); used.add(`${key}:${id}`); return request(key, 'POST', {roteiro_id: id}, 201); },
     readTail: (id, tail) => request(tailPath(id, tail)),
     adoptTail: (id, tail, body) => request(tailPath(id, tail), 'PUT', body),
@@ -978,7 +1030,10 @@ export function startUI(document, client = createClient(), stories = createStory
   try { state.batchOwner = batchPointer(document.defaultView?.location?.href || 'http://local/'); state.batchUncertain = Boolean(state.batchOwner); } catch (error) { state.batchUncertain = true; message('notice', error.message, true); }
   try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('conversion_roteiro') || params.has('conversion_end')) { if (params.getAll('conversion_roteiro').length !== 1 || params.getAll('conversion_end').length !== 1) throw new Error('Ponteiro de conversão inválido.'); state.conversionId = canonicalUUID(params.get('conversion_roteiro')); state.conversionEnd = canonicalUUID(params.get('conversion_end')); state.conversionUncertain = true; } } catch (error) { state.conversionUncertain = true; message('notice', error.message, true); }
   try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('stop_id')) { if (params.getAll('stop_id').length !== 1 || params.getAll('stop_kind').length !== 1 || !['run', 'batch'].includes(params.get('stop_kind'))) throw new Error('Ponteiro de parada inválido.'); state.stopOwner = {kind: params.get('stop_kind'), id: canonicalUUID(params.get('stop_id'))}; if (state.stopOwner.kind === 'batch') { if (params.getAll('stop_roteiro').length !== 1) throw new Error('Roteiro da parada não confirmado.'); state.stopOwner.roteiro = canonicalUUID(params.get('stop_roteiro')); } submittedStops.add(`${state.stopOwner.kind}:${state.stopOwner.id}`); state.stopUncertain = true; } } catch (error) { state.stopUncertain = true; message('notice', error.message, true); }
-  const TITLES = {story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
+  const edit = {key: null, serial: 0, drafts: new Map(), lists: new Map(), busy: false, editor: null, saving: false, reading: false};
+  let editRecovery = null; try { editRecovery = storyEditPointer(document.defaultView?.location?.href || 'http://local/'); } catch (error) { message('notice', error.message, true); }
+  state.editRecoveryUncertain = Boolean(editRecovery);
+  const TITLES = {'story-edit': 'Editar vídeo', story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
   const historyViews = new Map(); let historySerial = 0, historyToken = 0;
   function text(id, value) { const node = $(id); node.textContent = value; motion.changed(id, String(value ?? ''), [node]); }
   function message(id, value, error = false) { text(id, value); $(id).classList.toggle('error', error); }
@@ -1047,6 +1102,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-intent-read').hidden = !ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner);
     $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
     if (state.screen === 'story') renderStory();
+    if (state.screen === 'story-edit') renderStoryEdit();
     text('screen-eyebrow', 'Estúdio local');
     $('back').disabled = state.trail.length === 0;
     $('settings-open').disabled = state.screen === 'settings';
@@ -1055,6 +1111,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('create-form').hidden = state.statusOnly; $('generation-status').hidden = !state.statusOnly;
     if (state.screen !== 'review') $('player').pause();
     if (state.screen !== 'assembly') $('assembly-player').pause();
+    if (state.screen !== 'story-edit') $('edit-player').pause();
     if (state.screen === 'review') renderRun();
     if (state.screen === 'assembly') renderAssembly();
     const visualSlot = $(state.screen === 'generation' && !state.statusOnly ? 'generation-visual-slot' : 'context-visual-slot');
@@ -1067,7 +1124,7 @@ export function startUI(document, client = createClient(), stories = createStory
     }
   }
   function viewSnapshot() {
-    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, selectedRun: state.selected, sequence: state.sequence, branchSequence: state.branchSequence, branchEnd: state.openedBranchEnd || null, disclosures: disclosureState(document, state.screen), selections: selectionState(document, state.screen), media: mediaState(document, state.screen), scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
+    return {screen: state.screen, editKey: edit.key, storyAssembly: state.storyAssembly, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, selectedRun: state.selected, sequence: state.sequence, branchSequence: state.branchSequence, branchEnd: state.openedBranchEnd || null, disclosures: disclosureState(document, state.screen), selections: selectionState(document, state.screen), media: mediaState(document, state.screen), scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
   }
   function recordView(snapshot = viewSnapshot(), push = false) {
     const view = document.defaultView;
@@ -1075,6 +1132,9 @@ export function startUI(document, client = createClient(), stories = createStory
     if (push) historyToken = ++historySerial;
     historyViews.set(historyToken, {snapshot, trail: [...state.trail]});
     const url = new URL(state.assemblyId ? assemblyLocation(view.location.href, state.assemblyId) : view.location.href, view.location.href); url.searchParams.set('screen', state.screen);
+    url.searchParams.delete('edit');
+    if (editRecovery) { url.searchParams.set('edit', editRecovery.id); url.searchParams.set('roteiro', editRecovery.roteiro); }
+    if (state.screen === 'story-edit' || state.screen === 'settings' && state.settingsOrigin?.screen === 'story-edit') { const draft = edit.drafts.get(edit.key); if (draft?.owner) { url.searchParams.set('edit', draft.owner.id); url.searchParams.set('roteiro', draft.owner.roteiro); } }
     view.history[push ? 'pushState' : 'replaceState']({...view.history.state, h3View: historyToken}, '', `${url.pathname}${url.search}${url.hash}`);
   }
   function navigate(screen, {remember = true, focus = true, direction = 1, origin = null} = {}) {
@@ -1098,6 +1158,8 @@ export function startUI(document, client = createClient(), stories = createStory
     if (removedRuns.has(snapshot.selectedId)) snapshot = {...snapshot, selectedId: null, branchEnd: null};
     const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
     story.doc = snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
+    edit.key = snapshot.editKey || null;
+    state.storyAssembly = snapshot.storyAssembly || null;
     if (snapshot.selectedRun?.id === snapshot.selectedId) Object.assign(state, {selected: snapshot.selectedRun, sequence: snapshot.sequence, branchSequence: snapshot.branchSequence, openedBranchEnd: snapshot.branchEnd});
     else if (snapshot.selectedId && (snapshot.selectedId !== state.selected?.id || snapshot.branchEnd !== state.openedBranchEnd) && !state.busy) await select(snapshot.selectedId, undefined, {branchEnd: snapshot.branchEnd});
     if (epoch !== state.navigationEpoch || stopped) return;
@@ -1304,7 +1366,7 @@ export function startUI(document, client = createClient(), stories = createStory
     catch (error) { message('conversion-status', `Conversão ${id} não confirmada: ${error.message}. Consulte o mesmo roteiro; não repita.`, true); }
     finally { state.conversionBusy = false; controls(); }
   }
-  function batchBlocked() { return story.tailUncertain || state.stopBusy || state.stopUncertain || state.batchDiscoveryUncertain || state.globalBatchRecord?.state === 'active' || state.batchUncertain || state.batchRecord?.state === 'active'; }
+  function batchBlocked() { return state.editPending || story.tailUncertain || state.stopBusy || state.stopUncertain || state.batchDiscoveryUncertain || state.globalBatchRecord?.state === 'active' || state.batchUncertain || state.batchRecord?.state === 'active'; }
   async function discoverBatch() {
     const epoch = ++state.batchDiscoveryEpoch;
     try {
@@ -1364,6 +1426,7 @@ export function startUI(document, client = createClient(), stories = createStory
     return !state.config || state.busy || state.uploadBusy || state.assemblyBusy || state.retryPreparing;
   }
   function controls() {
+    state.editPending = state.editRecoveryUncertain || edit.busy || [...edit.drafts.values()].some(draft => draft.uncertain || ['queued', 'running'].includes(draft.record?.run?.state) || draft.record?.state === 'generating' && !draft.record.run);
     const run = state.selected;
     // Reviewing a committed preview permits a new accepted revision, never an automatic replay.
     const reviewedPreview = state.assembly?.id === state.assemblyId && state.assembly?.state === 'completed' && state.assemblyMode === 'preview' && run?.state === 'accepted';
@@ -1380,7 +1443,8 @@ export function startUI(document, client = createClient(), stories = createStory
     $('conversion-read').hidden = !state.conversionId; $('conversion-read').disabled = state.conversionBusy;
     $('convert-story').hidden = Boolean(story.runIDs.has(state.selected?.id));
     $('convert-story').disabled = retryBlocked() || state.conversionBusy || state.conversionUncertain || !state.openedBranchEnd || !state.branchSequence;
-    $('assemble').disabled = batchBlocked() || state.conversionBusy || state.conversionUncertain || !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyUncertain || state.busy || !canAssemble(run, state.sequence) || (state.assemblyLocked && state.assemblyEnd === run?.id && !reviewedPreview);
+    const storyAssemblyReady = state.storyAssembly && story.doc?.id === state.storyAssembly.id && story.doc.revision === state.storyAssembly.revision && JSON.stringify(selectedStoryRuns(story.doc)) === JSON.stringify(state.storyAssembly.run_ids);
+    $('assemble').disabled = batchBlocked() || state.conversionBusy || state.conversionUncertain || !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyUncertain || state.busy || !(state.storyAssembly ? storyAssemblyReady : canAssemble(run, state.sequence)) || (state.assemblyLocked && state.assemblyEnd === run?.id && !reviewedPreview);
     $('assembly-refresh').disabled = !state.config?.assembly_enabled || state.assemblyBusy || state.assemblyReading || (!state.assemblyId && !state.assembly);
     text('assemble', state.assemblyBusy ? 'Montando no PC…' : 'Montar sequência');
     $('accept').disabled = $('reject').disabled = batchBlocked() || state.conversionBusy || state.conversionUncertain || state.busy || state.assemblyBusy || state.uncertain || run?.state !== 'ready_for_review';
@@ -1437,7 +1501,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('grok-context', `No seu clique, Grok receberá: ${contextLabel()}${state.mode === 'continue' ? ' + último frame do mesmo pai aceito (pose e roupa atuais)' : ''}. Saída somente texto.`);
     text('generation-context', `${contextLabel()} · 480 × 864 · parâmetros nativos preservados.`);
     text('continuation-parent', `Pai aceito: ${state.parent?.id || '—'} · ${contextLabel()}`);
-    text('assembly-chain', (state.sequence?.blocks || []).map((block, index) => `${index + 1}. ${block.id.slice(0, 8)} · ${label(block)}`).join(' → ') || 'Nenhuma sequência selecionada.');
+    text('assembly-chain', state.storyAssembly ? `Roteiro ${story.doc?.name || state.storyAssembly.id} · ${state.storyAssembly.run_ids.map(id => id.slice(0, 8)).join(' → ')}` : (state.sequence?.blocks || []).map((block, index) => `${index + 1}. ${block.id.slice(0, 8)} · ${label(block)}`).join(' → ') || 'Nenhuma sequência selecionada.');
     $('open-assembly').disabled = state.busy || !state.config?.assembly_enabled || !state.selected;
     $('continue-idea').disabled = state.parent?.state !== 'accepted';
     $('use-idea').disabled = $('grok-use').disabled = $('use-late-proposal').disabled = state.busy || state.uploadBusy;
@@ -1456,6 +1520,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('pending-notice-dismiss').disabled = state.noticeReading || state.busy || state.stopBusy || state.stopUncertain;
     for (const id of ['batch-dismiss', 'batch-library-dismiss']) { $(id).hidden = !resolvedBatch; $(id).disabled = state.batchReading || state.stopBusy || state.stopUncertain; }
     syncStopViews();
+    editControls();
     $('nav-status').hidden = !showRunNotice;
     text('nav-status', state.noticeReading ? 'Consultando o mesmo pedido…' : state.uncertain ? 'Consultar pedido com resultado incerto · não reenviar' : state.noticeResult ? `${state.noticeResult.label} · ${state.noticeResult.id.slice(0, 8)}` : `Pedido no PC · ${state.pendingRun?.id?.slice(0, 8) || 'aguardando ID'}`);
     text('status-state', state.pendingRun ? label(state.pendingRun) : state.noticeResult?.label || (state.uncertain ? 'Admissão incerta' : 'Sem pedido'));
@@ -1602,7 +1667,7 @@ export function startUI(document, client = createClient(), stories = createStory
     if (loadingScreen.key === `story:${id}`) return false;
     const ticket = loadingScreen.begin('Carregando roteiro…', 'Lendo os blocos e o histórico salvos no PC.', {key: `story:${id}`, onCancel: () => { ++state.navigationEpoch; }});
     const navigation = state.navigationEpoch;
-    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); if (navigation !== state.navigationEpoch || stopped) return false; story.doc = doc; story.creating = false; story.candidate = null; story.block = null; if (story.tailWrappers?.has(id)) story.candidate = story.tailWrappers.get(id); storyURL(); renderStory(); navigate('story'); return true; }
+    try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('ID de roteiro diferente.'); if (navigation !== state.navigationEpoch || stopped) return false; story.doc = doc; story.creating = false; story.candidate = null; story.block = null; if (story.tailWrappers?.has(id)) story.candidate = story.tailWrappers.get(id); storyURL(); renderStory(); navigate('story'); void loadStoryEdits(id); return true; }
     catch (error) { if (navigation === state.navigationEpoch && !stopped) message('notice', `Não foi possível abrir o roteiro: ${error.message}`, true); return false; }
     finally { loadingScreen.end(ticket); }
   }
@@ -1689,6 +1754,168 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-add').disabled ||= story.candidate?.kind === 'tail' && storyBlocks().length >= 50;
   }
   function storyBlocks() { return story.candidate?.blocks || story.doc?.blocks || []; }
+  const editDraft = () => edit.drafts.get(edit.key);
+  function editFence() {
+    return !state.config || batchBlocked() || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.conversionBusy || state.conversionUncertain || state.grokBusy || state.grokUncertain || story.busy || Boolean(story.candidate || story.editing);
+  }
+  function openStoryEdit(block, record = null) {
+    if (!story.doc) return;
+    const key = record ? `edit:${record.id}` : `edit:${story.doc.id}:${block}`;
+    if (!edit.drafts.has(key)) {
+      const original = story.doc.blocks.find(item => item.id === block);
+      if (!original) return;
+      edit.drafts.set(key, {block, mode: record?.mode || 'replace', idea: record?.idea || '', duration: String(record?.duration_seconds ?? original.duration_seconds), seed: String(record?.seed ?? original.seed), prompt: record?.prompt || '', owner: record ? {id: record.id, roteiro: record.roteiro_id} : null, record, uncertain: record?.state === 'uncertain', generated: Boolean(record?.run_id), message: ''});
+    }
+    edit.key = key; story.creating = false; navigate('story-edit');
+  }
+  async function loadStoryEdits(id) {
+    if (!stories.edits) return;
+    try {
+      const result = await stories.edits(id); if (!Array.isArray(result.items)) throw new Error('Lista de edições inválida.');
+      edit.lists.set(id, result.items.map(item => verifiedStoryEdit(item, {id: item.id, roteiro: id})));
+      if (state.screen === 'story' && story.doc?.id === id) renderStory();
+    } catch (error) { message('story-status', `Edições indisponíveis: ${error.message}. Releia o roteiro para consultar.`, true); }
+  }
+  async function recoverStoryEdit() {
+    if (!editRecovery || edit.reading || edit.busy) return;
+    const owner = editRecovery; edit.reading = true;
+    try { const record = verifiedStoryEdit(await stories.readEdit(owner.roteiro, owner.id), owner); if (story.doc?.id !== owner.roteiro) throw new Error('Abra o roteiro desta edição antes de consultar.'); editRecovery = null; state.editRecoveryUncertain = false; openStoryEdit(record.block_id, record); }
+    catch (error) { message('story-status', `Edição ${owner.id} não confirmada: ${error.message}. Releia o mesmo ID; nenhum pedido foi repetido.`, true); }
+    finally { edit.reading = false; controls(); }
+  }
+  function renderStoryEdit() {
+    const draft = editDraft(); if (!draft || !story.doc) return;
+    const record = draft.record, run = record?.run, submitted = Boolean(draft.owner);
+    text('edit-source', `${story.doc.name} · bloco ${story.doc.blocks.findIndex(block => block.id === draft.block) + 1} · ${{replace: 'nova versão', insert_before: 'inserir antes', insert_after: 'inserir depois'}[draft.mode]} · revisão ${record?.source_revision ?? story.doc.revision}`);
+    for (const [id, value] of [['edit-mode', draft.mode], ['video-edit-idea', draft.idea], ['edit-duration', draft.duration], ['edit-seed', draft.seed], ['edit-prompt', draft.prompt]]) if ($(id).value !== value) $(id).value = value;
+    for (const id of ['edit-mode', 'video-edit-idea', 'edit-duration', 'edit-seed']) $(id).disabled = submitted || edit.busy;
+    let context = null, reason = '';
+    try { context = storyEditContext(story.doc, draft.block, draft.mode); } catch (error) { reason = error.message; }
+    $('edit-anchors').hidden = $('edit-history-context').hidden = !context;
+    message('edit-boundary', reason, Boolean(reason));
+    if (context) {
+      const images = [['edit-identity', referencePreviewURL(context.reference)], ['edit-previous', `/roteiro-edits/anchors/${context.previous.id}/last`], ['edit-next', `/roteiro-edits/anchors/${context.next.id}/first`]];
+      for (const [id, url] of images) {
+        const image = $(id);
+        image.onload = () => { if (image.getAttribute('src') !== url) return; image.dataset.ready = 'true'; if (state.screen === 'story-edit') editControls(); };
+        image.onerror = () => { if (image.getAttribute('src') !== url) return; image.dataset.ready = 'false'; if (state.screen === 'story-edit') message('edit-boundary', 'Um contexto visual não pôde ser exibido. Consulte a mesma edição ou releia o roteiro antes de propor.', true); };
+        if (image.getAttribute('src') !== url) { image.dataset.ready = 'false'; image.src = url; }
+      }
+      text('edit-previous-prompt', record?.previous_prompt || context.previous.prompt); text('edit-next-prompt', record?.next_prompt || context.next.prompt);
+    }
+    try { const seconds = parseDuration(draft.duration, state.capabilities), frames = alignedFrames(seconds); message('edit-duration-preview', `${seconds} s solicitados → ${frames} frames → ${secondsLabel(frames / 24)} s a 24 fps`); } catch (error) { message('edit-duration-preview', error.message, true); }
+    $('edit-context-form').hidden = Boolean(record && (record.prompt || record.run_id || record.state === 'applied'));
+    $('edit-proposal-panel').hidden = !record?.prompt || Boolean(record.run_id || draft.generated || ['applied', 'discarded'].includes(record.state));
+    $('edit-review-panel').hidden = !record?.run_id;
+    $('edit-read').hidden = !draft.owner;
+    text('edit-owner', draft.owner ? `Edição ${draft.owner.id}` : '');
+    if (run) {
+      text('edit-run-state', label(run)); text('edit-sent-prompt', run.prompt || draft.prompt);
+      const video = $('edit-player'), url = PLAYABLE.has(run.state) && [`.data/runs/${run.id}/chunk.mp4`, `runs/${run.id}/chunk.mp4`].includes(run.output?.path) ? `/runs/${canonicalUUID(run.id)}/video` : null;
+      video.hidden = !url;
+      if (url && video.getAttribute('src') !== url) { video.src = url; video.load(); }
+      if (!url && video.getAttribute('src')) { video.pause(); video.removeAttribute('src'); video.load(); }
+    } else if (record?.run_id) { text('edit-run-state', 'Consultando estado do vídeo'); text('edit-sent-prompt', draft.prompt); $('edit-player').hidden = true; }
+    $('edit-decisions').hidden = run?.state !== 'ready_for_review';
+    $('edit-apply').hidden = run?.state !== 'accepted' || record?.state === 'applied';
+    $('edit-apply').hidden ||= record?.state === 'discarded';
+    $('edit-discard').hidden = !record || ['applied', 'discarded'].includes(record.state);
+    $('edit-new').hidden = !['applied', 'discarded'].includes(record?.state);
+    $('edit-retry').hidden = !(['rejected', 'interrupted', 'failed'].includes(run?.state) || record?.state === 'failed' && !record.run_id);
+    const status = draft.message || (draft.uncertain ? 'Resultado incerto. Consulte a mesma edição; nenhuma ação será reenviada.' : record?.state === 'discarded' ? 'Edição descartada. O vídeo, a decisão e o registro permanecem preservados.' : record?.state === 'applied' ? 'Edição aplicada. As versões anteriores e os vídeos seguintes foram preservados.' : run?.state === 'accepted' ? 'Vídeo aceito. Usar esta edição no roteiro é uma ação separada.' : run?.state === 'ready_for_review' ? 'Confira o vídeo e aceite ou rejeite esta tentativa. A edição ainda não altera o roteiro.' : ['rejected', 'interrupted', 'failed'].includes(run?.state) ? `${label(run)}. O roteiro e esta tentativa foram preservados.${run.error ? ` ${run.error}` : ''}` : record?.state === 'generating' ? 'Vídeo em andamento no PC. Voltar não cancela nem aplica a edição.' : record?.state === 'proposed' ? 'Proposta pronta. Edite e gere somente quando decidir.' : record?.error || 'Descreva a alteração. Grok propõe texto; gerar e aplicar são ações separadas.');
+    message('edit-status', status, draft.uncertain || Boolean(record?.error));
+    editControls();
+  }
+  function editControls() {
+    const draft = editDraft(), record = draft?.record, fence = editFence() || edit.busy || edit.reading;
+    let context = false; try { context = Boolean(draft && storyEditContext(story.doc, draft.block, draft.mode)); } catch { /* The context explanation remains visible. */ }
+    const visuals = ['edit-identity', 'edit-previous', 'edit-next'].every(id => $(id).dataset.ready === 'true');
+    const configSaved = savedEditorMatches(edit.editor, {system_prompt: $('edit-system').value, model: $('edit-model').value}, edit.saving);
+    $('edit-propose').disabled = fence || Boolean(draft?.owner) || !context || !visuals || !configSaved;
+    $('edit-context-read').disabled = edit.busy || edit.reading || Boolean(draft?.owner);
+    $('edit-propose').dataset.blockReason = fence ? 'Outra solicitação está ativa ou tem resultado incerto. Consulte o pedido existente antes de propor.' : draft?.owner ? 'Esta edição já tem um pedido. Consulte o mesmo ID; não repita a proposta.' : !context ? $('edit-boundary').textContent : !visuals ? 'Os três contextos visuais precisam estar disponíveis antes de propor. Releia o roteiro para consultar novamente.' : !configSaved ? 'Abra Ajustes e salve o prompt próprio da edição antes de propor.' : '';
+    $('edit-generate').disabled = fence || draft?.uncertain || draft?.generated || record?.state !== 'proposed' || Boolean(record?.run_id) || record?.source_revision !== story.doc?.revision;
+    $('edit-generate').dataset.blockReason = record?.source_revision !== story.doc?.revision ? 'O roteiro mudou depois da proposta. Descarte esta edição e prepare outra com as âncoras atuais.' : 'A geração já foi enviada ou tem resultado incerto. Consulte a mesma edição antes de continuar.';
+    $('edit-prompt').disabled = edit.busy || draft?.uncertain || Boolean(record?.run_id || draft?.generated);
+    $('edit-read').disabled = edit.busy || edit.reading;
+    $('edit-accept').disabled = $('edit-reject').disabled = fence || draft?.uncertain || record?.run?.state !== 'ready_for_review';
+    $('edit-apply').disabled = fence || draft?.uncertain || record?.run?.state !== 'accepted' || record?.source_revision !== story.doc?.revision;
+    $('edit-apply').dataset.blockReason = record?.source_revision !== story.doc?.revision ? 'O roteiro mudou. Esta edição preservada não pode alterar outra revisão.' : 'Aceite o vídeo desta edição e confirme seu estado antes de aplicá-lo.';
+    $('edit-discard').disabled = edit.busy || edit.reading || draft?.uncertain || !record || !(['proposed', 'failed'].includes(record.state) || ['accepted', 'rejected', 'interrupted', 'failed'].includes(record.run?.state));
+    $('edit-new').disabled = fence || draft?.uncertain;
+    $('edit-retry').disabled = fence || draft?.uncertain || !(['rejected', 'interrupted', 'failed'].includes(record?.run?.state) || record?.state === 'failed' && !record.run_id);
+    $('edit-editor-save').disabled = !edit.editor || edit.saving;
+    if (!configSaved && !draft?.owner && state.screen === 'story-edit') message('edit-status', 'Abra Ajustes e salve as instruções próprias da edição antes de propor.');
+  }
+  async function readStoryEdit(draft = editDraft()) {
+    if (!draft?.owner || edit.busy || edit.reading) return;
+    edit.reading = true; editControls();
+    try {
+      const owner = draft.owner, record = verifiedStoryEdit(await stories.readEdit(owner.roteiro, owner.id), owner);
+      draft.record = record; draft.uncertain = ['uncertain', 'improving'].includes(record.state); draft.generated ||= Boolean(record.run_id); draft.message = '';
+      if (!draft.prompt && record.prompt) draft.prompt = record.prompt;
+      if (record.state === 'applied' && story.doc?.id === owner.roteiro) { const doc = await stories.read(owner.roteiro); if (story.doc?.id === owner.roteiro) story.doc = doc; }
+    } catch (error) { draft.uncertain = true; draft.message = `Consulta não confirmou o resultado: ${error.message}. Mantenha o mesmo ID.`; }
+    finally { edit.reading = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function proposeStoryEdit() {
+    const draft = editDraft(); if (!draft || $('edit-propose').disabled || draft.owner) return;
+    let body; try { storyEditContext(story.doc, draft.block, draft.mode); body = {expected_revision: story.doc.revision, mode: draft.mode, block_id: draft.block, idea: sceneText(draft.idea), seed: parseSeed(draft.seed), duration_seconds: parseDuration(draft.duration, state.capabilities)}; } catch (error) { draft.message = error.message; renderStoryEdit(); return; }
+    draft.owner = {id: newAssemblyUUID(document.defaultView.crypto), roteiro: story.doc.id}; draft.uncertain = true; edit.busy = true; recordView(); renderStoryEdit();
+    try { const record = verifiedStoryEdit(await grokWaiting.track('edit-status', () => stories.proposeEdit(draft.owner.roteiro, draft.owner.id, body)), draft.owner); draft.record = record; draft.prompt = record.prompt || ''; draft.uncertain = ['uncertain', 'improving'].includes(record.state); draft.message = ''; }
+    catch (error) { draft.message = `Proposta não confirmada: ${error.message}. Consulte a mesma edição antes de continuar.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function generateStoryEdit() {
+    const draft = editDraft(); if (!draft?.owner || $('edit-generate').disabled || draft.generated) return;
+    let prompt; try { prompt = sceneText(draft.prompt); } catch (error) { draft.message = error.message; renderStoryEdit(); return; }
+    draft.generated = true; draft.uncertain = true; edit.busy = true; renderStoryEdit();
+    try { draft.record = verifiedStoryEdit(await stories.generateEdit(draft.owner.roteiro, draft.owner.id, prompt), draft.owner); draft.uncertain = draft.record.state === 'uncertain'; draft.message = ''; }
+    catch (error) { draft.message = `Geração não confirmada: ${error.message}. Consulte a mesma edição; não gere novamente.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function decideStoryEdit(action) {
+    const draft = editDraft(); if (!draft?.record?.run || $('edit-accept').disabled) return;
+    const id = draft.record.run_id; draft.uncertain = true; edit.busy = true; editControls();
+    try { const run = await client.decide(id, action); if (run.id !== id || run.state !== (action === 'accept' ? 'accepted' : 'rejected')) throw new Error('Decisão não confirmada.'); draft.record = {...draft.record, run}; draft.uncertain = false; draft.message = action === 'accept' ? 'Vídeo aceito. Usar esta edição no roteiro é uma ação separada.' : 'Vídeo rejeitado. O roteiro e a tentativa foram preservados.'; }
+    catch (error) { draft.message = `Decisão não confirmada: ${error.message}. Consulte a mesma edição antes de agir.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function applyStoryEdit() {
+    const draft = editDraft(); if (!draft?.owner || $('edit-apply').disabled) return;
+    edit.busy = true; draft.uncertain = true; editControls();
+    try {
+      const result = await stories.applyEdit(draft.owner.roteiro, draft.owner.id, draft.record.source_revision);
+      draft.record = verifiedStoryEdit(await stories.readEdit(draft.owner.roteiro, draft.owner.id), draft.owner);
+      if (draft.record.state !== 'applied') throw new Error('Aplicação não confirmada.');
+      const doc = result.doc || result; if (doc.id !== draft.owner.roteiro) throw new Error('Roteiro diferente.');
+      if (story.doc?.id === doc.id) story.doc = doc; draft.uncertain = false; draft.message = ''; await loadStoryEdits(doc.id);
+    } catch (error) { draft.message = `Aplicação não confirmada: ${error.message}. Consulte a mesma edição; as versões permanecem preservadas.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function selectStoryVersion(block, run) {
+    if (editFence() || edit.busy || run.state !== 'accepted') return;
+    const id = story.doc.id, revision = story.doc.revision; edit.busy = true;
+    try { const result = await stories.selectVersion(id, block, run.id, revision), doc = result.doc || result; if (doc.id !== id || doc.selected_runs?.[block] !== run.id) throw new Error('Versão selecionada não confirmada.'); if (story.doc?.id === id) story.doc = doc; message('story-status', 'Versão selecionada. As demais versões e os pais históricos foram preservados.'); }
+    catch (error) { message('story-status', `Seleção não confirmada: ${error.message}. Releia o roteiro antes de alterar outra versão.`, true); }
+    finally { edit.busy = false; if (state.screen === 'story' && story.doc?.id === id) renderStory(); controls(); }
+  }
+  async function discardStoryEdit() {
+    const draft = editDraft(); if (!draft?.owner || $('edit-discard').disabled || !document.defaultView.confirm('Descartar esta edição sem aplicá-la? O vídeo e seu registro permanecem preservados.')) return;
+    edit.busy = true; draft.uncertain = true; editControls();
+    try { draft.record = verifiedStoryEdit(await stories.discardEdit(draft.owner.roteiro, draft.owner.id), draft.owner); if (draft.record.state !== 'discarded') throw new Error('Descarte não confirmado.'); draft.uncertain = false; draft.message = ''; await loadStoryEdits(draft.owner.roteiro); }
+    catch (error) { draft.message = `Descarte não confirmado: ${error.message}. Consulte a mesma edição antes de continuar.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
+  async function retryStoryEdit() {
+    const original = editDraft(); if (!original?.owner || $('edit-retry').disabled) return;
+    const owner = {id: newAssemblyUUID(document.defaultView.crypto), roteiro: original.owner.roteiro};
+    const draft = {...original, owner, record: null, prompt: original.record.run?.prompt || original.prompt, uncertain: true, generated: false, message: 'Preparando outra tentativa com o prompt enviado. Sem nova consulta ao Grok.'};
+    edit.key = `edit:${owner.id}`; edit.drafts.set(edit.key, draft); edit.busy = true; recordView(); renderStoryEdit();
+    try { draft.record = verifiedStoryEdit(await stories.retryEdit(owner.roteiro, original.owner.id, owner.id, story.doc.revision), owner); draft.prompt = draft.record.prompt; draft.uncertain = draft.record.state === 'uncertain'; draft.message = 'Outra tentativa preparada com a instrução efetivamente enviada. Gerar é uma ação separada.'; }
+    catch (error) { draft.message = `Preparação não confirmada: ${error.message}. Consulte a mesma edição; nenhum pedido será repetido.`; }
+    finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
+  }
   function renderStory() {
     if (!story.doc) return;
     if (story.tailDrafts && story.tailFormID !== story.doc.id) {
@@ -1701,6 +1928,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('story-summary', `${story.candidate ? 'Proposta · ' : ''}${accepted} de ${blocks.length} blocos aceitos · ${blocks.reduce((sum, block) => sum + block.duration_seconds, 0)} s planejados`);
     text('story-idea-copy', story.doc.idea); text('story-reference-copy', `${story.doc.reference.source_root} / ${story.doc.reference.path}`);
     $('story-blocks').replaceChildren();
+    if (editRecovery?.roteiro === story.doc.id) { const pending = element('li', 'pending-card'); pending.append(element('p', 'operation', `Edição ${editRecovery.id} com resultado ainda não confirmado.`)); const read = element('button', '', 'Reler mesma edição'); read.type = 'button'; read.addEventListener('click', recoverStoryEdit); pending.append(read); $('story-blocks').append(pending); }
     for (const [index, block] of blocks.entries()) {
       const info = storyBlockState(story.doc, block), li = element('li', 'story-block'); li.dataset.blockId = block.id;
       const previous = index ? storyBlockState(story.doc, blocks[index - 1]).accepted : true;
@@ -1733,7 +1961,18 @@ export function startUI(document, client = createClient(), stories = createStory
           button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
         } li.append(organize);
       }
-      if (info.attempts.length) { const history = element('details'); history.append(element('summary', '', 'Ver tentativas')); for (const attempt of info.attempts) { const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); history.append(button); } li.append(history); }
+      if (info.attempts.length) {
+        const history = element('details'); history.append(element('summary', '', 'Ver versões e tentativas'));
+        for (const attempt of info.attempts) {
+          const row = element('div', 'story-version'), selected = info.selected?.run_id === attempt.run_id;
+          const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); row.append(button);
+          if (attempt.run?.state === 'accepted') { const choose = element('button', '', selected ? 'Versão selecionada' : 'Usar esta versão'); choose.type = 'button'; choose.disabled = selected || editFence() || edit.busy; choose.setAttribute('aria-pressed', String(selected)); choose.addEventListener('click', () => selectStoryVersion(block.id, attempt.run)); row.append(choose); }
+          history.append(row);
+        }
+        li.append(history);
+      }
+      if (info.accepted && !story.candidate) { const editing = element('button', '', 'Editar vídeo'); editing.type = 'button'; editing.addEventListener('click', () => openStoryEdit(block.id)); li.append(editing); }
+      for (const record of edit.lists.get(story.doc.id) || []) if (record.block_id === block.id) { const pending = element('button', '', `Abrir edição · ${record.state} · ${record.id.slice(0, 8)}`); pending.type = 'button'; pending.addEventListener('click', () => { openStoryEdit(block.id, record); void readStoryEdit(); }); li.append(pending); }
       $('story-blocks').append(li);
     }
     text('story-adopt', story.candidate?.kind === 'tail' ? 'Usar esta continuação' : 'Usar este roteiro');
@@ -1785,7 +2024,11 @@ export function startUI(document, client = createClient(), stories = createStory
   }
   async function storyNext() {
     const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted);
-    if (!next) { const last = storyBlockState(story.doc, story.doc.blocks.at(-1)).accepted, navigation = state.navigationEpoch; await select(last.run.id, last.run); if (navigation === state.navigationEpoch && state.selected?.id === last.run.id) navigate('assembly'); return; }
+    if (!next) {
+      const run_ids = selectedStoryRuns(story.doc); if (!run_ids) { message('story-status', 'Selecione uma versão aceita em cada bloco antes de montar.', true); return; }
+      const owner = {id: story.doc.id, revision: story.doc.revision, run_ids}, last = storyBlockState(story.doc, story.doc.blocks.at(-1)).selected, navigation = state.navigationEpoch;
+      await select(last.run.id, last.run); if (navigation === state.navigationEpoch && state.selected?.id === last.run.id) { state.storyAssembly = owner; state.assembly = null; state.assemblyLocked = false; navigate('assembly'); } return;
+    }
     const latest = storyBlockState(story.doc, next).latest;
     if (latest) { await openStoryAttempt(latest); if (['rejected', 'interrupted'].includes(latest.run?.state)) await prepareRetry(); } else await prepareStoryBlock(next);
   }
@@ -1832,6 +2075,7 @@ export function startUI(document, client = createClient(), stories = createStory
     state.assemblyMode = record.mode;
     state.assemblyUncertain = record.state === 'running';
     state.assemblyLocked = true;
+    if (record.roteiro_id) state.storyAssembly = {id: canonicalUUID(record.roteiro_id), revision: record.roteiro_revision, run_ids: record.input_ids.map(canonicalUUID)};
   }
   function renderAssembly() {
     const record = state.assembly?.end_run_id === state.selected?.id ? state.assembly : null;
@@ -1845,7 +2089,8 @@ export function startUI(document, client = createClient(), stories = createStory
     else if (!url) { player.pause(); player.removeAttribute('src'); }
     $('assembly-download').hidden = !url;
     if (url) $('assembly-download').href = url; else $('assembly-download').removeAttribute('href');
-    if (!state.assemblyBusy) text('assembly-hint', canAssemble(state.selected, state.sequence) ? state.selected.state === 'ready_for_review' ? 'A prévia mantém o último bloco pendente de revisão. Montar não aceita o bloco.' : 'Montagem dos blocos aceitos, na ordem da cadeia.' : 'Selecione um bloco pronto ou aceito, com todos os pais aceitos e vídeos publicados.');
+    if (!state.assemblyBusy) text('assembly-hint', state.storyAssembly ? `Montagem de ${state.storyAssembly.run_ids.length} versões aceitas, na ordem salva do roteiro. Os pais históricos permanecem intactos.` : canAssemble(state.selected, state.sequence) ? state.selected.state === 'ready_for_review' ? 'A prévia mantém o último bloco pendente de revisão. Montar não aceita o bloco.' : 'Montagem dos blocos aceitos, na ordem da cadeia.' : 'Selecione um bloco pronto ou aceito, com todos os pais aceitos e vídeos publicados.');
+    if (state.storyAssembly) text('assembly-chain', `Roteiro ${story.doc?.name || state.storyAssembly.id} · ${state.storyAssembly.run_ids.map(id => id.slice(0, 8)).join(' → ')}`);
     controls();
   }
   async function loadAssemblies() {
@@ -1857,7 +2102,7 @@ export function startUI(document, client = createClient(), stories = createStory
       const result = await client.get(`/assemblies?end_run_id=${encodeURIComponent(end)}&limit=50&offset=0`);
       if (epoch !== assemblyEpoch || end !== state.selected?.id || stopped) return;
       if (!Array.isArray(result.items)) throw new Error('Catálogo de montagens inválido.');
-      const records = result.items.map(item => assemblyRecord(item));
+      const records = result.items.map(item => assemblyRecord(item)).filter(item => state.storyAssembly ? storyAssemblyMatches(item, state.storyAssembly) : !item.roteiro_id);
       if (records.some(item => item.end_run_id !== end)) throw new Error('Catálogo retornou outra sequência.');
       state.assembly = records.find(item => item.id === state.assemblyId) || records.find(item => assemblyURL(item, end)) || records[0] || null;
       if (state.assembly) rememberAssembly(state.assembly);
@@ -1876,6 +2121,7 @@ export function startUI(document, client = createClient(), stories = createStory
       const record = assemblyRecord(await client.get(`/assemblies/${canonicalUUID(id)}`), id);
       if (stopped || navigation !== state.navigationEpoch) return;
       if (record.state === 'completed' && !assemblyURL(record, record.end_run_id)) throw new Error('Montagem declarada concluída sem prova completa de publicação do arquivo próprio.');
+      if (state.storyAssembly && !storyAssemblyMatches(record, state.storyAssembly)) throw new Error('A montagem não corresponde às versões selecionadas desta revisão do roteiro.');
       rememberAssembly(record);
       if (restoreSelection && selectionEpoch === state.epoch && state.selected?.id !== record.end_run_id) await select(record.end_run_id, undefined, {loading: false});
       if (navigation !== state.navigationEpoch || stopped) return;
@@ -1891,8 +2137,9 @@ export function startUI(document, client = createClient(), stories = createStory
     } finally { state.assemblyReading = false; controls(); loadingScreen.end(ticket); }
   }
   async function assemble() {
-    if (state.screen !== 'assembly' || $('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !canAssemble(state.selected, state.sequence)) return;
+    if (state.screen !== 'assembly' || $('assemble').disabled || state.assemblyBusy || state.assemblyUncertain || !state.config?.assembly_enabled || !state.storyAssembly && !canAssemble(state.selected, state.sequence)) return;
     const end = state.selected.id;
+    const roteiro = state.storyAssembly ? {...state.storyAssembly} : null;
     let id;
     try {
       id = newAssemblyUUID(document.defaultView.crypto);
@@ -1902,7 +2149,8 @@ export function startUI(document, client = createClient(), stories = createStory
     state.assemblyId = id; state.assemblyEnd = end; state.assemblyMode = state.selected.state === 'accepted' ? 'accepted_sequence' : 'preview'; state.assemblyBusy = true; state.assemblyLocked = true; ++assemblyEpoch; controls();
     message('assembly-status', `Montando no PC · ID ${id}. A resposta só confirma quando o arquivo estiver publicado.`);
     try {
-      const record = await client.assemble(id, end);
+      const record = roteiro ? assemblyRecord(await stories.assembleStory(roteiro.id, id, roteiro.revision), id) : await client.assemble(id, end);
+      if (roteiro && !storyAssemblyMatches(record, roteiro)) throw new Error('A montagem não confirma a revisão e a ordem selecionadas do roteiro. Consulte o mesmo ID.');
       if (stopped) return;
       rememberAssembly(record);
       if (state.selected?.id === end) { state.assembly = record; $('assembly-result').open = true; renderAssembly(); }
@@ -2223,6 +2471,7 @@ export function startUI(document, client = createClient(), stories = createStory
     if (story.doc !== before || navigation !== state.navigationEpoch || story.busy || story.editing || story.candidate || $('story-name').value !== before.name) return;
     if (doc.id !== before.id) throw new Error('ID de roteiro diferente.');
     story.doc = doc; if (state.screen === 'story') renderStory();
+    if (state.screen === 'story-edit') renderStoryEdit();
   }
   async function refresh(fromEvent = false) {
     if (!fromEvent && (refreshActive || state.busy || state.assemblyBusy || state.uploadBusy)) { dirty = true; return; }
@@ -2240,6 +2489,8 @@ export function startUI(document, client = createClient(), stories = createStory
       if (story.tailOwner) await readTail();
       await reconcilePendingNotice();
       await refreshCurrentStory();
+      if (story.doc) await loadStoryEdits(story.doc.id);
+      if (editDraft()?.owner) await readStoryEdit();
       if (!state.busy && selectionEpoch === state.epoch) {
         if (state.selected) await select(state.selected.id, undefined, {preserveBranch: true, loading: false});
       }
@@ -2349,7 +2600,7 @@ export function startUI(document, client = createClient(), stories = createStory
   $('edit-idea').addEventListener('click', () => navigate('context'));
   $('generation-edit').addEventListener('click', () => navigate('context'));
   $('continue-idea').addEventListener('click', () => { if (state.parent?.state === 'accepted') navigate('context'); });
-  $('open-assembly').addEventListener('click', () => navigate('assembly'));
+  $('open-assembly').addEventListener('click', () => { state.storyAssembly = null; navigate('assembly'); });
   $('convert-story').addEventListener('click', convertFreestyle);
   $('conversion-read').addEventListener('click', readConversion);
   $('assemble').addEventListener('click', assemble);
@@ -2404,6 +2655,19 @@ export function startUI(document, client = createClient(), stories = createStory
   $('story-discard').addEventListener('click', () => { const target = story.pendingEdit; story.pendingEdit = null; if (target === 'home') { story.editing = null; $('story-unsaved').hidden = true; goHome(); return; } if (target === 'back') { story.editing = null; $('story-unsaved').hidden = true; back(); return; } story.editing = target; story.editDraft = target ? {...storyBlocks().find(block => block.id === target)} : null; $('story-unsaved').hidden = true; renderStory(); });
   $('story-keep-editing').addEventListener('click', () => { story.pendingEdit = null; $('story-unsaved').hidden = true; });
   $('story-editor-save').addEventListener('click', async () => { try { await stories.saveEditor($('story-system').value); message('story-editor-status', 'Instruções do roteirista salvas no PC.'); } catch (error) { message('story-editor-status', error.message, true); } });
+  for (const [id, field] of [['edit-mode', 'mode'], ['video-edit-idea', 'idea'], ['edit-duration', 'duration'], ['edit-seed', 'seed'], ['edit-prompt', 'prompt']]) $(id).addEventListener(id === 'edit-mode' ? 'change' : 'input', () => { const draft = editDraft(); if (!draft) return; draft[field] = $(id).value; if (id !== 'edit-prompt' && id !== 'video-edit-idea') renderStoryEdit(); });
+  $('edit-propose').addEventListener('click', proposeStoryEdit);
+  $('edit-generate').addEventListener('click', generateStoryEdit);
+  $('edit-read').addEventListener('click', () => readStoryEdit());
+  $('edit-context-read').addEventListener('click', async () => { const draft = editDraft(), id = story.doc?.id; if (!draft || !id || $('edit-context-read').disabled) return; edit.reading = true; editControls(); try { const doc = await stories.read(id); if (doc.id !== id) throw new Error('Roteiro recebido não corresponde à origem.'); if (story.doc?.id === id) story.doc = doc; for (const name of ['edit-identity', 'edit-previous', 'edit-next']) { $(name).removeAttribute('src'); $(name).dataset.ready = 'false'; } draft.message = ''; } catch (error) { draft.message = `Contexto indisponível: ${error.message}. Sua alteração foi mantida.`; } finally { edit.reading = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); } });
+  $('edit-accept').addEventListener('click', () => decideStoryEdit('accept'));
+  $('edit-reject').addEventListener('click', () => decideStoryEdit('reject'));
+  $('edit-apply').addEventListener('click', applyStoryEdit);
+  $('edit-discard').addEventListener('click', discardStoryEdit);
+  $('edit-retry').addEventListener('click', retryStoryEdit);
+  $('edit-new').addEventListener('click', () => { const draft = editDraft(); if (!draft || $('edit-new').disabled || !['applied', 'discarded'].includes(draft.record?.state)) return; const key = `edit:${story.doc.id}:${draft.block}:draft:${++edit.serial}`; edit.drafts.set(key, {...draft, owner: null, record: null, uncertain: false, generated: false, prompt: '', message: ''}); edit.key = key; renderStoryEdit(); recordView(); });
+  $('edit-system').addEventListener('input', editControls);
+  $('edit-editor-save').addEventListener('click', async () => { if (!edit.editor || edit.saving) return; edit.saving = true; editControls(); try { const config = await stories.saveEditEditor($('edit-system').value); if (config.system_prompt !== $('edit-system').value || config.model !== edit.editor.model) throw new Error('Configuração salva não confirmada.'); edit.editor = config; message('edit-editor-status', 'Prompt de edição salvo no PC.'); } catch (error) { message('edit-editor-status', error.message, true); } finally { edit.saving = false; editControls(); } });
   for (const figure of document.querySelectorAll('.visual-card')) { const button = element('button', '', 'Ampliar imagem'); button.type = 'button'; button.addEventListener('click', () => { const expanded = figure.classList.toggle('expanded'); button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Reduzir imagem' : 'Ampliar imagem'; }); figure.append(button); }
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
@@ -2427,8 +2691,12 @@ export function startUI(document, client = createClient(), stories = createStory
     storyLibrary(),
     discoverBatch(),
     state.config?.roteiro_enabled === false ? Promise.resolve() : stories.editor().then(config => { $('story-system').value = config.system_prompt; $('story-model').value = config.model; $('story-system').disabled = $('story-editor-save').disabled = false; }).catch(error => message('story-editor-status', `Roteirista indisponível: ${error.message}. O editor de blocos continua separado.`, true)),
+    state.config?.roteiro_enabled === false || !stories.editEditor ? Promise.resolve() : stories.editEditor().then(config => { editorPayload(config); edit.editor = config; $('edit-system').value = config.system_prompt; $('edit-model').value = config.model; $('edit-system').disabled = $('edit-editor-save').disabled = false; }).catch(error => message('edit-editor-status', `Editor de vídeo indisponível: ${error.message}`, true)),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
-    if (storyRecovery?.roteiro) {
+    if (editRecovery) {
+      const opened = await openStory(editRecovery.roteiro);
+      if (opened) { await recoverStoryEdit(); if (editDraft()?.owner) await readStoryEdit(); }
+    } else if (storyRecovery?.roteiro) {
       const opened = await openStory(storyRecovery.roteiro);
       if (opened) { story.block = storyRecovery.block; story.intent = storyRecovery.intent; }
       if (storyRecovery.intent) {

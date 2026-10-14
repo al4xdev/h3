@@ -1,7 +1,9 @@
 # Interpolação de sequência — geração entre duas âncoras
 
-Estado: backlog. Registrado por pedido do dono em 2026-10-13, fora do harness.
-Prioridade atual: concluir Tail antes de implementar este modo.
+Estado: promovido para implementação em `.plan/task/edicao-entre-ancoras.md` por
+autorização posterior do dono. Primeira entrega: um vídeo por edição, inserção
+entre vizinhos ou nova versão de um bloco, com interface e Grok próprios.
+Inserção de N blocos em lote permanece evolução futura.
 
 ## Objetivo
 

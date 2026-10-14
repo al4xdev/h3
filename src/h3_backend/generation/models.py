@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
@@ -87,6 +88,17 @@ class ContinueRequest(BaseModel):
     )
     reference_tail_seconds: Literal[2, 3] = 3
     include_audio: bool = True
+
+
+class BridgeRequest(ContinueRequest):
+    target_run_id: str = Field(min_length=36, max_length=36, strict=True)
+
+    @field_validator("target_run_id")
+    @classmethod
+    def canonical_target(cls, value: str) -> str:
+        if str(UUID(value)) != value:
+            raise ValueError("Target run ID must be a canonical UUID")
+        return value
 
 
 class Run(BaseModel):

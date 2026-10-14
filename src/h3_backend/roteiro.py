@@ -189,7 +189,8 @@ class Intent(StrictDTO):
     block_id: str
     source_revision: StrictInt = Field(ge=1)
     snapshot: Snapshot
-    origin: Literal["native", "freestyle"] = "native"
+    origin: Literal["native", "freestyle", "bridge"] = "native"
+    target_run_id: str | None = None
     source: ImportedSource | None = None
     admission: Literal["uncertain", "admitted", "rejected"] = "uncertain"
     error: str | None = Field(default=None, max_length=256)
@@ -202,6 +203,10 @@ class Intent(StrictDTO):
             raise ValueError("Imported attempt requires explicit source evidence")
         if self.intent_id != self.run_id:
             raise ValueError("Intent and native Run IDs must be identical")
+        if (self.origin == "bridge") != (self.target_run_id is not None):
+            raise ValueError("Bridge intent requires its target anchor")
+        if self.target_run_id is not None:
+            canonical(self.target_run_id)
         return self
 
 
@@ -210,6 +215,7 @@ class Document(PlanFields):
     revision: StrictInt = Field(ge=1)
     reference_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     attempts: list[Intent] = Field(default_factory=list)
+    selected_runs: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def integrity(self):
@@ -223,6 +229,9 @@ class Document(PlanFields):
                     or attempt.snapshot.reference_sha256 != self.reference_sha256):
                 raise ValueError("Roteiro intent ownership or snapshot is corrupt")
             ids.add(attempt.intent_id)
+        for key, ident in self.selected_runs.items():
+            if key not in keys or not any(a.block_id == key and a.run_id == ident for a in self.attempts):
+                raise ValueError("Selected version must belong to its planned block")
         return self
 
 
@@ -435,10 +444,12 @@ class Roteiro:
                 write_file(directory, "plan.json", doc.model_dump(), exclusive=True)
         return self.view(doc)
 
-    def check_revision(self, doc: Document, expected: int):
+    def check_revision(self, doc: Document, expected: int, *, edit_id: str | None = None):
         from .roteiro_batch import assert_batch_available
+        from .roteiro_edit import assert_edit_available
 
         assert_batch_available(self.service)
+        assert_edit_available(self.service, doc.id, exclude=edit_id)
         if self.removed(doc.id):
             raise Conflict("Roteiro removed from library; history is read-only")
         if doc.revision != expected:
@@ -466,7 +477,8 @@ class Roteiro:
                     raise Conflict("Submitted prefix is immutable; edit only future unsent blocks")
             updated = Document(**payload.model_dump(exclude={"expected_revision"}),
                                id=doc.id, revision=doc.revision + 1,
-                               reference_sha256=digest, attempts=doc.attempts)
+                               reference_sha256=digest, attempts=doc.attempts,
+                               selected_runs=doc.selected_runs)
             write_file(directory, "plan.json", updated.model_dump())
         return self.view(updated)
 
@@ -559,11 +571,11 @@ class Roteiro:
             attempts = [a for a in doc.attempts if a.block_id == block.id]
             if not attempts:
                 raise Conflict("Finish every existing planned block before extending the tail")
-            attempt = attempts[-1]
+            attempt = self.selected_attempt(doc, block.id)
             observed = self.observed(attempt)
             if observed["state"] != "accepted" or observed["run"] is None:
                 raise Conflict("Every latest block attempt must be accepted and proven")
-            if attempt.snapshot.parent_id != parent_id:
+            if not doc.selected_runs and attempt.snapshot.parent_id != parent_id:
                 raise Conflict("Accepted blocks do not form the exact current sequence")
             self.parent(doc, index + 1, attempt.run_id)
             parent_id = attempt.run_id
@@ -639,7 +651,11 @@ class Roteiro:
                     "accepted parent. Future frames are unknown. Preserve the existing prefix. "
                     "Do not claim exact timing or guaranteed artistic continuity.",
             "original_idea": doc.idea, "name": doc.name,
-            "accepted_prefix": [b.model_dump(exclude={"seed"}) for b in doc.blocks],
+            "accepted_prefix": [
+                {"id": b.id, "editorial_intention": b.action, "run_id": attempt.run_id,
+                 "prompt": attempt.snapshot.prompt, "duration_seconds": attempt.snapshot.duration_seconds}
+                for b in doc.blocks if (attempt := self.selected_attempt(doc, b.id)) is not None
+            ],
             "tail_idea": payload.idea, "count": payload.count,
             "duration_seconds": payload.duration_seconds,
         }, ensure_ascii=False)
@@ -781,23 +797,51 @@ class Roteiro:
 
     def prove(self, intent: Intent, run):
         snap = intent.snapshot
+        operation = "bridge" if intent.origin == "bridge" else "v2v" if snap.parent_id else "i2v"
         identities = [r for r in run.references if r.get("role") == "identity"]
         if (run.id != intent.run_id or run.prompt != snap.prompt or run.seed != snap.seed
                 or run.duration_seconds != snap.duration_seconds or run.parent_id != snap.parent_id
                 or len(identities) != 1 or identities[0].get("source_root") != snap.reference.source_root
                 or identities[0].get("source") != snap.reference.path
                 or identities[0].get("sha256") != snap.reference_sha256
-                or run.workflow_hash != self.service.builder.hash_for(
-                    "v2v" if snap.parent_id else "i2v")):
+                or run.workflow_hash != self.service.builder.hash_for(operation)):
             raise ValueError("Native input does not prove this owned intent snapshot")
         # Hydration validates canonical continuation options and provenance without executing.
-        if snap.parent_id:
+        if intent.origin == "bridge":
+            from .generation.bridge import BridgePipe
+            BridgePipe.from_run(self.service, run)
+            if run.input_info.get("continuation", {}).get("target_run_id") != intent.target_run_id:
+                raise ValueError("Bridge destination disagrees with owned intent")
+        elif snap.parent_id:
             V2VPipe.from_run(self.service, run)
-            doc = self.get(intent.roteiro_id)
-            index = next(i for i, b in enumerate(doc.blocks) if b.id == intent.block_id)
-            self.parent(doc, index, snap.parent_id)
         else:
             I2VPipe.from_run(self.service, run)
+        if snap.parent_id:
+            doc = self.get(intent.roteiro_id)
+            earlier = doc.attempts[:next(i for i, a in enumerate(doc.attempts)
+                                       if a.intent_id == intent.intent_id)]
+            parent = next((a for a in earlier if a.run_id == snap.parent_id), None)
+            if parent is None or self.observed(parent)["state"] != "accepted":
+                raise ValueError("Historical generation parent is not a proven accepted attempt")
+            published_parent = self.service.store.get(parent.run_id)
+            self.service.video_path(parent.run_id)
+            if published_parent.decision is None or published_parent.decision.get("accepted") is not True:
+                raise ValueError("Historical generation parent has no accepted decision")
+
+    def selected_attempt(self, doc: Document, block_id: str) -> Intent | None:
+        attempts = [a for a in doc.attempts if a.block_id == block_id]
+        selected = doc.selected_runs.get(block_id)
+        return next((a for a in attempts if a.run_id == selected), None) if selected else (
+            attempts[-1] if attempts else None)
+
+    def selected_run_ids(self, doc: Document) -> list[str]:
+        result = []
+        for block in doc.blocks:
+            attempt = self.selected_attempt(doc, block.id)
+            if attempt is None or self.observed(attempt)["state"] != "accepted":
+                raise Conflict("Accept a selected version of every block before assembling")
+            result.append(attempt.run_id)
+        return result
 
     def view(self, doc: Document) -> dict:
         return {**doc.model_dump(), "attempts": [self.observed(a) for a in doc.attempts]}
@@ -810,6 +854,8 @@ class Roteiro:
         if selected is None:
             raise Conflict("Continuation requires its exact accepted predecessor")
         previous = doc.blocks[index - 1]
+        if previous.id in doc.selected_runs and doc.selected_runs[previous.id] != selected:
+            raise Conflict("Parent must be the selected accepted predecessor version")
         prior = next((a for a in doc.attempts
                       if a.block_id == previous.id and a.run_id == selected), None)
         if prior is None:

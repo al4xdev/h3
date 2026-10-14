@@ -72,6 +72,23 @@ SCRIPT_OUTPUT_TOKENS = 20_000
 FIXED_EDITOR_MODEL = "grok-4.20-0309-non-reasoning"
 
 
+class EditPromptRequest(PromptRequest):
+    target_run_id: str = Field(strict=True, max_length=36)
+
+    @field_validator("target_run_id")
+    @classmethod
+    def canonical_target(cls, value: str) -> str:
+        return _uuid(value)
+
+    @model_validator(mode="after")
+    def editing_requires_distinct_anchors(self):
+        if self.reference is None or self.continuation_parent_id is None:
+            raise ValueError("Editing requires identity and both accepted video anchors")
+        if self.target_run_id == self.continuation_parent_id:
+            raise ValueError("Editing anchors must be distinct accepted videos")
+        return self
+
+
 class EditorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     system_prompt: str = Field(min_length=1, max_length=100_000, strict=True)
@@ -294,12 +311,23 @@ class Grok:
                             self.root, payload.continuation_parent_id, payload.reference))
                         if await _thread(snapshot_digest, snapshot) != digest:
                             raise ValueError("Frozen identity disagrees with parent")
+                        images = [(snapshot, mime), (frame, "image/png")]
+                        if isinstance(payload, EditPromptRequest):
+                            target, target_recheck, target_digest = await stack.enter_async_context(
+                                continuation_frame(self.root, payload.target_run_id,
+                                                   payload.reference, edge="first"))
+                            if target_digest != digest:
+                                raise ValueError("Editing anchors disagree on original identity")
+                            images.append((target, "image/png"))
+                            await _thread(target_recheck)
                         await _thread(recheck)
+                        if isinstance(payload, EditPromptRequest):
+                            await _thread(target_recheck)
                     except (ValueError, OSError, TimeoutError, KeyError, TypeError):
                         raise OAuthError("invalid_continuation", "Parent is unaccepted, changed, "
                                          "unsafe or unsupported, or identity does not match.", 400) from None
                     body, length = images_json_body(model, payload.system_prompt, payload.prompt,
-                                                    [(snapshot, mime), (frame, "image/png")],
+                                                    images,
                                                     output_text=output_text,
                                                     max_output_tokens=output_tokens)
                 else:

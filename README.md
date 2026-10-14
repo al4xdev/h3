@@ -12,7 +12,7 @@ Na raiz do projeto, com FFmpeg/ffprobe e o ComfyUI já disponíveis:
 
 ```fish
 uv sync
-env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
+env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010 --timeout-graceful-shutdown 5
 ```
 
 Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, na porta8888:
@@ -21,13 +21,16 @@ Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável*
 ./start.sh
 ```
 
-O script inicia a ponte em `0.0.0.0:8888`, sem instalar dependências automaticamente; execute `uv sync` na preparação inicial. Também funciona quando chamado pelo caminho absoluto fora da raiz do projeto. No PC, abra `http://127.0.0.1:8888`.
+O script inicia a ponte em `0.0.0.0:8888`, sem instalar dependências automaticamente; execute `uv sync` na preparação inicial. Também funciona quando chamado pelo caminho absoluto fora da raiz do projeto. No PC, abra `http://127.0.0.1:8888`. Ao encerrar, aguarda até 5 segundos pelas conexões HTTP abertas; depois cancela as conexões restantes, inclusive SSE, e executa a limpeza do aplicativo. A limpeza de uma geração própria pode exigir tempo adicional para registrar a interrupção e solicitar o cancelamento daquele pedido; o limite não mata o processo nem cancela jobs globais do ComfyUI.
 
 No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC. Fechar a ponte não libera os modelos do ComfyUI; são processos distintos.
 
 - **Novo roteiro** planeja o conjunto em `/roteiro`: ideia + referência →proposta de blocos preenchidos →edição/adoção explícita →preparar um bloco por vez. **Novo freestyle** mantém o modo Freestyle; geração, status, revisão, retry e montagem são compartilhados, não outro motor. Plano/intenções vivem no PC; adotar não gera e aceitar não gera o próximo. Veja [roteiro e recuperação](docs/roteiro.md).
 - **Gerar os blocos restantes** executa o roteiro salvo em ordem após confirmação: detalha cada bloco com Grok, usa a proposta e aceita tecnicamente os intermediários para continuar. O último exige revisão. Erro, resultado incerto ou **Parar** interrompem o lote sem replay.
 - **Continuar roteiro · Tail** acrescenta blocos após o último vídeo aceito: uma frase vira proposta estruturada editável, a adoção preserva o trecho existente e o lote melhora cada novo bloco com o frame real atualizado. Todos os blocos atuais precisam estar concluídos e aceitos; o limite total permanece 50. Consulte o mesmo UUID após resultado incerto, sem reenviar.
+- **Editar vídeo** abre uma tela própria para **Refazer bloco**, **Inserir antes** ou **Inserir depois**. Cada edição cria um vídeo entre duas âncoras aceitas: último frame do anterior e primeiro frame do seguinte. O Grok recebe essas imagens, a identidade e os prompts efetivamente enviados nos dois vizinhos, identificados em inglês como histórico. Seu system prompt fica separado em Ajustes. Revise o novo vídeo e aplique a edição explicitamente; refazer acrescenta uma versão e inserir acrescenta um bloco. Versões aceitas anteriores continuam selecionáveis. Uma edição sem vizinho anterior ou seguinte é bloqueada com explicação; para estender o fim, use Tail.
+- A edição usa a operação nativa `bridge`, derivada do V2V com guia final no frame `-1`, preservando os parâmetros existentes. O vídeo anterior alimenta o motor nativo; o Grok recebe três imagens, sem upload de vídeo. A conexão das âncoras foi validada com fixtures CPU e clientes falsos; a continuidade artística exige revisão do vídeo gerado.
+- **Montar roteiro** usa a ordem e as versões selecionadas, preservando os pais originais de cada vídeo. **Preparar outra tentativa** de uma edição falha/interrompida/recusada copia o prompt enviado e as mesmas âncoras, sem nova chamada Grok; gerar exige outro clique. **Descartar edição** abandona uma proposta ou resultado conhecido sem apagar vídeos. Resultados incertos exigem consulta do mesmo ID.
 - Ações bloqueadas explicam o motivo ao toque/clique, preservando o bloqueio. Na tela do roteiro, Tail fica após os blocos e ações principais; apagar e consultar a ideia/referência ficam em **Outras opções**.
 - Enquanto o Grok responde, um indicador discreto alterna 20 mensagens de espera. Não representa progresso; pausa em telas ocultas e respeita redução de movimento, sem reenviar pedidos.
 - Microanimações acompanham estrelas de favorito após confirmação, ícones de navegação, seções recolhíveis e mudanças de estado do roteiro. Mídia e controles nativos permanecem estáveis; redução de movimento desativa os efeitos.
@@ -125,7 +128,7 @@ O default continua `baseline`: 75 nós i2v/78 v2v, com a prévia nativa. `H3_WOR
 Para selecionar o perfil na API (comando fish; **inicia a API**, não inferência por si):
 
 ```fish
-env PYTHONDONTWRITEBYTECODE=1 H3_WORKFLOW_OUTPUT_PROFILE=final_only uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010
+env PYTHONDONTWRITEBYTECODE=1 H3_WORKFLOW_OUTPUT_PROFILE=final_only uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010 --timeout-graceful-shutdown 5
 ```
 
 Para restaurar o default, omita a variável ou use `H3_WORKFLOW_OUTPUT_PROFILE=baseline`. A proveniência registra `output_profile`, `removed_preview_nodes` e `effective_baseline_hash`; `workflow_hash` continua identificando o export golden original, enquanto o SHA do payload persistido identifica o JSON realmente submetido. `.data`/armazenamento e o cenário da CLI não mudam nesta fase. Remover a prévia não implica ganho proporcional de RAM/VRAM: modelos e cache continuam residentes. A comparação real já foi concluída: baseline410.259s e final_only451.258s, com 168 frames/7s, cenário/presets preservados e inspeção visual amostrada. O processo/cache externo mudou entre execuções; esses tempos não permitem atribuir desempenho à poda. Evidência local: `.dumps/benchmarks/final-only-three-chunks/report.json` e `.dumps/tests/reports/output_profile_comparison.json`.
