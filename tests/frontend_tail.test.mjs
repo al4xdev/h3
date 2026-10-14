@@ -40,7 +40,7 @@ test('actual lost planning response fences new intentions and manual recovery us
   const runtime = new Function(...Object.keys(deps), `${functions}; return {readTail, planTail};`)(...Object.values(deps)); await runtime.planTail(); assert.equal(story.tailUncertain, true); assert.deepEqual(story.tailOwner, owner); await runtime.planTail(); assert.equal(calls.length, 1); await runtime.readTail(); assert.equal(story.tailUncertain, false); assert.deepEqual(calls.map(call => call[0]), ['POST', 'GET']); assert.equal($('tail-idea').value, 'Turn');
 });
 test('Tail stays inside story screen, has safe raw text and separate adoption/generation', async () => {
-  const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8'); assert.match(html.match(/<section id="panel-story"[^]*?<\/section>/)[0], /tail-controls/);
+  const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8'); assert.match(html.slice(html.indexOf('<section id="panel-story"'), html.indexOf('<section id="panel-context"')), /tail-controls/);
   const recovery = source.slice(source.indexOf('  async function readTail()'), source.indexOf('  async function planTail()')); assert.doesNotMatch(recovery, /planTail\(|POST|startBatch/);
   const adopt = source.slice(source.indexOf('  async function adoptTail()'), source.indexOf('  function renderTail()')); assert.doesNotMatch(adopt, /startBatch|generate\(/); assert.match(source, /text\('tail-invalid-text', record.raw_text\)/);
 });

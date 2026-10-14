@@ -669,6 +669,96 @@ export function appendLibraryPage(existing, result, append = false) {
   return [...unique.values()];
 }
 
+export function blockedActionReason(button, state, story, context = {}) {
+  const id = button.id, is = (...ids) => ids.includes(id);
+  if (id === 'back') return 'Você já está na primeira tela. Toque em Estúdio local para abrir a biblioteca.';
+  if (id === 'settings-open') return 'Os ajustes já estão abertos. Use Voltar para retornar.';
+  if (id === 'load-more') return 'A próxima página está carregando. Aguarde a leitura dos vídeos.';
+  if (button.classList.contains('favorite-toggle')) return context.favoriteBusy ? 'Salvando seus favoritos. Aguarde a confirmação.' : 'Os favoritos ainda não foram carregados. Atualize a biblioteca para consultar novamente.';
+  if (is('tail-read', 'batch-read', 'conversion-read', 'assembly-refresh', 'story-intent-read') && (story.tailReading || state.batchReading || state.conversionBusy || state.assemblyReading || state.busy)) return 'A consulta deste pedido já está em andamento. Aguarde o resultado.';
+  if (state.stopBusy) return 'A parada está sendo enviada. Aguarde a confirmação antes de outra ação.';
+  if (state.stopUncertain) return 'O resultado da parada é incerto. Consulte o mesmo pedido antes de continuar.';
+  if (story.tailUncertain) return 'A continuação tem resultado incerto. Use Consultar mesma continuação; não reenvie o pedido.';
+  if (state.batchDiscoveryUncertain) return 'Ainda não foi possível confirmar se existe um lote em andamento. Atualize a biblioteca.';
+  if (state.batchUncertain) return 'O lote tem resultado incerto. Consulte o mesmo pedido antes de continuar.';
+  if (state.globalBatchRecord?.state === 'active' || state.batchRecord?.state === 'active') return 'Há um lote em andamento. Aguarde sua conclusão ou use Parar e confirme a parada.';
+  if (state.conversionUncertain) return 'A conversão tem resultado incerto. Consulte a mesma conversão antes de continuar.';
+  if (state.conversionBusy) return 'A conversão está em andamento. Aguarde a confirmação.';
+  if (context.deleting) return 'Há uma exclusão em andamento. Aguarde a confirmação.';
+  if (state.uncertain) return 'O pedido de vídeo tem resultado incerto. Consulte o mesmo pedido antes de iniciar outra ação.';
+  if (state.uploadUncertain) return 'O envio da imagem não foi confirmado. Consulte o envio antes de continuar.';
+  if (state.assemblyUncertain) return 'A montagem tem resultado incerto. Use Reler montagem para consultar o mesmo pedido.';
+  if (state.grokUncertain && is('grok-detail', 'story-detail', 'retry-mode', 'convert-story', 'story-batch')) return 'A resposta do Grok não foi confirmada. Consulte o pedido existente antes de continuar.';
+  if (state.uploadBusy) return 'A imagem está sendo enviada ao PC. Aguarde a confirmação.';
+  if (state.assemblyBusy) return 'A montagem está em andamento. Aguarde a conclusão.';
+  if (state.retryPreparing) return 'Os registros da nova tentativa estão sendo conferidos. Aguarde a conclusão.';
+  if (state.busy || story.busy) return 'Esta solicitação está em andamento. Aguarde a confirmação.';
+  if (is('grok-detail', 'story-detail', 'retry-mode', 'convert-story', 'story-batch') && state.grokBusy) return 'O Grok está melhorando o texto. Aguarde a resposta.';
+  if (is('grok-save', 'story-batch', 'retry-mode', 'convert-story') && state.editorSaving) return 'As instruções do Grok estão sendo salvas. Aguarde a confirmação.';
+  if (id === 'tail-plan') {
+    if (story.tailReading) return 'A continuação está sendo consultada. Aguarde a confirmação do pedido existente.';
+    if (story.tailOwner && !['adopted', 'invalid'].includes(story.tailRecord?.state)) return 'Há uma proposta de continuação pendente. Use a proposta ou consulte o mesmo pedido antes de planejar outra.';
+    if (story.doc?.blocks.length >= 50) return 'Este roteiro atingiu o limite total de 50 blocos.';
+    if (!context.tailEnd) return 'Conclua e aceite todos os blocos atuais antes de continuar o roteiro.';
+    return 'Salve ou resolva as edições e propostas pendentes antes de planejar a continuação.';
+  }
+  if (id === 'story-batch') {
+    if (state.batchReading) return 'O lote está sendo consultado. Aguarde a confirmação do pedido existente.';
+    if (!context.savedBatchEditor) return 'Salve o prompt de Vídeos sequenciais em Ajustes antes de gerar o lote.';
+    if (story.editing || story.candidate || context.nameChanged || !context.batchDraftsClean) return 'Salve ou resolva as edições e propostas pendentes antes de gerar o lote.';
+    return 'O lote exige um trecho aceito seguido de blocos nunca enviados. Revise os vídeos pendentes ou prepare outra tentativa para blocos recusados/interrompidos.';
+  }
+  if (is('grok-detail', 'story-detail', 'grok-save') && !state.editorReady) return 'A configuração do Grok não foi carregada. Abra Ajustes ou atualize a biblioteca para consultar novamente.';
+  if (is('grok-detail', 'story-detail') && state.mode === 'continue' && state.lastFrame?.state !== 'ready') return 'O último frame do pai aceito ainda não está disponível. Aguarde ou consulte novamente o bloco.';
+  if (id === 'grok-detail' && !context.reference) return 'Selecione uma imagem de referência antes de pedir a melhoria ao Grok.';
+  if (is('generate', 'generation-edit')) {
+    if (context.submitted || state.statusOnly) return 'Este bloco já foi enviado. Consulte seu resultado; para repetir, prepare explicitamente uma nova tentativa.';
+    if (id === 'generate' && context.detailCandidate) return 'Use ou descarte a proposta do Grok antes de gerar o bloco.';
+    if (id === 'generate' && context.promptStale) return 'A intenção do bloco mudou. Melhore o prompt novamente ou confirme a instrução atual antes de gerar.';
+    if (['queued', 'running'].includes(state.pendingRun?.state)) return 'Já existe um vídeo em geração. Aguarde ou use Parar.';
+    if (state.mode === 'continue' && state.parent?.state !== 'accepted') return 'Aceite o vídeo anterior antes de gerar uma continuação.';
+  }
+  if (is('continue-mode', 'continue-idea')) return 'Aceite o vídeo anterior antes de preparar a continuação.';
+  if (is('accept', 'reject')) return 'Só é possível revisar um vídeo concluído que esteja aguardando revisão.';
+  if (id === 'retry-mode') return 'Uma nova tentativa exige um bloco recusado ou interrompido com registros confirmados.';
+  if (id === 'story-block-use') return context.submitted ? 'Este bloco já foi enviado. A proposta não pode alterar o vídeo publicado.' : 'Não há proposta do Grok vinculada a este rascunho. Peça a melhoria antes de usar a proposta.';
+  if (id === 'upload') return state.mode === 'continue' ? 'A continuação usa a referência original do pai. Para trocar a imagem, prepare uma nova sequência.' : 'A biblioteca de referências não está disponível. Atualize a configuração.';
+  if (is('assemble', 'open-assembly', 'assembly-refresh')) return !state.config?.assembly_enabled ? 'A montagem não está disponível nesta configuração.' : state.assemblyLocked && !context.reviewedPreview ? 'Esta montagem já tem um pedido registrado. Consulte o mesmo pedido antes de montar novamente.' : 'Selecione uma sequência completa de vídeos aceitos antes de montar.';
+  if (id === 'convert-story') return 'Abra a sequência completa do Freestyle antes de converter para roteiro.';
+  if (id === 'story-adopt') return 'A proposta mudou ou possui edições pendentes. Conclua a edição e confira a origem antes de usar a continuação.';
+  if (id === 'story-propose-again') return 'Resolva a continuação pendente antes de propor outra versão do roteiro.';
+  if (id === 'story-add') return 'O roteiro atingiu o limite de blocos. Remova um bloco novo antes de adicionar outro.';
+  if (id === 'status-review') return 'Ainda não há resultado confirmado para revisar. Consulte o pedido.';
+  if (is('story-new', 'story-propose', 'story-manual') && !story.available) return 'O recurso de roteiros ainda não está disponível. Atualize a configuração.';
+  if (!state.config || is('story-propose', 'story-manual') && !state.capabilities) return 'A configuração local ainda não foi carregada. Atualize a biblioteca antes de continuar.';
+  if (button.classList.contains('stop-confirmation-trigger')) return 'Este pedido não tem uma geração ativa confirmada para parar. Consulte seu estado.';
+  return button.dataset.blockReason || 'Aguarde a leitura ou o salvamento em andamento antes de usar esta ação.';
+}
+
+export function createBlockedActionFeedback(document, reason) {
+  const panel = document.getElementById('blocked-action-feedback'), text = document.getElementById('blocked-action-text');
+  function blockedAt(event) {
+    if (event.target?.closest?.('#blocked-action-feedback')) return null;
+    const direct = event.target?.closest?.('button:disabled');
+    if (direct && !direct.closest('[hidden],[inert]')) return direct;
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY) || event.detail === 0) return null;
+    return [...document.querySelectorAll('button:disabled')].find(button => {
+      if (button.closest('[hidden],[inert]')) return false;
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    });
+  }
+  function intercept(event) {
+    const button = blockedAt(event); if (!button) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    text.textContent = reason(button); panel.hidden = false;
+  }
+  document.addEventListener('click', intercept, true);
+  document.getElementById('blocked-action-close').addEventListener('click', () => { panel.hidden = true; });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') panel.hidden = true; });
+  return {sync() { for (const button of document.querySelectorAll('button')) { if (button.matches(':disabled')) { const value = reason(button); button.setAttribute('aria-description', value); button.dataset.blockTitle ??= button.title; button.title = value; } else if (button.dataset.blockTitle !== undefined) { button.title = button.dataset.blockTitle; delete button.dataset.blockTitle; button.removeAttribute('aria-description'); } } }};
+}
+
 export function startUI(document, client = createClient(), stories = createStoryClient(), libraries = createLibraryClient()) {
   const $ = id => document.getElementById(id);
   const motion = createPresentationMotion(document);
@@ -685,6 +775,14 @@ export function startUI(document, client = createClient(), stories = createStory
   const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 12, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   Object.assign(state, {screen: 'library', stopBusy: false, stopUncertain: false, stopOwner: null, batchOwner: null, batchRecord: null, globalBatchRecord: null, batchDiscoveryUncertain: true, batchDiscoveryEpoch: 0, batchUncertain: false, batchReading: false, batchEpoch: 0, conversionBusy: false, conversionUncertain: false, conversionEnd: null, conversionId: null, branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
   const story = {tailOwner: null, tailRecord: null, tailUncertain: false, tailReading: false, tailDrafts: new Map(), tailWrappers: new Map(), tailFormID: null, available: false, items: [], runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
+  const blockedFeedback = createBlockedActionFeedback(document, button => blockedActionReason(button, state, story, {
+    favoriteBusy, deleting, reference: contextReference(), submitted: draft().submitted,
+    detailCandidate: story.detailCandidate?.key === state.draftKey, promptStale: draft().storyPromptStale,
+    tailEnd: tailEnd(story.doc), batchDraftsClean: batchDraftsClean(story.doc, state.drafts),
+    nameChanged: story.doc && $('story-name').value !== story.doc.name,
+    savedBatchEditor: state.editorReady && savedEditorMatches(state.editorSnapshot, {system_prompt: $('grok-system').value, model: $('grok-model').value}, state.editorSaving),
+    reviewedPreview: state.assembly?.id === state.assemblyId && state.assembly?.state === 'completed' && state.assemblyMode === 'preview' && state.selected?.state === 'accepted',
+  }));
   Object.assign(state, {noticeOwner: null, noticeResult: null, noticeReading: false, dismissedRunNotice: null, dismissedBatchNotice: null});
   try {
     const href = document.defaultView?.location?.href || 'http://local/';
@@ -1172,6 +1270,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('status-state', state.pendingRun ? label(state.pendingRun) : state.noticeResult?.label || (state.uncertain ? 'Admissão incerta' : 'Sem pedido'));
     text('status-id', state.pendingRun?.id || state.noticeResult?.id || 'ID não confirmado. Não envie novamente.');
     $('status-review').disabled = !state.pendingRun || state.busy;
+    blockedFeedback.sync();
     for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
@@ -1401,7 +1500,7 @@ export function startUI(document, client = createClient(), stories = createStory
     }
     const blocks = storyBlocks(), accepted = story.doc.blocks.filter(block => storyBlockState(story.doc, block).accepted).length;
     $('story-name').value = story.candidate?.name ?? story.doc.name; $('story-candidate-notice').hidden = !story.candidate && story.doc.adopted;
-    text('story-summary', `${story.candidate ? 'Proposta' : 'Salvo no PC'} · ${accepted} de ${blocks.length} blocos aceitos · ${blocks.reduce((sum, block) => sum + block.duration_seconds, 0)} s planejados`);
+    text('story-summary', `${story.candidate ? 'Proposta · ' : ''}${accepted} de ${blocks.length} blocos aceitos · ${blocks.reduce((sum, block) => sum + block.duration_seconds, 0)} s planejados`);
     text('story-idea-copy', story.doc.idea); text('story-reference-copy', `${story.doc.reference.source_root} / ${story.doc.reference.path}`);
     $('story-blocks').replaceChildren();
     for (const [index, block] of blocks.entries()) {
@@ -1432,6 +1531,7 @@ export function startUI(document, client = createClient(), stories = createStory
         const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
         for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
           const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked() || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
+          if (delta !== 0) button.dataset.blockReason = !blocks[index + delta] ? 'Este bloco já está no limite da lista nessa direção.' : 'O bloco vizinho já tem uma tentativa registrada. Sua posição precisa ser preservada.';
           button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
         } li.append(organize);
       }
@@ -1445,7 +1545,7 @@ export function startUI(document, client = createClient(), stories = createStory
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
     if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true;
-    try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; renderStory(); message('story-status', 'Roteiro salvo no PC.'); return true; }
+    try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; renderStory(); message('story-status', ''); return true; }
     catch (error) { message('story-status', error.status === 409 ? 'O roteiro mudou no PC. Confira a outra versão antes de salvar. Sua edição foi mantida.' : `Não foi possível salvar: ${error.message}`, true); return false; }
     finally { story.busy = false; }
   }
