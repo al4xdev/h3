@@ -8,8 +8,8 @@
   "scope": "/",
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],
-  "background_color": "#242725",
-  "theme_color": "#242725",
+  "background_color": "#0b191e",
+  "theme_color": "#0b191e",
   "icons": [
     {"src": "/ui/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
     {"src": "/ui/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}

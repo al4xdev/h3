@@ -7,22 +7,24 @@ const id = '11111111-1111-4111-8111-111111111111', block = '22222222-2222-4222-8
 const fixture = () => ({id, revision: 2, name: '<img onerror=evil()>', idea: 'Macro', reference: {source_root: 'inputs', path: 'own/original.png'}, reference_sha256: 'a'.repeat(64), adopted: true, blocks: [{id: block, action: 'Dance', prompt: ' exact FINAL\n', duration_seconds: 8, seed: 42}], attempts: []});
 const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
 test('actual story renderer opens pending blocks and attaches organization actions', async () => {
-  const handler = source.slice(source.indexOf('  function renderStory()'), source.indexOf('  async function saveStoryBlocks'));
+  const handler = source.slice(source.indexOf('  function renderStoryBlock('), source.indexOf('  async function saveStoryBlocks'));
   const nodes = new Map(), saved = [];
   const element = (tag, classes, value) => ({tag, textContent: value, children: [], dataset: {}, listeners: {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, querySelectorAll(tag) { return this.children.flatMap(node => [node, ...node.children]).filter(node => node.tag === tag); }, addEventListener(event, callback) { this.listeners[event] = callback; }});
   const $ = key => { if (!nodes.has(key)) nodes.set(key, element('div')); return nodes.get(key); };
   const doc = fixture();
   doc.blocks.push({...doc.blocks[0], id: intent});
   const story = {doc};
-  const deps = {editRecovery: null, edit: {lists: new Map()}, editFence: () => false, motion: {changed() {}}, story, $, element, storyBlocks: () => doc.blocks, storyBlockState, alignedFrames: () => 192, text: (key, value) => { $(key).textContent = value; }, batchBlocked: () => false, saveStoryBlocks: async blocks => { saved.push(blocks); }, STATE_LABELS: {}, document: {defaultView: {confirm: () => true}}};
+  const deps = {storyCards: {reconcile(owner, items) { $('story-blocks').replaceChildren(...items.map(item => item.build())); }}, editRecovery: null, edit: {lists: new Map()}, editFence: () => false, motion: {changed() {}}, story, $, element, storyBlocks: () => story.doc.blocks, storyBlockState, alignedFrames: () => 192, text: (key, value) => { $(key).textContent = value; }, batchBlocked: () => false, saveStoryBlocks: async blocks => { saved.push(blocks); }, STATE_LABELS: {}, document: {defaultView: {confirm: () => true}}};
   const render = new Function(...Object.keys(deps), `${handler}; return renderStory;`)(...Object.values(deps));
   render();
   assert.equal($('story-blocks').children.length, 2);
   const organize = $('story-blocks').children[0].children.find(node => node.tag === 'details');
   const moveDown = organize.children.at(-1);
   assert.equal(moveDown.disabled, false);
+  story.doc.blocks = [...doc.blocks, {...doc.blocks[0], id: '44444444-4444-4444-8444-444444444444', action: 'A distant edit after this card was built'}];
   await moveDown.listeners.click();
-  assert.deepEqual(saved[0].map(item => item.id), [intent, block]);
+  assert.deepEqual(saved[0].map(item => item.id), [intent, block, '44444444-4444-4444-8444-444444444444']);
+  assert.equal(saved[0][2].action, 'A distant edit after this card was built');
 });
 test('saving story blocks rebuilds actions only after releasing busy state, including errors', async () => {
   const handler = source.slice(source.indexOf('  async function saveStoryBlocks('), source.indexOf('  async function saveStoryEdit('));
@@ -434,7 +436,7 @@ test('restoring a saved video view reuses its selected run and full branch witho
   const selected = {id, state: 'accepted'}, sequence = {end_run_id: id, blocks: [{id}]}, full = {end_run_id: intent, blocks: [{id}, {id: intent}]};
   const snapshot = {screen: 'review', selectedId: id, selectedRun: selected, sequence, branchSequence: full, branchEnd: intent, draftKey: 'saved-draft', mode: 'continue', parent: selected, scroll: 317, storyDoc: fixture()};
   const state = {selected: {id: intent}, drafts: new Map(), navigationEpoch: 0, retryEpoch: 0, uncertain: true, pendingRun: {id: intent}}, story = {}, calls = [];
-  const deps = {edit: {}, state, story, removedStories: new Set(), removedRuns: new Set(), saveDraft() {}, restoreDraft: () => calls.push('draft'), draft: () => ({submitted: false}), paintScreen() {}, controls() {}, $: () => ({disabled: false, closest: () => null, matches: () => false, focus() {}}), recordView() {}, navigate: () => { throw new Error('Unexpected navigation'); }, message() {}, select: () => { throw new Error('Cached Back must not fetch'); }, stopped: false, document: {defaultView: {scrollTo: value => calls.push(value)}}};
+  const deps = {edit: {}, state, story, removedStories: new Set(), removedRuns: new Set(), saveDraft() {}, restoreDraft: () => calls.push('draft'), draft: () => ({submitted: false}), paintScreen({afterPaint}) { afterPaint?.(); }, controls() {}, $: () => ({disabled: false, closest: () => null, matches: () => false, focus() {}}), recordView() {}, navigate: () => { throw new Error('Unexpected navigation'); }, message() {}, select: () => { throw new Error('Cached Back must not fetch'); }, stopped: false, document: {defaultView: {scrollTo: value => calls.push(value)}}};
   const restore = new Function(...Object.keys(deps), `${handler}; return restoreView;`)(...Object.values(deps)); await restore(snapshot, [{screen: 'story'}]);
   assert.equal(state.selected, selected); assert.equal(state.sequence, sequence); assert.equal(state.branchSequence, full); assert.equal(state.openedBranchEnd, intent);
   assert.equal(state.draftKey, 'saved-draft'); assert.equal(state.uncertain, true); assert.equal(state.pendingRun.id, intent); assert.equal(calls.at(-1).top, 317);

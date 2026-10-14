@@ -525,6 +525,101 @@ export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
     async generate(id, block, intent, body) { const key = attemptPath(id, block, intent); if (used.has(key)) throw new Error('Intenção já enviada; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', body, 202); }};
 }
 
+export function createLazyStoryCards(document, list) {
+  const view = document.defaultView, owners = new Map(), nodes = new WeakMap();
+  let active = false, disposed = false, current = [], prefix = [];
+  const visible = entry => { const rect = entry.node.getBoundingClientRect(); return rect.bottom >= -180 && rect.top <= (view?.innerHeight || 800) + 180; };
+  function materialize(entry, force = false) {
+    if (disposed || !active || document.hidden || !entry.dirty || (!force && entry.node.contains(document.activeElement))) return;
+    const open = [...entry.node.querySelectorAll('details')].filter(node => node.open).map(node => node.querySelector('summary')?.textContent);
+    const built = entry.item.build();
+    entry.node.replaceChildren(...built.childNodes); entry.node.className = `${built.className} story-lazy is-lazy-ready`;
+    entry.node.dataset.lazyState = 'ready'; entry.node.removeAttribute('aria-busy'); entry.dirty = false;
+    for (const details of entry.node.querySelectorAll('details')) if (open.includes(details.querySelector('summary')?.textContent)) details.open = true;
+    entry.node.dispatchEvent(new (view?.Event || Event)('story-card-ready'));
+  }
+  const observer = typeof view?.IntersectionObserver === 'function' ? new view.IntersectionObserver(entries => {
+    if (!active || disposed || document.hidden) return;
+    for (const item of entries) { const entry = nodes.get(item.target); if (entry && item.isIntersecting && current.includes(entry)) materialize(entry); }
+  }, {root: null, rootMargin: '180px 0px', threshold: 0.01}) : null;
+  function shell(item) {
+    const node = document.createElement('li'); node.className = 'story-block story-lazy is-lazy-idle'; node.dataset.blockId = item.id; node.dataset.lazyState = 'idle';
+    const title = document.createElement('h3'), text = document.createElement('p'), button = document.createElement('button');
+    title.textContent = item.title; text.className = 'block-preview'; text.textContent = item.action;
+    button.type = 'button'; button.textContent = 'Abrir opções deste bloco';
+    const entry = {node, item, dirty: true}; nodes.set(node, entry);
+    button.addEventListener('click', () => { materialize(entry, true); entry.node.querySelector('button')?.focus({preventScroll: true}); });
+    node.addEventListener('focusout', () => queueMicrotask(() => { if (current.includes(entry) && visible(entry)) materialize(entry); }));
+    node.append(title, text, button); return entry;
+  }
+  function refreshVisible() {
+    if (!active || disposed || document.hidden) return;
+    for (const entry of current) if (visible(entry)) materialize(entry);
+  }
+  function arrange() {
+    const desired = [...prefix, ...current.map(entry => entry.node)], focused = document.activeElement;
+    for (const [index, node] of desired.entries()) if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+    const owned = new Set(desired); for (const node of [...list.children]) if (!owned.has(node)) node.remove();
+    if (focused?.isConnected && document.activeElement !== focused) focused.focus?.({preventScroll: true});
+  }
+  const visibility = () => { if (document.hidden) observer?.disconnect(); else if (active) { for (const entry of current) observer?.observe(entry.node); refreshVisible(); } };
+  document.addEventListener('visibilitychange', visibility);
+  if (!observer) { view?.addEventListener('scroll', refreshVisible, {passive: true}); view?.addEventListener('resize', refreshVisible, {passive: true}); }
+  return {
+    reconcile(owner, items, before = []) {
+      if (disposed) return;
+      observer?.disconnect(); prefix = before;
+      if (!owners.has(owner)) owners.set(owner, new Map());
+      const cards = owners.get(owner);
+      current = items.map(item => { let entry = cards.get(item.id); if (!entry) { entry = shell(item); cards.set(item.id, entry); } else { const changed = entry.item.signature !== item.signature; const force = entry.item.editing !== item.editing; entry.item = item; entry.dirty ||= changed; if (force && active) materialize(entry, true); } return entry; });
+      const kept = new Set(items.map(item => item.id)); for (const id of cards.keys()) if (!kept.has(id)) cards.delete(id);
+      arrange(); if (active) { for (const entry of current) observer?.observe(entry.node); refreshVisible(); }
+    },
+    setActive(value) { active = Boolean(value); observer?.disconnect(); if (active) { for (const entry of current) observer?.observe(entry.node); refreshVisible(); } },
+    materialize(id) { const entry = current.find(item => item.item.id === id); if (entry) materialize(entry, true); },
+    destroy() { disposed = true; active = false; observer?.disconnect(); document.removeEventListener('visibilitychange', visibility); view?.removeEventListener('scroll', refreshVisible); view?.removeEventListener('resize', refreshVisible); owners.clear(); current = []; },
+  };
+}
+export function createStoryElastic(document, {enabled, navigationEpoch}) {
+  const view = document.defaultView, panel = document.getElementById('panel-story'), reduced = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  let gesture = null, targets = [], animations = [];
+  const settle = () => { gesture = null; for (const animation of animations) animation.cancel(); animations = []; for (const target of targets) target.style.removeProperty('--story-edge-offset'); targets = []; };
+  const allowed = () => !document.hidden && !reduced?.matches && enabled();
+  const edge = dy => dy > 0 && (view.scrollY || 0) <= 0 ? 1 : dy < 0 && Math.ceil((view.scrollY || 0) + view.innerHeight) >= document.documentElement.scrollHeight - 1 ? -1 : 0;
+  function start(event) {
+    settle();
+    if (!allowed() || event.touches.length !== 1 || event.target.closest?.('video,audio,input,textarea,select,button,a,summary,[contenteditable],.topbar,.film-strip,[data-no-swipe]')) return;
+    const point = event.touches[0]; gesture = {x: point.clientX, y: point.clientY, epoch: navigationEpoch(), edge: 0};
+  }
+  function move(event) {
+    if (!gesture) return;
+    if (!allowed() || event.touches.length !== 1 || gesture.epoch !== navigationEpoch()) { settle(); return; }
+    const point = event.touches[0], dx = point.clientX - gesture.x, dy = point.clientY - gesture.y;
+    if (Math.abs(dx) > Math.abs(dy)) { settle(); return; }
+    if (!gesture.edge) {
+      gesture.edge = edge(dy); if (!gesture.edge) { gesture.y = point.clientY; return; }
+      gesture.y = point.clientY;
+      targets = [...panel.querySelectorAll('.story-lazy>h3,.story-lazy>.block-preview,.story-lazy>.mono')].filter(node => { const rect = node.getBoundingClientRect(); return rect.bottom > 0 && rect.top < view.innerHeight; });
+      return;
+    }
+    const raw = point.clientY - gesture.y;
+    if (Math.sign(raw) !== gesture.edge) { settle(); return; }
+    const offset = Math.sign(raw) * 24 * (1 - Math.exp(-Math.abs(raw) * .55 / 24));
+    for (const target of targets) target.style.setProperty('--story-edge-offset', `${offset.toFixed(2)}px`);
+  }
+  function end() {
+    if (!gesture || !allowed()) { settle(); return; }
+    gesture = null;
+    const visible = [...targets]; targets = [];
+    for (const target of visible) {
+      const offset = target.style.getPropertyValue('--story-edge-offset'); target.style.removeProperty('--story-edge-offset');
+      if (offset && target.animate) { const animation = target.animate([{translate: `0 ${offset}`}, {translate: '0 -1px', offset: .72}, {translate: '0 0'}], {duration: 460, easing: 'cubic-bezier(.17,.89,.32,1.28)'}); animations.push(animation); animation.finished?.catch(() => {}).finally(() => { animations = animations.filter(item => item !== animation); }); }
+    }
+  }
+  for (const [name, handler] of [['touchstart', start], ['touchmove', move], ['touchend', end], ['touchcancel', settle]]) panel.addEventListener(name, handler, {passive: true});
+  document.addEventListener('visibilitychange', settle); reduced?.addEventListener?.('change', settle);
+  return {settle, destroy() { settle(); for (const [name, handler] of [['touchstart', start], ['touchmove', move], ['touchend', end], ['touchcancel', settle]]) panel.removeEventListener(name, handler); document.removeEventListener('visibilitychange', settle); reduced?.removeEventListener?.('change', settle); }};
+}
 export function createBackSwipe(document, {back, canGoBack, navigationEpoch, presentation = {}, now = () => performance.now()}) {
   let gesture = null;
   const excluded = 'video,audio,input,textarea,select,button,a,summary,[contenteditable],.film-strip,.topbar,[data-no-swipe]';
@@ -1031,6 +1126,8 @@ export function startUI(document, client = createClient(), stories = createStory
   try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('conversion_roteiro') || params.has('conversion_end')) { if (params.getAll('conversion_roteiro').length !== 1 || params.getAll('conversion_end').length !== 1) throw new Error('Ponteiro de conversão inválido.'); state.conversionId = canonicalUUID(params.get('conversion_roteiro')); state.conversionEnd = canonicalUUID(params.get('conversion_end')); state.conversionUncertain = true; } } catch (error) { state.conversionUncertain = true; message('notice', error.message, true); }
   try { const params = new URL(document.defaultView?.location?.href || 'http://local/').searchParams; if (params.has('stop_id')) { if (params.getAll('stop_id').length !== 1 || params.getAll('stop_kind').length !== 1 || !['run', 'batch'].includes(params.get('stop_kind'))) throw new Error('Ponteiro de parada inválido.'); state.stopOwner = {kind: params.get('stop_kind'), id: canonicalUUID(params.get('stop_id'))}; if (state.stopOwner.kind === 'batch') { if (params.getAll('stop_roteiro').length !== 1) throw new Error('Roteiro da parada não confirmado.'); state.stopOwner.roteiro = canonicalUUID(params.get('stop_roteiro')); } submittedStops.add(`${state.stopOwner.kind}:${state.stopOwner.id}`); state.stopUncertain = true; } } catch (error) { state.stopUncertain = true; message('notice', error.message, true); }
   const edit = {key: null, serial: 0, drafts: new Map(), lists: new Map(), busy: false, editor: null, saving: false, reading: false};
+  const storyCards = createLazyStoryCards(document, $('story-blocks'));
+  const storyElastic = createStoryElastic(document, {enabled: () => state.screen === 'story' && !loadingScreen.key, navigationEpoch: () => state.navigationEpoch});
   let editRecovery = null; try { editRecovery = storyEditPointer(document.defaultView?.location?.href || 'http://local/'); } catch (error) { message('notice', error.message, true); }
   state.editRecoveryUncertain = Boolean(editRecovery);
   const TITLES = {'story-edit': 'Editar vídeo', story: 'Roteiro', library: 'Biblioteca', context: 'Referência e ideia', proposal: 'Proposta do Grok', generation: 'Preparar geração', review: 'Revisar bloco', continuation: 'Preparar continuação', assembly: 'Montar o filme', settings: 'Ajustes'};
@@ -1082,11 +1179,14 @@ export function startUI(document, client = createClient(), stories = createStory
       message('duration-preview', summary); message('block-summary', `Seed ${$('seed').value} · ${summary}`);
     } catch (error) { message('duration-preview', error.message, true); message('block-summary', error.message, true); }
   }
-  function paintScreen({focus = false, direction = 1} = {}) {
-    if (swipePresentation.committing) { paintScreenNow({focus, direction}); swipePresentation.painted(); }
-    else { swipePresentation.painted(); screenTransitions.paint(state.screen, () => paintScreenNow({focus, direction}), direction); }
+  function paintScreen({focus = false, direction = 1, afterPaint = null} = {}) {
+    const epoch = state.navigationEpoch;
+    const update = () => { if (epoch !== state.navigationEpoch || stopped) return; paintScreenNow({focus, direction}); afterPaint?.(); };
+    if (swipePresentation.committing) { update(); swipePresentation.painted(); }
+    else { swipePresentation.painted(); screenTransitions.paint(state.screen, update, direction); }
   }
   function paintScreenNow({focus = false, direction = 1} = {}) {
+    storyElastic.settle();
     for (const panel of document.querySelectorAll('[data-screen]')) {
       const active = panel.dataset.screen === state.screen;
       panel.hidden = !active; panel.inert = !active;
@@ -1102,6 +1202,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-intent-read').hidden = !ownedIntentMatchingCurrent(story.doc, story.block, story.intent, story.intentOwner);
     $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
     if (state.screen === 'story') renderStory();
+    storyCards.setActive(state.screen === 'story');
     if (state.screen === 'story-edit') renderStoryEdit();
     text('screen-eyebrow', 'Estúdio local');
     $('back').disabled = state.trail.length === 0;
@@ -1157,7 +1258,7 @@ export function startUI(document, client = createClient(), stories = createStory
     if (removedStories.has(snapshot.storyDoc?.id) || removedRuns.has(snapshot.parent?.id) || (['review', 'assembly'].includes(snapshot.screen) && removedRuns.has(snapshot.selectedId))) { navigate('library', {remember: false}); message('notice', 'Este item foi apagado. A biblioteca está disponível; seus outros rascunhos foram preservados.'); return; }
     if (removedRuns.has(snapshot.selectedId)) snapshot = {...snapshot, selectedId: null, branchEnd: null};
     const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
-    story.doc = snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
+    story.doc = [story.doc, ...(story.items || []), snapshot.storyDoc].filter(doc => doc?.id === snapshot.storyDoc?.id).sort((a, b) => (b.revision || 0) - (a.revision || 0))[0] || snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
     edit.key = snapshot.editKey || null;
     state.storyAssembly = snapshot.storyAssembly || null;
     if (snapshot.selectedRun?.id === snapshot.selectedId) Object.assign(state, {selected: snapshot.selectedRun, sequence: snapshot.sequence, branchSequence: snapshot.branchSequence, openedBranchEnd: snapshot.branchEnd});
@@ -1166,15 +1267,18 @@ export function startUI(document, client = createClient(), stories = createStory
     if (snapshot.selectedId && state.selected?.id !== snapshot.selectedId) { navigate('library', {remember: false}); message('notice', 'O bloco desta navegação não está disponível. Releia a biblioteca.', true); return; }
     Object.assign(state, {mode: snapshot.mode, draftKey: snapshot.draftKey, parent: snapshot.parent, statusOnly: snapshot.statusOnly, settingsOrigin: snapshot.settingsOrigin, screen: snapshot.screen, trail: [...trail]});
     story.creating = Boolean(snapshot.storyCreating); story.block = snapshot.storyBlock || null;
-    restoreDraft(); state.statusOnly ||= draft().submitted; paintScreen({direction: -1}); controls();
-    if (snapshot.disclosures) restoreDisclosures(document, snapshot.screen, snapshot.disclosures);
-    if (snapshot.selections) restoreSelections(document, snapshot.screen, snapshot.selections);
-    if (snapshot.media) restoreMediaState(document, snapshot.screen, snapshot.media, () => epoch === state.navigationEpoch);
-    const node = $(snapshot.focus);
-    // Returning to settings' origin never opens a software keyboard by itself.
-    const target = node && !node.disabled && !node.closest('[hidden],[inert]') && !node.matches(':disabled,input,select,textarea,[contenteditable]') ? node : $('screen-title');
-    target.focus({preventScroll: true}); document.defaultView?.scrollTo({top: snapshot.scroll, behavior: 'instant'});
-    recordView();
+    restoreDraft(); state.statusOnly ||= draft().submitted;
+    paintScreen({direction: -1, afterPaint: () => {
+      if (epoch !== state.navigationEpoch || stopped) return;
+      if (snapshot.disclosures) restoreDisclosures(document, snapshot.screen, snapshot.disclosures);
+      if (snapshot.selections) restoreSelections(document, snapshot.screen, snapshot.selections);
+      if (snapshot.media) restoreMediaState(document, snapshot.screen, snapshot.media, () => epoch === state.navigationEpoch);
+      const node = $(snapshot.focus);
+      // Returning to settings' origin never opens a software keyboard by itself.
+      const target = node && !node.disabled && !node.closest('[hidden],[inert]') && !node.matches(':disabled,input,select,textarea,[contenteditable]') ? node : $('screen-title');
+      target.focus({preventScroll: true}); document.defaultView?.scrollTo({top: snapshot.scroll, behavior: 'instant'});
+      recordView();
+    }}); controls();
   }
   function back() {
     if (loadingScreen.key) return;
@@ -1916,6 +2020,53 @@ export function startUI(document, client = createClient(), stories = createStory
     catch (error) { draft.message = `Preparação não confirmada: ${error.message}. Consulte a mesma edição; nenhum pedido será repetido.`; }
     finally { edit.busy = false; if (editDraft() === draft && state.screen === 'story-edit') renderStoryEdit(); controls(); }
   }
+  function renderStoryBlock(block, index, blocks) {
+    const info = storyBlockState(story.doc, block), li = element('li', 'story-block'); li.dataset.blockId = block.id;
+    const previous = index ? storyBlockState(story.doc, blocks[index - 1]).accepted : true;
+    li.append(element('h3', '', `${index + 1} · ${info.accepted ? 'Aceito' : info.latest ? STATE_LABELS[info.latest.run?.state] || 'Envio incerto' : previous ? 'Próximo' : 'Planejado'}`));
+    if (story.editing === block.id) {
+      const action = element('textarea'); action.value = story.editDraft.action; action.setAttribute('aria-label', 'O que acontece'); action.maxLength = 12000;
+      const duration = element('input'); duration.value = story.editDraft.durationText ?? String(story.editDraft.duration_seconds); duration.inputMode = 'decimal'; duration.setAttribute('aria-label', 'Duração do bloco');
+      action.addEventListener('input', () => { story.editDraft.action = action.value; }); duration.addEventListener('input', () => { story.editDraft.durationText = duration.value; });
+      const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
+    } else {
+      li.append(element('p', 'block-preview', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
+      const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
+      edit.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (batchBlocked() && !latest.latest) return; if (latest.latest) void openStoryAttempt(latest.accepted || latest.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...current}; renderStory(); } }); li.append(edit);
+      if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
+    }
+    if (!info.frozen) {
+      const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.dataset.storyRemove = 'true'; remove.disabled = story.busy || batchBlocked();
+      remove.addEventListener('click', async () => {
+        if (batchBlocked() || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
+        const changed = storyBlocks().filter(item => item.id !== block.id);
+        if (story.candidate) { story.candidate.blocks = changed; story.editing = null; renderStory(); }
+        else if (await saveStoryBlocks(changed, changed.length ? story.doc.adopted : false)) { story.editing = null; renderStory(); }
+      }); li.append(remove);
+    } else li.append(element('p', 'caption', 'Bloco enviado: vídeo e histórico preservados.'));
+    if (!info.frozen) {
+      const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
+      for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
+        const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked() || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
+        if (delta !== 0) button.dataset.blockReason = !blocks[index + delta] ? 'Este bloco já está no limite da lista nessa direção.' : 'O bloco vizinho já tem uma tentativa registrada. Sua posição precisa ser preservada.';
+        button.addEventListener('click', async () => { if (batchBlocked() || story.busy) return; const current = storyBlocks(), position = current.findIndex(item => item.id === block.id); if (position < 0 || storyBlockState(story.doc, current[position]).frozen || !current[position + delta] || storyBlockState(story.doc, current[position + delta]).frozen) return; const changed = current.map(item => ({...item})); [changed[position], changed[position + delta]] = [changed[position + delta], changed[position]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
+      } li.append(organize);
+    }
+    if (info.attempts.length) {
+      const history = element('details'); history.append(element('summary', '', 'Ver versões e tentativas'));
+      const populate = () => { if (!history.open || history.dataset.materialized === 'true') return; history.dataset.materialized = 'true'; for (const attempt of info.attempts) {
+        const row = element('div', 'story-version'), selected = info.selected?.run_id === attempt.run_id;
+        const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); row.append(button);
+        if (attempt.run?.state === 'accepted') { const choose = element('button', '', selected ? 'Versão selecionada' : 'Usar esta versão'); choose.type = 'button'; choose.disabled = selected || editFence() || edit.busy; choose.setAttribute('aria-pressed', String(selected)); choose.addEventListener('click', () => selectStoryVersion(block.id, attempt.run)); row.append(choose); }
+        history.append(row);
+      } };
+      history.addEventListener('toggle', populate);
+      li.append(history);
+    }
+    if (info.accepted && !story.candidate) { const editing = element('button', '', 'Editar vídeo'); editing.type = 'button'; editing.addEventListener('click', () => openStoryEdit(block.id)); li.append(editing); }
+    for (const record of edit.lists.get(story.doc.id) || []) if (record.block_id === block.id) { const pending = element('button', '', `Abrir edição · ${record.state} · ${record.id.slice(0, 8)}`); pending.type = 'button'; pending.addEventListener('click', () => { openStoryEdit(block.id, record); void readStoryEdit(); }); li.append(pending); }
+    return li;
+  }
   function renderStory() {
     if (!story.doc) return;
     if (story.tailDrafts && story.tailFormID !== story.doc.id) {
@@ -1927,59 +2078,17 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-name').value = story.candidate?.name ?? story.doc.name; $('story-candidate-notice').hidden = !story.candidate && story.doc.adopted;
     text('story-summary', `${story.candidate ? 'Proposta · ' : ''}${accepted} de ${blocks.length} blocos aceitos · ${blocks.reduce((sum, block) => sum + block.duration_seconds, 0)} s planejados`);
     text('story-idea-copy', story.doc.idea); text('story-reference-copy', `${story.doc.reference.source_root} / ${story.doc.reference.path}`);
-    $('story-blocks').replaceChildren();
-    if (editRecovery?.roteiro === story.doc.id) { const pending = element('li', 'pending-card'); pending.append(element('p', 'operation', `Edição ${editRecovery.id} com resultado ainda não confirmado.`)); const read = element('button', '', 'Reler mesma edição'); read.type = 'button'; read.addEventListener('click', recoverStoryEdit); pending.append(read); $('story-blocks').append(pending); }
-    for (const [index, block] of blocks.entries()) {
-      const info = storyBlockState(story.doc, block), li = element('li', 'story-block'); li.dataset.blockId = block.id;
-      const previous = index ? storyBlockState(story.doc, blocks[index - 1]).accepted : true;
-      li.append(element('h3', '', `${index + 1} · ${info.accepted ? 'Aceito' : info.latest ? STATE_LABELS[info.latest.run?.state] || 'Envio incerto' : previous ? 'Próximo' : 'Planejado'}`));
-      if (story.editing === block.id) {
-        const action = element('textarea'); action.value = story.editDraft.action; action.setAttribute('aria-label', 'O que acontece'); action.maxLength = 12000;
-        const duration = element('input'); duration.value = String(story.editDraft.duration_seconds); duration.inputMode = 'decimal'; duration.setAttribute('aria-label', 'Duração do bloco');
-        action.addEventListener('input', () => { story.editDraft.action = action.value; }); duration.addEventListener('input', () => { story.editDraft.durationText = duration.value; });
-        const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
-      } else {
-        li.append(element('p', 'block-preview', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
-        const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
-        edit.addEventListener('click', () => { if (batchBlocked() && !info.latest) return; if (info.latest) void openStoryAttempt(info.accepted || info.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...block}; renderStory(); } }); li.append(edit);
-        if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
-      }
-      if (!info.frozen) {
-        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.dataset.storyRemove = 'true'; remove.disabled = story.busy || batchBlocked();
-        remove.addEventListener('click', async () => {
-          if (batchBlocked() || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
-          const changed = storyBlocks().filter(item => item.id !== block.id);
-          if (story.candidate) { story.candidate.blocks = changed; story.editing = null; renderStory(); }
-          else if (await saveStoryBlocks(changed, changed.length ? story.doc.adopted : false)) { story.editing = null; renderStory(); }
-        }); li.append(remove);
-      } else li.append(element('p', 'caption', 'Bloco enviado: vídeo e histórico preservados.'));
-      if (!info.frozen) {
-        const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
-        for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
-          const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked() || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
-          if (delta !== 0) button.dataset.blockReason = !blocks[index + delta] ? 'Este bloco já está no limite da lista nessa direção.' : 'O bloco vizinho já tem uma tentativa registrada. Sua posição precisa ser preservada.';
-          button.addEventListener('click', async () => { if (!delta && !document.defaultView.confirm('Remover este bloco do plano? As tentativas permanecem no histórico.')) return; const changed = blocks.map(item => ({...item})); if (!delta) changed.splice(index, 1); else [changed[index], changed[index + delta]] = [changed[index + delta], changed[index]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
-        } li.append(organize);
-      }
-      if (info.attempts.length) {
-        const history = element('details'); history.append(element('summary', '', 'Ver versões e tentativas'));
-        for (const attempt of info.attempts) {
-          const row = element('div', 'story-version'), selected = info.selected?.run_id === attempt.run_id;
-          const button = element('button', '', `${attempt.intent_id.slice(0, 8)} · ${attempt.run?.state || attempt.state}`); button.type = 'button'; button.addEventListener('click', () => openStoryAttempt(attempt)); row.append(button);
-          if (attempt.run?.state === 'accepted') { const choose = element('button', '', selected ? 'Versão selecionada' : 'Usar esta versão'); choose.type = 'button'; choose.disabled = selected || editFence() || edit.busy; choose.setAttribute('aria-pressed', String(selected)); choose.addEventListener('click', () => selectStoryVersion(block.id, attempt.run)); row.append(choose); }
-          history.append(row);
-        }
-        li.append(history);
-      }
-      if (info.accepted && !story.candidate) { const editing = element('button', '', 'Editar vídeo'); editing.type = 'button'; editing.addEventListener('click', () => openStoryEdit(block.id)); li.append(editing); }
-      for (const record of edit.lists.get(story.doc.id) || []) if (record.block_id === block.id) { const pending = element('button', '', `Abrir edição · ${record.state} · ${record.id.slice(0, 8)}`); pending.type = 'button'; pending.addEventListener('click', () => { openStoryEdit(block.id, record); void readStoryEdit(); }); li.append(pending); }
-      $('story-blocks').append(li);
-    }
+    const recovery = [];
+    if (editRecovery?.roteiro === story.doc.id) { const pending = element('li', 'pending-card'); pending.append(element('p', 'operation', `Edição ${editRecovery.id} com resultado ainda não confirmado.`)); const read = element('button', '', 'Reler mesma edição'); read.type = 'button'; read.addEventListener('click', recoverStoryEdit); pending.append(read); recovery.push(pending); }
+    storyCards.reconcile(story.doc.id, blocks.map((block, index) => {
+      const info = storyBlockState(story.doc, block);
+      const signature = JSON.stringify([index, block.action, block.prompt, block.duration_seconds, block.seed, info.attempts.map(item => [item.intent_id, item.run_id, item.run?.state, item.state, Boolean(item.run?.output?.path)]), story.doc.selected_runs?.[block.id], index ? Boolean(storyBlockState(story.doc, blocks[index - 1]).accepted) : true, index ? storyBlockState(story.doc, blocks[index - 1]).frozen : null, index + 1 < blocks.length ? storyBlockState(story.doc, blocks[index + 1]).frozen : null, story.editing === block.id, Boolean(story.candidate), batchBlocked(), editFence(), edit.busy, story.busy, edit.lists.get(story.doc.id)?.filter(record => record.block_id === block.id).map(record => [record.id, record.state])]);
+      return {id: block.id, title: `${index + 1} · ${info.accepted ? 'Aceito' : 'Bloco do roteiro'}`, action: block.action, editing: story.editing === block.id, signature, build: () => { const current = storyBlocks(), position = current.findIndex(item => item.id === block.id); return renderStoryBlock(current[position], position, current); }};
+    }), recovery);
     text('story-adopt', story.candidate?.kind === 'tail' ? 'Usar esta continuação' : 'Usar este roteiro');
     $('story-adopt').hidden = story.doc.adopted && !story.candidate; $('story-next').hidden = !story.doc.adopted || Boolean(story.candidate);
     const next = story.doc.blocks.find(block => !storyBlockState(story.doc, block).accepted), info = next && storyBlockState(story.doc, next);
     text('story-next', !next ? 'Preparar montagem' : info.latest ? ['rejected', 'interrupted'].includes(info.latest.run?.state) ? 'Preparar outra tentativa' : info.latest.run?.state === 'ready_for_review' ? 'Revisar bloco' : 'Consultar envio do bloco' : `Preparar bloco ${story.doc.blocks.indexOf(next) + 1}`);
-    motion.changed('story', `${story.doc.id}:${story.doc.revision}:${story.candidate ? JSON.stringify(blocks.map(block => [block.id, block.action])) : ''}:${accepted}`, [...$('story-blocks').querySelectorAll('h3')], 'enter');
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
     if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true; controls();
@@ -2672,7 +2781,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
   const swipeBack = createBackSwipe(document, {back, canGoBack: () => !loadingScreen.key && state.trail.length > 0 && !(state.screen === 'story' && story.editing), navigationEpoch: () => state.navigationEpoch, presentation: {begin: () => swipePresentation.begin(state.trail.at(-1)), move: dx => swipePresentation.move(dx), cancel: () => swipePresentation.cancel(), commit: () => swipePresentation.commit()}});
-  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); swipePresentation.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); loadingScreen.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  document.defaultView?.addEventListener('pagehide', () => { storyCards.destroy(); storyElastic.destroy(); swipeBack.destroy(); swipePresentation.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); loadingScreen.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
