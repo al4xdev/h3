@@ -36,6 +36,7 @@ test('generic loading shows immediately and unblocks the real screen before exit
   assert.equal(f.nodes.get('loading-title').textContent, 'Carregando roteiro…');
   assert.equal(f.nodes.get('loading-back').hidden, true);
   assert.equal(f.animations[0].options.duration, 400);
+  assert.ok(f.animations[0].frames.every(frame => Object.keys(frame).every(key => key === 'opacity')));
   f.controller.end(ticket);
   assert.equal(f.controller.key, null); assert.equal(f.nodes.get('main').inert, false);
   assert.equal(panel.inert, true); assert.equal(panel.attrs['aria-busy'], 'false');

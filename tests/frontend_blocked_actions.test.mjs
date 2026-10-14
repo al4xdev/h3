@@ -58,8 +58,13 @@ test('touch location over a native disabled button shows feedback and stops ance
 });
 test('a blocked icon over a full-card button cannot open the card underneath', () => {
   const f = fixture(); let opened = 0; f.document.addEventListener('click', () => opened++);
-  const card = button('card-open'); card.disabled = false;
+  const card = button('card-open'); card.disabled = false; card.matches = selector => selector === '.clip-card,.card-open';
   const event = f.click(card); assert.equal(event.defaultPrevented, true); assert.equal(opened, 0); assert.equal(f.panel.hidden, false);
+});
+test('a disabled action behind the sticky header cannot swallow its enabled gear tap', () => {
+  const f = fixture(), gear = button('settings-open'); gear.disabled = false; gear.matches = () => false;
+  let calls = 0; f.document.addEventListener('click', () => calls++);
+  assert.equal(f.click(gear).defaultPrevented, false); assert.equal(calls, 1); assert.equal(f.panel.hidden, true);
 });
 test('enabled, hidden and inert actions are never intercepted, nor controls on top of feedback', () => {
   for (const scenario of ['enabled', 'hidden', 'feedback', 'outside']) {

@@ -473,28 +473,144 @@ export function createStoryClient(fetcher = globalThis.fetch.bind(globalThis)) {
     async generate(id, block, intent, body) { const key = attemptPath(id, block, intent); if (used.has(key)) throw new Error('Intenção já enviada; consulte o mesmo ID.'); used.add(key); return request(key, 'POST', body, 202); }};
 }
 
-export function createBackSwipe(document, {back, canGoBack, navigationEpoch}) {
+export function createBackSwipe(document, {back, canGoBack, navigationEpoch, presentation = {}, now = () => performance.now()}) {
   let gesture = null;
   const excluded = 'video,audio,input,textarea,select,button,a,summary,[contenteditable],.film-strip,.topbar,[data-no-swipe]';
+  const cancel = () => { if (gesture?.horizontal) presentation.cancel?.(); gesture = null; };
   const down = event => {
-    if (gesture || event.isPrimary === false) { gesture = null; return; }
-    if (event.pointerType !== 'touch' || event.clientX > 24 || !canGoBack() || event.target?.closest?.(excluded)) return;
-    gesture = {id: event.pointerId, x: event.clientX, y: event.clientY, epoch: navigationEpoch()};
+    if (gesture || event.touches.length !== 1) { cancel(); return; }
+    if (!canGoBack() || event.target?.closest?.(excluded)) return;
+    const point = event.touches[0];
+    gesture = {x: point.clientX, y: point.clientY, started: now(), epoch: navigationEpoch(), horizontal: false};
   };
   const move = event => {
-    if (!gesture || event.pointerId !== gesture.id) return;
-    const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
-    if (dx < -12 || (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx))) gesture = null;
+    if (!gesture) return;
+    if (event.touches.length !== 1 || !canGoBack() || gesture.epoch !== navigationEpoch()) { cancel(); return; }
+    const point = event.touches[0], dx = point.clientX - gesture.x, dy = Math.abs(point.clientY - gesture.y);
+    if (!gesture.horizontal) {
+      if (Math.max(Math.abs(dx), dy) <= 9) return;
+      if (dx < 0 || dy >= Math.abs(dx)) { cancel(); return; }
+      if (dx <= dy * 1.15) return;
+      gesture.horizontal = true; presentation.begin?.();
+    }
+    if (event.cancelable) event.preventDefault();
+    presentation.move?.(Math.max(0, dx));
   };
   const up = event => {
     const own = gesture; gesture = null;
-    if (!own || event.pointerId !== own.id || own.epoch !== navigationEpoch() || !canGoBack()) return;
-    const dx = event.clientX - own.x, dy = Math.abs(event.clientY - own.y);
-    if (dx >= 72 && dy <= 40 && dx > dy * 1.6) back();
+    if (!own?.horizontal) return;
+    const point = event.changedTouches[0], dx = Math.max(0, (point?.clientX ?? own.x) - own.x);
+    const velocity = dx / Math.max(1, now() - own.started);
+    if (own.epoch === navigationEpoch() && canGoBack() && (dx >= 96 || dx >= 24 && velocity > .55)) { presentation.commit?.(); back(); }
+    else presentation.cancel?.();
   };
-  const cancel = () => { gesture = null; };
-  for (const [name, handler] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', cancel]]) document.addEventListener(name, handler, {passive: true});
-  return {destroy() { cancel(); for (const [name, handler] of [['pointerdown', down], ['pointermove', move], ['pointerup', up], ['pointercancel', cancel]]) document.removeEventListener(name, handler); }};
+  for (const [name, handler, passive] of [['touchstart', down, true], ['touchmove', move, false], ['touchend', up, true], ['touchcancel', cancel, true], ['visibilitychange', cancel, true]]) document.addEventListener(name, handler, {passive});
+  return {destroy() { cancel(); for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel', 'visibilitychange']) document.removeEventListener(name, name === 'touchstart' ? down : name === 'touchmove' ? move : name === 'touchend' ? up : cancel); }};
+}
+
+export function captureView(document) {
+  if (!document.createElement || !document.body) return null;
+  const view = document.defaultView, host = document.createElement('div');
+  host.className = 'view-snapshot'; host.inert = true; host.setAttribute('aria-hidden', 'true');
+  // Shadow isolation keeps frozen IDs and CSS out of application queries and event handlers.
+  const root = host.attachShadow({mode: 'open'});
+  if (view.CSSStyleSheet && 'adoptedStyleSheets' in root) {
+    const sheet = new view.CSSStyleSheet();
+    const rules = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].map(rule => rule.cssText); } catch { return []; } }).join('\n');
+    sheet.replaceSync(`${rules}\n*,*::before,*::after{animation:none!important;transition:none!important;pointer-events:none!important}video,audio{display:none!important}`);
+    root.adoptedStyleSheets = [sheet];
+  } else {
+    for (const link of document.querySelectorAll('link[rel="stylesheet"]')) root.append(link.cloneNode(true));
+  }
+  for (const source of [document.querySelector('.topbar'), document.querySelector('main')].filter(Boolean)) {
+    const copy = source.cloneNode(true), rect = source.getBoundingClientRect();
+    const originals = [...source.querySelectorAll('video,canvas')], replicas = [...copy.querySelectorAll('video,canvas')];
+    for (const [index, media] of originals.entries()) {
+      const replica = replicas[index]; if (media.closest('[hidden]')) { replica.remove(); continue; }
+      const canvas = document.createElement('canvas');
+      canvas.className = media.className;
+      const width = media.videoWidth || media.width, height = media.videoHeight || media.height;
+      canvas.width = Math.min(width || 480, 720); canvas.height = width && height ? Math.round(canvas.width * height / width) : 864;
+      try { if (!media.closest('[hidden]') && width && height) canvas.getContext('2d').drawImage(media, 0, 0, canvas.width, canvas.height); } catch {}
+      canvas.style.width = '100%'; canvas.style.height = '100%'; canvas.style.objectFit = 'contain';
+      replica.replaceWith(canvas);
+    }
+    const originalsFields = source.querySelectorAll('input,textarea,select'), replicasFields = copy.querySelectorAll('input,textarea,select');
+    for (const [index, field] of [...replicasFields].entries()) { if (field.type !== 'file') field.value = originalsFields[index]?.value || ''; field.disabled = true; }
+    for (const node of copy.querySelectorAll('[hidden],script,iframe,object,audio')) node.remove();
+    copy.inert = true;
+    Object.assign(copy.style, {position: 'absolute', top: `${rect.top}px`, left: `${rect.left}px`, width: `${rect.width}px`, margin: '0'});
+    root.append(copy);
+  }
+  return host;
+}
+
+export function createSwipePresentation(document) {
+  const cache = new Map(), view = document.defaultView, reduced = view?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  let layer = null, front = null, backing = null, animation = null, committed = false, distance = 0;
+  const key = snapshot => `${snapshot.screen}:${snapshot.screen === 'story' ? snapshot.storyDoc?.id || '' : snapshot.selectedId || ''}:${snapshot.draftKey || ''}`;
+  function clear() { animation?.cancel(); animation = null; layer?.remove(); layer = front = backing = null; committed = false; distance = 0; }
+  function settle(end) {
+    animation?.cancel(); animation = null;
+    if (!front || reduced?.matches || document.hidden || !front.animate) { clear(); return; }
+    const own = front;
+    try { animation = front.animate([{transform: `translateX(${distance}px)`}, {transform: `translateX(${end}px)`}], {duration: 380, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'forwards'}); }
+    catch { clear(); return; }
+    const current = animation;
+    Promise.resolve(current.finished).catch(() => {}).finally(() => { if (front === own && animation === current) clear(); });
+  }
+  function begin(snapshot) {
+    clear(); if (reduced?.matches || document.hidden) return;
+    const prior = cache.get(key(snapshot)); if (!prior) return;
+    layer = document.createElement('div'); layer.className = 'swipe-preview'; layer.inert = true; layer.setAttribute('aria-hidden', 'true');
+    backing = prior; backing.className = 'view-snapshot swipe-backing';
+    front = captureView(document); if (!front) { clear(); return; }
+    front.className = 'view-snapshot swipe-front'; layer.append(backing, front); document.body.append(layer);
+  }
+  reduced?.addEventListener?.('change', clear); document.addEventListener('visibilitychange', clear); view?.addEventListener?.('resize', clear);
+  return {remember(snapshot) { const captured = captureView(document); if (!captured) return; const id = key(snapshot); cache.delete(id); cache.set(id, captured); while (cache.size > 6) cache.delete(cache.keys().next().value); }, begin,
+    move(dx) { distance = Math.min(dx, view.innerWidth); if (front) front.style.transform = `translateX(${distance}px)`; },
+    cancel() { if (layer) settle(0); }, commit() { committed = true; },
+    painted() { if (committed) settle(view.innerWidth); else clear(); },
+    get committing() { return committed; },
+    destroy() { clear(); cache.clear(); reduced?.removeEventListener?.('change', clear); document.removeEventListener('visibilitychange', clear); view?.removeEventListener?.('resize', clear); }};
+}
+
+export function disclosureState(document, screen) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`);
+  return [...(panel?.querySelectorAll('details') || [])].map((node, index) => ({index, open: node.open, id: node.id, block: node.closest('.story-block')?.dataset.blockId || null}));
+}
+
+export function restoreDisclosures(document, screen, saved) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`), nodes = [...(panel?.querySelectorAll('details') || [])];
+  for (const entry of saved) {
+    const node = entry.id ? nodes.find(node => node.id === entry.id) : entry.block ? nodes.find(node => node.closest('.story-block')?.dataset.blockId === entry.block) : nodes[entry.index];
+    if (node) node.open = entry.open;
+  }
+}
+
+export function selectionState(document, screen) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`);
+  return [...(panel?.querySelectorAll('input[id],textarea[id]') || [])].filter(node => node.selectionStart !== null).map(node => ({id: node.id, start: node.selectionStart, end: node.selectionEnd, direction: node.selectionDirection}));
+}
+
+export function restoreSelections(document, screen, saved) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`);
+  for (const entry of saved) { const node = document.getElementById(entry.id); if (node && panel?.contains(node)) try { node.setSelectionRange(entry.start, entry.end, entry.direction); } catch {} }
+}
+
+export function mediaState(document, screen) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`);
+  return [...(panel?.querySelectorAll('video[id]') || [])].filter(node => Number.isFinite(node.currentTime) && node.src).map(node => ({id: node.id, src: node.src, time: node.currentTime}));
+}
+
+export function restoreMediaState(document, screen, saved, current = () => true) {
+  const panel = document.querySelector(`[data-screen="${screen}"]`);
+  for (const entry of saved) {
+    const node = document.getElementById(entry.id); if (!node || !panel?.contains(node)) continue;
+    const restore = () => { if (current() && node.src === entry.src && Number.isFinite(entry.time)) try { node.currentTime = entry.time; } catch {} };
+    if (node.readyState > 0) restore(); else node.addEventListener('loadedmetadata', restore, {once: true});
+  }
 }
 export function motionSpec(kind = 'enter', {direction = 1, index = 0} = {}) {
   const delay = Number.isInteger(index) && index >= 0 && index < 6 ? index * 32 : 0;
@@ -510,14 +626,14 @@ export function createLoadingScreen(document) {
   const panel = document.getElementById('loading-screen');
   const title = document.getElementById('loading-title'), detail = document.getElementById('loading-detail'), close = document.getElementById('loading-back');
   const background = [document.querySelector('main'), document.querySelector('.topbar'), document.querySelector('.skip')].filter(Boolean);
-  let active = null, animation = null, previousInert = [], disposed = false;
+  let active = null, animation = null, previousInert = [], frozen = null, disposed = false;
   function stopMotion() { animation?.cancel(); animation = null; if (!active) panel.hidden = true; }
   function animate(leaving = false) {
     stopMotion();
     if (disposed || reduced?.matches || document.hidden || typeof panel.animate !== 'function') { if (leaving) panel.hidden = true; return; }
     panel.hidden = false;
     let current;
-    try { current = panel.animate(leaving ? [{opacity: 1, transform: 'translateX(0)'}, {opacity: 0, transform: 'translateX(-12px)'}] : [{opacity: 0, transform: 'translateX(12px)'}, {opacity: 1, transform: 'translateX(0)'}], {duration: 400, easing: 'cubic-bezier(.2,.8,.2,1)'}); }
+    try { current = panel.animate(leaving ? [{opacity: 1}, {opacity: 0}] : [{opacity: 0}, {opacity: 1}], {duration: 400, easing: 'cubic-bezier(.2,.8,.2,1)'}); }
     catch { if (leaving) panel.hidden = true; return; }
     animation = current;
     Promise.resolve(current.finished).catch(() => {}).finally(() => { if (animation === current) { animation = null; if (leaving && !active) panel.hidden = true; } });
@@ -526,6 +642,7 @@ export function createLoadingScreen(document) {
     if (!active || active !== ticket) return;
     const origin = active;
     active = null;
+    frozen?.remove(); frozen = null;
     for (const [node, inert] of previousInert) node.inert = inert;
     previousInert = [];
     panel.inert = true; panel.setAttribute('aria-busy', 'false'); panel.classList.add('loading-leaving');
@@ -540,6 +657,8 @@ export function createLoadingScreen(document) {
     if (disposed) return null;
     if (active) end(active, {cancel: true, motion: false});
     stopMotion();
+    frozen = captureView(document);
+    if (frozen) { frozen.classList.add('loading-frozen'); document.body.append(frozen); }
     const ticket = {key, onCancel, focus: document.activeElement};
     active = ticket;
     previousInert = background.map(node => [node, node.inert]);
@@ -799,6 +918,9 @@ export function createBlockedActionFeedback(document, reason) {
     if (event.target?.closest?.('#blocked-action-feedback')) return null;
     const direct = event.target?.closest?.('button:disabled');
     if (direct && !direct.closest('[hidden],[inert]')) return direct;
+    const tapped = event.target?.closest?.('button');
+    if (tapped && !tapped.matches('.clip-card,.card-open')) return null;
+    if (!tapped && event.target?.closest?.('.topbar')) return null;
     if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY) || event.detail === 0) return null;
     return [...document.querySelectorAll('button:disabled')].find(button => {
       if (button.closest('[hidden],[inert]')) return false;
@@ -822,6 +944,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const motion = createPresentationMotion(document);
   const screenTransitions = createScreenTransitions(document);
   const loadingScreen = createLoadingScreen(document);
+  const swipePresentation = createSwipePresentation(document);
   const grokWaiting = createGrokWaiting(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
   const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
@@ -905,7 +1028,8 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { message('duration-preview', error.message, true); message('block-summary', error.message, true); }
   }
   function paintScreen({focus = false, direction = 1} = {}) {
-    screenTransitions.paint(state.screen, () => paintScreenNow({focus, direction}), direction);
+    if (swipePresentation.committing) { paintScreenNow({focus, direction}); swipePresentation.painted(); }
+    else { swipePresentation.painted(); screenTransitions.paint(state.screen, () => paintScreenNow({focus, direction}), direction); }
   }
   function paintScreenNow({focus = false, direction = 1} = {}) {
     for (const panel of document.querySelectorAll('[data-screen]')) {
@@ -943,7 +1067,7 @@ export function startUI(document, client = createClient(), stories = createStory
     }
   }
   function viewSnapshot() {
-    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, branchEnd: state.openedBranchEnd || null, scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
+    return {screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: state.parent, statusOnly: state.statusOnly, settingsOrigin: state.settingsOrigin, storyCreating: story.creating, storyBlock: story.block, storyDoc: story.doc, storyCandidate: story.candidate, selectedId: state.selected?.id || null, selectedRun: state.selected, sequence: state.sequence, branchSequence: state.branchSequence, branchEnd: state.openedBranchEnd || null, disclosures: disclosureState(document, state.screen), selections: selectionState(document, state.screen), media: mediaState(document, state.screen), scroll: document.defaultView?.scrollY || 0, focus: document.activeElement?.id || null};
   }
   function recordView(snapshot = viewSnapshot(), push = false) {
     const view = document.defaultView;
@@ -961,6 +1085,7 @@ export function startUI(document, client = createClient(), stories = createStory
     const replaceReview = screen === 'review' && previous.screen === 'story' && state.screen !== 'story' && state.trail.at(-1)?.screen === 'story' && state.trail.at(-1)?.storyDoc?.id === previous.storyDoc?.id;
     if (screen === 'review' && previous.screen === 'story') { const prior = state.trail.findLastIndex(view => view.screen === 'story' && view.storyDoc?.id === previous.storyDoc?.id); if (prior >= 0) state.trail = state.trail.slice(0, prior); }
     if (remember && changing) {
+      swipePresentation.remember(previous);
       historyViews.set(historyToken, {snapshot: previous, trail: [...state.trail]});
       state.trail.push(previous);
     }
@@ -973,12 +1098,16 @@ export function startUI(document, client = createClient(), stories = createStory
     if (removedRuns.has(snapshot.selectedId)) snapshot = {...snapshot, selectedId: null, branchEnd: null};
     const epoch = ++state.navigationEpoch; ++state.retryEpoch; saveDraft();
     story.doc = snapshot.storyDoc || null; story.candidate = snapshot.storyCandidate || null;
-    if (snapshot.selectedId && (snapshot.selectedId !== state.selected?.id || snapshot.branchEnd !== state.openedBranchEnd) && !state.busy) await select(snapshot.selectedId, undefined, {branchEnd: snapshot.branchEnd});
+    if (snapshot.selectedRun?.id === snapshot.selectedId) Object.assign(state, {selected: snapshot.selectedRun, sequence: snapshot.sequence, branchSequence: snapshot.branchSequence, openedBranchEnd: snapshot.branchEnd});
+    else if (snapshot.selectedId && (snapshot.selectedId !== state.selected?.id || snapshot.branchEnd !== state.openedBranchEnd) && !state.busy) await select(snapshot.selectedId, undefined, {branchEnd: snapshot.branchEnd});
     if (epoch !== state.navigationEpoch || stopped) return;
     if (snapshot.selectedId && state.selected?.id !== snapshot.selectedId) { navigate('library', {remember: false}); message('notice', 'O bloco desta navegação não está disponível. Releia a biblioteca.', true); return; }
     Object.assign(state, {mode: snapshot.mode, draftKey: snapshot.draftKey, parent: snapshot.parent, statusOnly: snapshot.statusOnly, settingsOrigin: snapshot.settingsOrigin, screen: snapshot.screen, trail: [...trail]});
     story.creating = Boolean(snapshot.storyCreating); story.block = snapshot.storyBlock || null;
     restoreDraft(); state.statusOnly ||= draft().submitted; paintScreen({direction: -1}); controls();
+    if (snapshot.disclosures) restoreDisclosures(document, snapshot.screen, snapshot.disclosures);
+    if (snapshot.selections) restoreSelections(document, snapshot.screen, snapshot.selections);
+    if (snapshot.media) restoreMediaState(document, snapshot.screen, snapshot.media, () => epoch === state.navigationEpoch);
     const node = $(snapshot.focus);
     // Returning to settings' origin never opens a software keyboard by itself.
     const target = node && !node.disabled && !node.closest('[hidden],[inert]') && !node.matches(':disabled,input,select,textarea,[contenteditable]') ? node : $('screen-title');
@@ -986,7 +1115,9 @@ export function startUI(document, client = createClient(), stories = createStory
     recordView();
   }
   function back() {
+    if (loadingScreen.key) return;
     if (state.screen === 'story' && story.editing) { story.pendingEdit = 'back'; $('story-unsaved').hidden = false; return; }
+    swipePresentation.remember(viewSnapshot());
     if (state.trail.length && document.defaultView?.history) document.defaultView.history.back();
     else if (state.trail.length) { const target = state.trail.pop(); void restoreView(target, state.trail); }
   }
@@ -1275,6 +1406,7 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-new-send').hidden = !state.statusOnly || !story.rejectedReady || story.rejectedReady.owner.id !== story.doc?.id || story.rejectedReady.owner.block !== story.block || story.rejectedReady.owner.intent !== story.intent;
     $('story-new-send').disabled = batchBlocked() || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
     for (const id of ['story-add', 'story-adopt', 'story-propose-again', 'story-delete']) $(id).disabled = batchBlocked() || story.busy;
+    for (const button of document.querySelectorAll('[data-story-remove]')) button.disabled = batchBlocked() || story.busy;
     $('story-name').disabled = batchBlocked();
     renderTail();
     text('story-prompt-origin', `Origem: ${draft().promptOrigin || 'roteiro'}`);
@@ -1306,7 +1438,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('generation-context', `${contextLabel()} · 480 × 864 · parâmetros nativos preservados.`);
     text('continuation-parent', `Pai aceito: ${state.parent?.id || '—'} · ${contextLabel()}`);
     text('assembly-chain', (state.sequence?.blocks || []).map((block, index) => `${index + 1}. ${block.id.slice(0, 8)} · ${label(block)}`).join(' → ') || 'Nenhuma sequência selecionada.');
-    $('open-assembly').disabled = !state.config?.assembly_enabled || !state.selected;
+    $('open-assembly').disabled = state.busy || !state.config?.assembly_enabled || !state.selected;
     $('continue-idea').disabled = state.parent?.state !== 'accepted';
     $('use-idea').disabled = $('grok-use').disabled = $('use-late-proposal').disabled = state.busy || state.uploadBusy;
     $('late-proposal-details').hidden = !draft().lateProposal;
@@ -1585,7 +1717,7 @@ export function startUI(document, client = createClient(), stories = createStory
         if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
       }
       if (!info.frozen) {
-        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.disabled = story.busy || batchBlocked();
+        const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.dataset.storyRemove = 'true'; remove.disabled = story.busy || batchBlocked();
         remove.addEventListener('click', async () => {
           if (batchBlocked() || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
           const changed = storyBlocks().filter(item => item.id !== block.id);
@@ -1611,10 +1743,10 @@ export function startUI(document, client = createClient(), stories = createStory
     motion.changed('story', `${story.doc.id}:${story.doc.revision}:${story.candidate ? JSON.stringify(blocks.map(block => [block.id, block.action])) : ''}:${accepted}`, [...$('story-blocks').querySelectorAll('h3')], 'enter');
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
-    if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true;
-    try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; renderStory(); message('story-status', ''); return true; }
+    if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true; controls();
+    try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; message('story-status', ''); return true; }
     catch (error) { message('story-status', error.status === 409 ? 'O roteiro mudou no PC. Confira a outra versão antes de salvar. Sua edição foi mantida.' : `Não foi possível salvar: ${error.message}`, true); return false; }
-    finally { story.busy = false; }
+    finally { story.busy = false; renderStory(); controls(); }
   }
   async function saveStoryEdit() {
     try { const changed = {...story.editDraft, duration_seconds: parseDuration(story.editDraft.durationText ?? String(story.editDraft.duration_seconds), state.capabilities)}; delete changed.durationText; sceneText(changed.action); const blocks = storyBlocks().map(item => item.id === changed.id ? changed : item);
@@ -2275,8 +2407,8 @@ export function startUI(document, client = createClient(), stories = createStory
   for (const figure of document.querySelectorAll('.visual-card')) { const button = element('button', '', 'Ampliar imagem'); button.type = 'button'; button.addEventListener('click', () => { const expanded = figure.classList.toggle('expanded'); button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Reduzir imagem' : 'Ampliar imagem'; }); figure.append(button); }
   const frameRead = element('button', '', 'Reler frame'); frameRead.id = 'last-frame-read'; frameRead.type = 'button'; frameRead.addEventListener('click', () => { state.lastFrame.parentId = null; loadLastFrame(); }); $('continuation-visuals').append(frameRead);
   $('player').addEventListener('error', () => { message('notice', 'O vídeo não pôde ser carregado. O estado foi preservado; atualize os metadados para verificar a publicação.', true); });
-  const swipeBack = createBackSwipe(document, {back, canGoBack: () => state.trail.length > 0, navigationEpoch: () => state.navigationEpoch});
-  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); loadingScreen.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
+  const swipeBack = createBackSwipe(document, {back, canGoBack: () => !loadingScreen.key && state.trail.length > 0 && !(state.screen === 'story' && story.editing), navigationEpoch: () => state.navigationEpoch, presentation: {begin: () => swipePresentation.begin(state.trail.at(-1)), move: dx => swipePresentation.move(dx), cancel: () => swipePresentation.cancel(), commit: () => swipePresentation.commit()}});
+  document.defaultView?.addEventListener('pagehide', () => { swipeBack.destroy(); swipePresentation.destroy(); for (const view of Object.values(stopViews)) view.destroy(); for (const {view} of libraryStops.values()) view.destroy(); loadingScreen.destroy(); screenTransitions.destroy(); motion.destroy(); stopped = true; ++state.epoch; ++libraryEpoch; ++assemblyEpoch; events?.close(); state.waitController?.abort(); });
   document.defaultView?.addEventListener('popstate', event => {
     historyViews.set(historyToken, {snapshot: viewSnapshot(), trail: [...state.trail]});
     const remembered = historyViews.get(event.state?.h3View);
@@ -2296,11 +2428,6 @@ export function startUI(document, client = createClient(), stories = createStory
     discoverBatch(),
     state.config?.roteiro_enabled === false ? Promise.resolve() : stories.editor().then(config => { $('story-system').value = config.system_prompt; $('story-model').value = config.model; $('story-system').disabled = $('story-editor-save').disabled = false; }).catch(error => message('story-editor-status', `Roteirista indisponível: ${error.message}. O editor de blocos continua separado.`, true)),
   ]), error => [{status: 'rejected', reason: error}]).then(async results => {
-    if (state.config?.assembly_enabled && pointer) {
-      // Recovery is a view reached from the library, never a command or a dead end.
-      navigate('assembly', {focus: false});
-      await readAssembly({restoreSelection: true});
-    }
     if (storyRecovery?.roteiro) {
       const opened = await openStory(storyRecovery.roteiro);
       if (opened) { story.block = storyRecovery.block; story.intent = storyRecovery.intent; }
@@ -2317,6 +2444,11 @@ export function startUI(document, client = createClient(), stories = createStory
     await reconcilePendingNotice();
     if (state.conversionId) await readConversion();
     if (story.tailOwner) { if (!storyRecovery?.roteiro) await openStory(story.tailOwner.roteiro); await readTail(); }
+    if (state.config?.assembly_enabled && pointer) {
+      // A direct assembly URL keeps its destination after recovering linked intents.
+      navigate('assembly', {focus: false});
+      await readAssembly({restoreSelection: true});
+    }
     const errors = results.filter(result => result.status === 'rejected');
     message('notice', errors.length ? `API indisponível ou incompleta: ${errors.map(result => result.reason.message).join(' · ')}. Gerar requer configuração válida.` : 'Escolha um bloco, assista e decida. Nenhuma geração é automática.', errors.length > 0);
     paintScreen(); controls(); refreshActive = false; drainChanges();

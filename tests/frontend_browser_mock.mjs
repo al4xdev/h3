@@ -85,6 +85,15 @@ const posts = () => requests.filter(item => item.method === 'POST');
 const inference = () => posts().filter(item => item.path === '/runs/i2v' || item.path.endsWith('/v2v'));
 const grokPosts = () => posts().filter(item => item.path === '/grok');
 const assemblyPosts = () => posts().filter(item => item.path.startsWith('/assemblies/'));
+async function fixtureVideo(route, bytes) {
+  if (!bytes) return route.fulfill({status:204});
+  const range = route.request().headers().range, headers = {'Accept-Ranges':'bytes','Content-Type':'video/mp4'};
+  if (!range) return route.fulfill({status:200,headers:{...headers,'Content-Length':String(bytes.length)},body:bytes});
+  const match = /^bytes=(\d+)-(\d*)$/.exec(range); assert.ok(match, `Supported fixture range: ${range}`);
+  const start = Number(match[1]), end = Math.min(match[2] ? Number(match[2]) : bytes.length-1,bytes.length-1);
+  if (start > end) return route.fulfill({status:416,headers:{...headers,'Content-Range':`bytes */${bytes.length}`}});
+  return route.fulfill({status:206,headers:{...headers,'Content-Range':`bytes ${start}-${end}/${bytes.length}`,'Content-Length':String(end-start+1)},body:bytes.subarray(start,end+1)});
+}
 const browser = await chromium.launch({headless: true});
 const context = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', serviceWorkers: 'block'});
 async function routeRequest(route) {
@@ -122,7 +131,9 @@ async function routeRequest(route) {
     return json({items: references, total: references.length});
   }
   if (['/assets/image', '/inputs/image'].includes(path) || path.endsWith('/image')) return route.fulfill({contentType: 'image/png', body: image});
-  if (path === '/favorites') return json({items: [], total: 0});
+  if (path === '/favorites' || path === '/roteiros') return json({items: [], total: 0});
+  if (path === '/roteiro-batches/current') return json({batch: null});
+  if (path === '/roteiros/editor') return json({system_prompt: 'Planeje blocos.', model: pin});
   if (path === '/runs' || path === '/library/freestyle') { const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 50); return mode === 'list-error' ? json({detail: 'Leitura indisponível <b>texto</b>'}, 503) : json({items: mode === 'empty' ? [] : runs.slice(offset, offset + limit).map(slimRun), total: mode === 'empty' ? 0 : runs.length}); }
   if (method === 'POST' && (path === '/runs/i2v' || path.endsWith('/v2v'))) {
     if (mode === 'ambiguous') return route.abort('connectionfailed');
@@ -148,14 +159,14 @@ async function routeRequest(route) {
     const record = assemblies.find(item => item.id === id);
     if (assemblyMode === 'read-error') return json({detail: 'Leitura do próprio UUID indisponível'}, 503);
     if (!record) return json({detail: 'ID não publicado'}, 404);
-    if (path.endsWith('/video')) return route.fulfill(assemblyMedia ? {contentType: 'video/mp4', body: assemblyMedia} : {status: 204});
+    if (path.endsWith('/video')) return fixtureVideo(route, assemblyMedia);
     if (assemblyMode === 'read-missing-proof') return json({...record, video_url: null, output: {}});
     return json(record);
   }
   if (path.startsWith('/runs/')) {
     const run = runs.find(item => item.id === path.split('/')[2]); if (!run) return json({detail: 'Run not found'}, 404);
     if (path === `/runs/${rootID}` && detailGate) await detailGate;
-    if (path.endsWith('/video')) return route.fulfill(media ? {contentType: 'video/mp4', body: media} : {status: 204});
+    if (path.endsWith('/video')) return fixtureVideo(route, media);
     if (method === 'POST' && /\/(accept|reject)$/.test(path)) { assert.equal(run.state, 'ready_for_review'); if (mode === 'decision-error') return json({detail: 'Decisão recusada'}, 409); if (decisionGate) await decisionGate; run.state = path.endsWith('/accept') ? 'accepted' : 'rejected'; run.decision = {accepted: run.state === 'accepted', at: '2026-10-12T20:00:02Z'}; return json(run); }
     if (path.endsWith('/sequence')) {
       const chain = []; let current = run; while (current) { chain.unshift(current); current = runs.find(item => item.id === current.parent_id); }
@@ -182,7 +193,7 @@ await context.route('**/*', routeRequest); await context.addInitScript(mockStart
 const page = await context.newPage();
 function watch(page) { page.on('pageerror', error => exceptions.push(error.message)); page.on('console', message => { if (message.type() === 'error') consoleMessages.push(message.text()); }); page.on('requestfailed', request => failedRequests.push({url: request.url(), reason: request.failure()?.errorText})); }
 watch(page);
-async function ready(href = 'http://h3.mock.invalid/?other=keep#viewer') { await page.goto(href); await page.locator('#notice').filter({hasText: /Escolha um bloco|API indisponível/}).waitFor(); await expandFreestyle(page); }
+async function ready(href = 'http://h3.mock.invalid/?other=keep#viewer') { await page.goto(href); await page.locator('#notice').filter({hasText: /Escolha um bloco|API indisponível/}).waitFor(); await page.locator('#loading-screen').waitFor({state:'hidden'}); await expandFreestyle(page); }
 async function active(screen) { await page.locator(`[data-screen="${screen}"]`).waitFor({state: 'visible'}); assert.equal(await page.locator('[data-screen]:visible').count(), 1); }
 async function audit(name, target = page) {
   const bounds = await target.evaluate(() => ({width: innerWidth, height: innerHeight, scrollX, scrollY, visualViewport: {x: visualViewport.offsetLeft, y: visualViewport.offsetTop, width: visualViewport.width, height: visualViewport.height, scale: visualViewport.scale}, heading: document.getElementById('screen-title').getBoundingClientRect().toJSON(), overflow: document.documentElement.scrollWidth > innerWidth, active: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => node.dataset.screen), hiddenInert: [...document.querySelectorAll('[data-screen][hidden]')].every(node => node.inert), hiddenFocus: Boolean(document.activeElement?.closest('[data-screen][hidden]')), controls: [...document.querySelectorAll('button')].filter(node => node.getClientRects().length).map(node => ({id: node.id, height: node.getBoundingClientRect().height, width: node.getBoundingClientRect().width})), panels: [...document.querySelectorAll('[data-screen]')].filter(node => !node.hidden).map(node => ({screen: node.dataset.screen, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflow: getComputedStyle(node).overflow, bounds: node.getBoundingClientRect().toJSON()}))}));
@@ -220,11 +231,11 @@ async function capture(name, target = page, {directory = artifacts, animations =
   // An explicit document-origin clip avoids mobile IME/compositor scroll races.
   await target.screenshot({path, animations, clip: {x: 0, y: 0, width: size.width, height: size.height}}); captures.push(path);
 }
-async function expandFreestyle(target) { if (!await target.locator('#freestyle-group').evaluate(node => node.open)) await target.locator('#freestyle-group>summary').click(); }
+async function expandFreestyle(target) { if (await target.locator('#freestyle-group>summary').isVisible() && !await target.locator('#freestyle-group').evaluate(node => node.open)) await target.locator('#freestyle-group>summary').click(); }
 async function rootLibrary(target = page) {
   for (let i = 0; i < 80 && !await target.locator('[data-screen="library"]').isVisible(); i++) {
     const token = await target.evaluate(() => history.state?.h3View);
-    await target.locator('#back').click();
+    await target.locator('body > .topbar #back').click();
     await target.waitForFunction(previous => history.state?.h3View !== previous, token);
     await target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   }
@@ -232,7 +243,8 @@ async function rootLibrary(target = page) {
   await expandFreestyle(target);
 }
 async function beginIdea(target = page) { await rootLibrary(target); await target.locator('#new-mode').click(); await target.locator('[data-screen="context"]').waitFor({state: 'visible'}); }
-async function openRun(id) { await rootLibrary(); await page.getByRole('button', {name: new RegExp(id)}).click(); await active('review'); }
+async function openRun(id) { await rootLibrary(); const index = runs.findIndex(run => run.id === id); assert.ok(index >= 0); await page.locator('#library .clip-card').nth(index).click(); await active('review'); await page.locator('#loading-screen').waitFor({state:'hidden'}); }
+async function openAssembly(target = page) { await target.locator('#viewer .metadata').evaluate(node => { node.open = true; }); await target.locator('#open-assembly').click(); }
 async function newIdea(text = 'Uma ideia simples') { await beginIdea(); await active('context'); await page.locator('#idea').fill(text); }
 async function settings(target = page) {
   // Locator.click pre-scrolls sticky controls in Chromium; a native visible-header
@@ -241,7 +253,8 @@ async function settings(target = page) {
   assert.ok(gear && gear.width >= 44 && gear.height >= 44 && gear.y >= 0 && gear.y + gear.height <= target.viewportSize().height);
   if (before.touch) await target.touchscreen.tap(gear.x + gear.width / 2, gear.y + gear.height / 2);
   else await target.mouse.click(gear.x + gear.width / 2, gear.y + gear.height / 2);
-  await target.locator('[data-screen="settings"]').waitFor({state: 'visible'}); audits.push({name: 'native-header-gear', before, gear});
+  try { await target.locator('[data-screen="settings"]').waitFor({state: 'visible'}); } catch(error) { audits.push({name:'failed-native-header-gear',before,gear,diagnostic:await target.evaluate(({x,y})=>({hit:document.elementFromPoint(x,y)?.outerHTML,touchLog:window.touchLog,active:document.querySelector('[data-screen]:not([hidden])').dataset.screen,loading:document.getElementById('loading-screen').hidden,animations:document.getAnimations().map(a=>({target:a.effect?.target?.id,state:a.playState}))}),{x:gear.x+gear.width/2,y:gear.y+gear.height/2})}); await target.screenshot({path:resolve(motionArtifacts,'failed-native-header-gear.png')}); throw error; } audits.push({name: 'native-header-gear', before, gear});
+  if (!await target.locator('.grok-settings').evaluate(node => node.open)) await target.locator('.grok-settings>summary').tap();
 }
 async function setBlock(duration, seed = null, target = page) {
   const before = posts().length, puts = requests.filter(item => item.method === 'PUT').length;
@@ -253,14 +266,17 @@ async function setBlock(duration, seed = null, target = page) {
 }
 async function prepare(text = 'Uma ideia simples', duration = '2.3') { await newIdea(text); await page.locator('#use-idea').click(); await active('generation'); await setBlock(duration); }
 async function reachable(id, target = page) {
+  if (id === 'open-assembly') await target.locator('#viewer .metadata').evaluate(async node => { node.open = true; await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); await Promise.allSettled(node.getAnimations({subtree:true}).map(animation => animation.finished)); });
+  await target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await target.locator(`#${id}`).evaluate(node => node.scrollIntoView({block: 'center', behavior: 'instant'}));
-  const hit = await target.locator(`#${id}`).evaluate(node => { const box = node.getBoundingClientRect(), view = visualViewport; return {inside: box.top >= view.offsetTop && box.bottom <= view.offsetTop + view.height, hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)?.closest('button')?.id}; });
+  const hit = await target.locator(`#${id}`).evaluate(node => { const box = node.getBoundingClientRect(), view = visualViewport, details = node.closest('details'), pseudo = details && getComputedStyle(details,'::details-content'); return {inside: box.top >= view.offsetTop && box.bottom <= view.offsetTop + view.height, hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)?.closest('button')?.id, box:box.toJSON(), viewport:{width:innerWidth,height:innerHeight,offsetTop:view.offsetTop,heightVisual:view.height},scroll:scrollY,scrollHeight:document.documentElement.scrollHeight,pseudo:pseudo && {height:pseudo.height,transition:pseudo.transition,overflow:pseudo.overflow},reduced:matchMedia('(prefers-reduced-motion:reduce)').matches}; });
+  audits.push({name:`reachable-${id}`, ...hit});
   assert.ok(hit.inside); assert.equal(hit.hit, id);
 }
 async function emitHints() { await page.evaluate(() => { mockEvents[0]?.emit('open'); for (let i = 0; i < 12; i++) mockEvents[0]?.emit('change', {path: '.data/runs/own/manifest.json', invalidation: true}); }); await page.locator('#notice').filter({hasText: /Biblioteca atualizada|Resultado anterior incerto/}).waitFor(); }
 async function settingsRoundTrip(origin, target = page) {
   // Test prior non-editable origin focus without requiring a software keyboard.
-  const focusID = {library: 'new-mode', context: 'use-idea', proposal: 'edit-idea', generation: 'screen-title', review: 'open-assembly', continuation: 'continue-idea', assembly: 'assembly-refresh'}[origin];
+  const focusID = {library: 'new-mode', context: 'use-idea', proposal: 'edit-idea', generation: 'screen-title', review: 'screen-title', continuation: 'continue-idea', assembly: 'assembly-refresh'}[origin];
   await target.locator(`#${focusID}`).evaluate(node => node.focus({preventScroll: true}));
   const snapshot = await target.evaluate(() => ({scroll: scrollY, focus: document.activeElement.id, draft: ['idea', 'prompt', 'seed', 'duration', 'reference', 'grok-result'].map(id => [id, document.getElementById(id).value])}));
   const before = posts().length, puts = requests.filter(item => item.method === 'PUT').length;
@@ -291,7 +307,75 @@ async function cardGesture(target, name) {
   assert.ok(after.y > before.y + 30, `${name}: touch on a card scrolls document (${before.y}→${after.y}, max ${after.max})`); assert.equal(after.list, before.list); assert.equal(after.screen, 'library'); assert.equal(posts().length, count); assert.equal(after.owner, true);
   await audit(`${name}-sticky`, target); await reachable('new-mode', target);
 }
+
+async function swipeChecks() {
+  for (const preference of ['no-preference', 'reduce']) {
+    const own = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: preference, serviceWorkers: 'block'});
+    await own.route('**/*', routeRequest); await own.addInitScript(mockStartup); await own.addInitScript(() => { window.touchLog=[]; for(const type of ['pointerdown','pointerup','pointercancel','click']) document.addEventListener(type,event=>touchLog.push({type,id:event.target.id,parent:event.target.parentElement?.id,x:event.clientX,y:event.clientY,scroll:scrollY}),true); });
+    await own.addInitScript(() => {
+      window.mediaRestoreLog = [];
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime'), originalLoad = HTMLMediaElement.prototype.load;
+      const log = (node, kind, extra = {}) => mediaRestoreLog.push({kind,id:node.id,src:node.src,time:descriptor.get.call(node),ready:node.readyState,screen:document.querySelector('[data-screen]:not([hidden])')?.dataset.screen,...extra});
+      Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {...descriptor,set(value) { log(this,'set-time',{value,stack:new Error().stack}); descriptor.set.call(this,value); }});
+      HTMLMediaElement.prototype.load = function() { log(this,'load',{stack:new Error().stack}); return originalLoad.call(this); };
+      for (const kind of ['loadedmetadata','emptied','seeking','seeked','pause']) document.addEventListener(kind,event => { if(event.target instanceof HTMLMediaElement) log(event.target,kind); },true);
+    });
+    const target = await own.newPage(); watch(target); target.setDefaultTimeout(8000);
+    const cdp = await own.newCDPSession(target);
+    const frame = () => target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const point = async () => target.evaluate(() => {
+      const excluded = 'video,audio,input,textarea,select,button,a,summary,[contenteditable],.film-strip,.topbar,[data-no-swipe]';
+      for (let y = 145; y < 650; y += 20) {
+        const node = document.elementFromPoint(100, y);
+        if (node && !node.closest(excluded) && node.closest('[data-screen]:not([hidden])')) return {x: 100, y, tag: node.tagName, id: node.id};
+      }
+      throw Error('No safe document area for a real touch swipe');
+    });
+    const touch = (type, p) => cdp.send('Input.dispatchTouchEvent', {type, touchPoints: p ? [{x: p.x, y: p.y, radiusX: 4, radiusY: 4, force: 1, id: 1}] : []});
+    const frozen = () => target.evaluate(() => {
+      const front = document.querySelector('.swipe-front'), backing = document.querySelector('.swipe-backing');
+      return {screen: document.querySelector('[data-screen]:not([hidden])').dataset.screen, scroll: scrollY, frontX: front ? new DOMMatrixReadOnly(getComputedStyle(front).transform).m41 : null, backingX: backing ? new DOMMatrixReadOnly(getComputedStyle(backing).transform).m41 : null, frontTitle: front?.shadowRoot?.getElementById('screen-title')?.textContent, backingTitle: backing?.shadowRoot?.getElementById('screen-title')?.textContent, inert: front?.inert && backing?.inert};
+    });
+    const snap = async name => { const path = resolve(motionArtifacts, `${preference}-${name}.png`); await target.screenshot({path, animations: 'allow'}); captures.push(path); };
+    try {
+      await target.goto('http://h3.mock.invalid/'); await target.locator('#notice').filter({hasText:'Escolha um bloco'}).waitFor(); await target.locator('#loading-screen').waitFor({state:'hidden'});
+      await target.locator('#new-mode').tap(); await target.locator('#idea').fill('Rascunho preservado durante o gesto de voltar.'); await target.locator('#reference').selectOption('1');
+      await target.locator('#idea').evaluate(node => { node.focus({preventScroll:true}); node.setSelectionRange(3,15); window.scrollTo(0,180); }); await frame();
+      const before = await target.evaluate(() => ({scroll:scrollY, text:document.getElementById('idea').value, selection:[document.getElementById('idea').selectionStart,document.getElementById('idea').selectionEnd], reference:document.getElementById('reference').value}));
+      await settings(target); await target.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running')); await frame(); const count = posts().length; const token = await target.evaluate(() => history.state.h3View);
+      let p = await point(); await touch('touchStart',p); await touch('touchMove',{...p,x:p.x+16}); await frame(); await touch('touchMove',{...p,x:p.x+40}); await frame();
+      const short = await frozen(); assert.equal(short.screen,'settings'); assert.equal(await target.evaluate(() => history.state.h3View),token,'No Back before release');
+      if(preference==='no-preference') { assert.equal(short.frontX,40); assert.equal(short.backingX,0); assert.equal(short.frontTitle,'Ajustes'); assert.equal(short.backingTitle,'Referência e ideia'); assert.equal(short.inert,true); } else assert.equal(short.frontX,null);
+      await snap('back-short-mid'); await target.waitForTimeout(220); await touch('touchEnd'); await target.waitForFunction(() => !document.querySelector('.swipe-preview')); assert.equal((await frozen()).screen,'settings'); assert.equal(await target.evaluate(() => history.state.h3View),token);
+      p=await point(); await touch('touchStart',p); for(const dx of [16,70,150]) { await touch('touchMove',{...p,x:p.x+dx}); await frame(); }
+      const mid=await frozen(); assert.equal(mid.screen,'settings'); if(preference==='no-preference') assert.equal(mid.frontX,150); await snap('back-complete-mid');
+      await touch('touchEnd'); await target.waitForFunction(() => !document.querySelector('.swipe-preview')); await target.locator('[data-screen="context"]').waitFor({state:'visible'}); await frame();
+      const after=await target.evaluate(() => ({scroll:scrollY,text:document.getElementById('idea').value,selection:[document.getElementById('idea').selectionStart,document.getElementById('idea').selectionEnd],reference:document.getElementById('reference').value}));
+      audits.push({name:`swipe-${preference}`,start:p,before,short,mid,after}); assert.equal(after.text,before.text); assert.equal(after.reference,before.reference); assert.ok(Math.abs(after.scroll-before.scroll)<=2); assert.deepEqual(after.selection,before.selection); assert.equal(posts().length,count); await snap('back-settled');
+      await target.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running')); await settings(target); await target.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running')); await target.evaluate(() => scrollTo(0,0)); await frame(); p=await point(); const scrollBefore=await target.evaluate(() => scrollY); await touch('touchStart',{...p,y:Math.max(p.y,400)}); for(const dy of [25,70,180]) { await touch('touchMove',{...p,y:Math.max(p.y,400)-dy}); await frame(); } await touch('touchEnd'); await frame(); assert.ok(await target.evaluate(() => scrollY)>scrollBefore+30,'Vertical document scroll stays native'); assert.equal((await frozen()).screen,'settings'); assert.equal(await target.locator('.swipe-preview').count(),0); assert.equal(posts().length,count);
+      await rootLibrary(target); detailGate=new Promise(resolve => {releaseDetail=resolve;}); const opening=target.getByRole('button',{name:new RegExp(rootID.slice(0,8))}).tap(); await target.locator('#loading-screen[aria-busy="true"]').waitFor({state:'visible'}); await opening;
+      const loadingToken=await target.evaluate(() => history.state.h3View); await touch('touchStart',{x:100,y:180}); await touch('touchMove',{x:270,y:185}); await frame(); await snap('loading-locked'); await touch('touchEnd'); assert.equal(await target.locator('.swipe-preview').count(),0); assert.equal(await target.evaluate(() => history.state.h3View),loadingToken); assert.equal(await target.locator('.loading-frozen').count(),1); assert.equal(posts().length,count); releaseDetail(); detailGate=null; await target.locator('#loading-screen').waitFor({state:'hidden'}); await target.locator('[data-screen="review"]').waitFor({state:'visible'}); await audit(`swipe-${preference}-review`,target);
+      if (media) {
+        await target.waitForFunction(() => document.getElementById('player').videoWidth > 0);
+        await target.locator('#player').evaluate(async video => { await video.play(); });
+        await target.waitForFunction(() => document.getElementById('player').currentTime > 0.6);
+        await target.locator('#player').evaluate(video => video.pause());
+        const reviewBefore = await target.evaluate(() => ({time: document.getElementById('player').currentTime, paused: document.getElementById('player').paused, src: document.getElementById('player').getAttribute('src'), chain: document.getElementById('sequence').textContent, run: document.getElementById('metadata').textContent}));
+        await settings(target); await target.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running')); p = await point(); await touch('touchStart', p); for (const dx of [16,70,150]) { await touch('touchMove', {...p,x:p.x+dx}); await frame(); } await snap('review-back-mid'); await touch('touchEnd'); await target.waitForFunction(() => !document.querySelector('.swipe-preview')); await target.locator('[data-screen="review"]').waitFor({state:'visible'}); await frame();
+        audits.push({name:`swipe-${preference}-paused-review-origin`,before:reviewBefore});
+        await target.waitForFunction(time => Math.abs(document.getElementById('player').currentTime - time) < 0.01 && !document.getElementById('player').seeking, reviewBefore.time);
+        const reviewAfter = await target.evaluate(() => ({time: document.getElementById('player').currentTime, paused: document.getElementById('player').paused, src: document.getElementById('player').getAttribute('src'), chain: document.getElementById('sequence').textContent, run: document.getElementById('metadata').textContent}));
+        assert.deepEqual(reviewAfter, reviewBefore); assert.equal(posts().length,count); audits.push({name:`swipe-${preference}-paused-review`,before:reviewBefore,after:reviewAfter}); await snap('review-back-settled');
+      }
+      motionEvidence[`swipe-${preference}`]={passed:true,short,mid,before,after,loadingLocked:true,nativeVerticalScroll:true,pausedVideoAndRunChain:Boolean(media)};
+    } finally { motionEvidence[`mediaRestore-${preference}`] = await target.evaluate(() => mediaRestoreLog).catch(() => []); releaseDetail?.(); detailGate=null; await cdp.detach(); await own.close(); }
+  }
+  assert.deepEqual(exceptions,[]); assert.deepEqual(violations,[]);
+}
+
 try {
+  await swipeChecks();
+  if (!process.argv.includes('--swipe-only')) {
   await ready(); await active('library'); assert.equal(posts().length, 0); assert.equal(await page.locator('#player').getAttribute('src'), null);
   assert.equal(await page.locator('#nav-library,#nav-new').count(), 0);
   for (const id of ['new-mode', 'refresh', 'nav-status']) assert.equal(await page.locator(`#${id}`).evaluate(node => Boolean(node.closest('[data-screen="library"]'))), true);
@@ -374,25 +458,25 @@ try {
   await openRun(rootID); const source = await page.locator('#player').getAttribute('src'), loads = await page.evaluate(() => mediaLoads); await emitHints(); assert.equal(await page.locator('#player').getAttribute('src'), source); assert.equal(await page.evaluate(() => mediaLoads), loads);
   await openRun(failedID); assert.equal(await page.locator('#player').isHidden(), true); assert.equal(await page.locator('#accept').isDisabled(), true); await capture('phone-failed');
   // Stale library detail cannot open the wrong clip after a newer selection.
-  await rootLibrary(); detailGate = new Promise(resolve => { releaseDetail = resolve; }); await page.locator('.clip-card').filter({hasText: rootID.slice(0, 8)}).click(); await page.locator('.clip-card').filter({hasText: endID.slice(0, 8)}).click(); await active('review'); releaseDetail(); detailGate = null; assert.match(await page.locator('#metadata').textContent(), new RegExp(endID));
+  await rootLibrary(); detailGate = new Promise(resolve => { releaseDetail = resolve; }); await page.locator('#library .clip-card').filter({hasText: rootID.slice(0, 8)}).click(); await page.locator('#loading-back').click(); await page.locator('#loading-screen').waitFor({state: 'hidden'}); await page.locator('#library .clip-card').filter({hasText: endID.slice(0, 8)}).click(); await active('review'); releaseDetail(); detailGate = null; assert.match(await page.locator('#metadata').textContent(), new RegExp(endID));
   await page.locator('.metadata summary').click(); assert.equal(await page.locator('#run-prompt').textContent(), malicious); assert.equal(await page.locator('#run-prompt img').count(), 0); assert.equal(await page.evaluate(() => Boolean(window.hacked)), false);
   // Assembly is its own explicit action and read-only same-UUID recovery.
-  await page.locator('#open-assembly').click(); await active('assembly'); const nativeBeforeAssembly = inference().length;
-  await page.locator('#assemble').evaluate(button => { button.click(); button.click(); }); await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); const ownID = new URL(page.url()).searchParams.get('assembly');
+  await openAssembly(); await active('assembly'); const nativeBeforeAssembly = inference().length;
+  await page.locator('#assemble').evaluate(button => { button.click(); button.click(); }); await page.locator('body > main #assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); const ownID = new URL(page.url()).searchParams.get('assembly');
   assert.equal(await page.evaluate(() => uuidDraws), 1); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(await page.locator('#run-state').textContent(), 'Pronto para revisão'); assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem de prévia — revisão pendente'); assert.equal(inference().length, nativeBeforeAssembly);
   if (assemblyMedia) { await page.waitForFunction(() => document.getElementById('assembly-player').videoWidth > 0); await page.locator('#assembly-player').evaluate(async video => { await video.play(); }); await page.waitForFunction(() => document.getElementById('assembly-player').currentTime > 0.05); await page.locator('#assembly-player').evaluate(video => video.pause()); }
-  await capture('phone-assembly-preview'); const assemblyBeforeReload = assemblyPosts().length; await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); await active('assembly'); assert.equal(assemblyPosts().length, assemblyBeforeReload); assert.equal(new URL(page.url()).searchParams.get('assembly'), ownID);
-  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload);
-  await rootLibrary(); await openRun(endID); await page.locator('#accept').click(); await page.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload); await page.locator('#open-assembly').click(); await page.locator('#assemble').click(); await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); assert.notEqual(new URL(page.url()).searchParams.get('assembly'), ownID); assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem da sequência aceita');
+  await capture('phone-assembly-preview'); const assemblyBeforeReload = assemblyPosts().length; await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); await page.locator('#loading-screen').waitFor({state:'hidden'}); await active('assembly'); assert.equal(assemblyPosts().length, assemblyBeforeReload); assert.equal(new URL(page.url()).searchParams.get('assembly'), ownID);
+  await page.locator('#assembly-refresh').click(); await page.locator('body > main #assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload);
+  await rootLibrary(); await openRun(endID); await page.locator('#accept').click(); await page.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); assert.equal(assemblyPosts().length, assemblyBeforeReload); await openAssembly(); await page.locator('#assemble').click(); await page.locator('body > main #assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); assert.notEqual(new URL(page.url()).searchParams.get('assembly'), ownID); assert.equal(await page.locator('#assembly-label').textContent(), 'Montagem da sequência aceita');
   await capture('phone-assembly-accepted');
   // Uncertain CPU publication never invents/reposts an ID on read, reload or navigation.
-  resetRuns(); assemblies = []; assemblyMode = 'lost'; await ready(); await openRun(endID); await page.locator('#open-assembly').click(); await page.locator('#assemble').click(); await page.locator('#assembly-status').filter({hasText: 'Resultado incerto'}).waitFor(); const lostID = new URL(page.url()).searchParams.get('assembly'), lostCount = assemblyPosts().length; assert.equal(await page.locator('#assemble').isDisabled(), true);
-  await page.locator('#assembly-refresh').click(); await page.locator('#assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); assert.equal(assemblyPosts().length, lostCount); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
+  resetRuns(); assemblies = []; assemblyMode = 'lost'; await ready(); await openRun(endID); await openAssembly(); await page.locator('#assemble').click(); await page.locator('body > main #assembly-status').filter({hasText: 'Resultado incerto'}).waitFor(); const lostID = new URL(page.url()).searchParams.get('assembly'), lostCount = assemblyPosts().length; assert.equal(await page.locator('#assemble').isDisabled(), true);
+  await page.locator('#assembly-refresh').click(); await page.locator('body > main #assembly-status').filter({hasText: 'Apenas metadados relidos'}).waitFor(); await page.reload(); await page.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor(); await page.locator('#loading-screen').waitFor({state:'hidden'}); assert.equal(assemblyPosts().length, lostCount); assert.equal(new URL(page.url()).searchParams.get('assembly'), lostID);
   assemblyMode = 'normal'; const missing = '99999999-9999-4999-8999-999999999999'; await ready(`http://h3.mock.invalid/?assembly=${missing}`); await active('assembly'); assert.equal(await page.locator('#assemble').isDisabled(), true); await capture('phone-assembly-missing');
   const missingBefore = posts().length; await page.locator('#assembly-refresh').click(); await rootLibrary(); assert.equal(new URL(page.url()).searchParams.get('assembly'), missing); assert.equal(posts().length, missingBefore); await newIdea('Rascunho preservado durante montagem incerta'); await page.locator('#use-idea').click(); await active('generation'); assert.equal(await page.locator('#generate').isDisabled(), true, 'missing assembly proof fences native generation, not draft viewing'); assert.equal(posts().length, missingBefore); assert.equal(new URL(page.url()).searchParams.get('assembly'), missing); await rootLibrary();
   for (const brokenRead of ['read-error', 'read-missing-proof']) {
     resetRuns(); const lockedRetryID = '33333333-3333-4333-8333-333333333333'; runs.unshift({...mkRun(lockedRetryID, 'interrupted'), output: {}}); const id = '88888888-8888-4888-8888-888888888888'; assemblies = [{id, end_run_id: endID, state: 'completed', mode: 'preview', request_sha256: 'a'.repeat(64), output_sha256: 'b'.repeat(64), frames: 168, fps: '24/1', video_url: `/assemblies/${id}/video`, output: {path: `.data/assemblies/${id}/video.mp4`}}]; assemblyMode = brokenRead; const count = posts().length;
-    await ready(`http://h3.mock.invalid/?assembly=${id}&other=keep#viewer`); await active('assembly'); await page.locator('#assembly-status').filter({hasText: /incert|não|indisponível|Erro|erro/i}).waitFor(); assert.equal(await page.locator('#assemble').isDisabled(), true); assert.equal(posts().length, count); await page.locator('#assembly-refresh').click(); await rootLibrary(); assert.equal(new URL(page.url()).searchParams.get('assembly'), id); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(posts().length, count); await newIdea('Rascunho consultável sem replay da montagem'); await page.locator('#use-idea').click(); await active('generation'); assert.equal(await page.locator('#generate').isDisabled(), true, `${brokenRead}: uncertainty still fences native admission`); await settingsRoundTrip('generation'); assert.equal(posts().length, count); assert.equal(new URL(page.url()).searchParams.get('assembly'), id); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); await rootLibrary(); await openRun(lockedRetryID); assert.equal(await page.locator('#retry-mode').isDisabled(), true, `${brokenRead}: no distinct retry while an intent remains unresolved`); assert.equal(posts().length, count); await rootLibrary();
+    await ready(`http://h3.mock.invalid/?assembly=${id}&other=keep#viewer`); await active('assembly'); await page.locator('body > main #assembly-status').filter({hasText: /incert|não|indisponível|Erro|erro/i}).waitFor(); assert.equal(await page.locator('#assemble').isDisabled(), true); assert.equal(posts().length, count); await page.locator('#assembly-refresh').click(); await rootLibrary(); assert.equal(new URL(page.url()).searchParams.get('assembly'), id); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); assert.equal(posts().length, count); await newIdea('Rascunho consultável sem replay da montagem'); await page.locator('#use-idea').click(); await active('generation'); assert.equal(await page.locator('#generate').isDisabled(), true, `${brokenRead}: uncertainty still fences native admission`); await settingsRoundTrip('generation'); assert.equal(posts().length, count); assert.equal(new URL(page.url()).searchParams.get('assembly'), id); assert.equal(new URL(page.url()).searchParams.get('other'), 'keep'); assert.equal(new URL(page.url()).hash, '#viewer'); await rootLibrary(); await openRun(lockedRetryID); assert.equal(await page.locator('#retry-mode').isDisabled(), true, `${brokenRead}: no distinct retry while an intent remains unresolved`); assert.equal(posts().length, count); await rootLibrary();
   }
   assemblyMode = 'normal';
   // Explicit refuses are recoverable, uncertain inference is not, even after navigation/SSE.
@@ -453,7 +537,7 @@ try {
     resetRuns(); const bad = mkRun('33333333-3333-4333-8333-333333333333', 'rejected', rootID); corrupt(bad, runs.find(run => run.id === rootID)); runs.unshift(bad); await ready(); await openRun(bad.id); const count = posts().length; await page.locator('#retry-mode').click(); await page.locator('#retry-status').filter({hasText: /\S/}).waitFor(); await active('review'); assert.equal(posts().length, count, `${name}: no POST`); assert.ok((await page.locator('#retry-status').textContent()).trim().length > 10, `${name}: explicit reason`);
   }
   resetRuns(); const delayedRetry = mkRun('33333333-3333-4333-8333-333333333333', 'rejected', rootID); runs.unshift(delayedRetry); await ready(); await openRun(delayedRetry.id); detailGate = new Promise(resolve => { releaseDetail = resolve; }); const delayedBefore = posts().length;
-  const parentRequest = page.waitForRequest(request => new URL(request.url()).pathname === `/runs/${rootID}`); await page.locator('#retry-mode').click(); await parentRequest; await rootLibrary(); await page.getByRole('button', {name: new RegExp(endID)}).click(); await active('review'); const parentResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/runs/${rootID}`); releaseDetail(); detailGate = null; await parentResponse; await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); await active('review'); assert.match(await page.locator('#metadata').textContent(), new RegExp(endID)); assert.equal(posts().length, delayedBefore);
+  const parentRequest = page.waitForRequest(request => new URL(request.url()).pathname === `/runs/${rootID}`); await page.locator('#retry-mode').click(); await parentRequest; await rootLibrary(); await page.getByRole('button', {name: new RegExp(endID.slice(0, 8))}).click(); await active('review'); const parentResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/runs/${rootID}`); releaseDetail(); detailGate = null; await parentResponse; await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); await active('review'); assert.match(await page.locator('#metadata').textContent(), new RegExp(endID)); assert.equal(posts().length, delayedBefore);
   benignEvidence = true;
   runs = Array.from({length: 12}, (_, index) => mkRun(`10000000-0000-4000-8000-${String(index).padStart(12, '0')}`, 'accepted', index ? `10000000-0000-4000-8000-${String(index - 1).padStart(12, '0')}` : null, 2.3, 'Ela dança com a referência original.'));
   await ready(); await openRun(runs.at(-1).id); for (const [width, height] of [[393, 852], [320, 852], [640, 852], [852, 393], [1440, 1000]]) { await page.setViewportSize({width, height}); await audit(`reduced-long-chain-${width}`); await reachable('open-assembly'); }
@@ -469,7 +553,7 @@ try {
   await page.locator('#grok-use').click(); await settings(); await page.locator('#duration').fill('5'); await focusedAudit('duration'); await capture('owner-settings-block'); await page.locator('#settings-done').click(); await capture('owner-generation-5s');
   // Reduced emulated viewport bounds cannot certify a physical IME.
   await settings(); await page.setViewportSize({width: 393, height: 480}); await focusedAudit('duration'); await audit('fake-ime-visualViewport-bounds'); await page.setViewportSize({width: 393, height: 852}); await page.locator('#settings-done').click();
-  await openRun(endID); await capture('owner-review'); await page.locator('#reject').click(); await page.locator('#run-state').filter({hasText: 'Rejeitado'}).waitFor(); await capture('owner-rejected-review'); await page.locator('#retry-mode').click(); await active('generation'); await capture('owner-retry'); await openRun(rootID); await page.locator('#open-assembly').click(); await page.locator('#assemble').click(); await page.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); await capture('owner-assembly'); await settingsRoundTrip('assembly');
+  await openRun(endID); await capture('owner-review'); await page.locator('#reject').click(); await page.locator('#run-state').filter({hasText: 'Rejeitado'}).waitFor(); await capture('owner-rejected-review'); await page.locator('#retry-mode').click(); await active('generation'); await capture('owner-retry'); await openRun(rootID); await openAssembly(); await page.locator('#assemble').click(); await page.locator('body > main #assembly-status').filter({hasText: 'Montagem publicada'}).waitFor(); await capture('owner-assembly'); await settingsRoundTrip('assembly');
   await openRun(rootID); await page.locator('#continue-mode').click(); await page.locator('#continue-idea').click(); await page.waitForFunction(() => document.getElementById('last-frame-preview').naturalWidth > 0); assert.equal(await page.locator('#reference-preview').isVisible(), true); await capture('owner-continuation-paired');
   assert.equal(await page.evaluate(() => document.getAnimations().length), 0, 'reduce context has no CSS or WAAPI motion');
   // The regression context intentionally reduces motion. A separate normal-touch
@@ -488,24 +572,26 @@ try {
   const moving = await liveMotion.newPage(); watch(moving);
   runs = Array.from({length: 12}, (_, index) => mkRun(`10000000-0000-4000-8000-${String(index).padStart(12, '0')}`, 'accepted', index ? `10000000-0000-4000-8000-${String(index - 1).padStart(12, '0')}` : null, 2.3, 'Ela dança com a referência original.'));
   await moving.goto('http://h3.mock.invalid/?other=keep#viewer'); await moving.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  await expandFreestyle(moving);
   for (const [width, height] of [[393, 852], [320, 852], [640, 852], [852, 393], [1440, 1000]]) {
     await moving.setViewportSize({width, height}); await audit(`normal-library-${width}`, moving); if (height === 852 && width <= 640) await cardGesture(moving, `normal-card-scroll-${width}`);
-    await moving.getByRole('button', {name: new RegExp(runs.at(-1).id)}).click(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'}); await audit(`normal-long-chain-${width}`, moving); await reachable('open-assembly', moving); await rootLibrary(moving);
+    await expandFreestyle(moving); await moving.locator('#library .clip-card').last().click(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'}); await moving.locator('#loading-screen').waitFor({state:'hidden'}); await audit(`normal-long-chain-${width}`, moving); await reachable('open-assembly', moving); await rootLibrary(moving);
   }
   resetRuns(); for (const run of runs) { run.prompt = run.parent_id ? 'Ela dá um pequeno salto e termina de costas.' : 'Ela dança mantendo a referência original.'; if (run.input_info.continuation) run.input_info.continuation.prompt = run.prompt; }
   await moving.setViewportSize({width: 393, height: 852}); await moving.reload(); await moving.locator('#notice').filter({hasText: 'Escolha um bloco'}).waitFor();
+  await expandFreestyle(moving);
   await moving.waitForFunction(() => motionLog.length > 0);
-  await moving.getByRole('button', {name: new RegExp(rootID)}).tap(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'}); await moving.locator('#continue-mode').click(); await moving.locator('#continue-idea').click(); await moving.waitForFunction(() => document.getElementById('last-frame-preview').naturalWidth > 0); await capture('normal-continuation-paired', moving, {directory: motionArtifacts}); await rootLibrary(moving);
-  await moving.getByRole('button', {name: new RegExp(endID)}).tap(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'});
+  await moving.getByRole('button', {name: new RegExp(rootID.slice(0, 8))}).tap(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'}); await moving.locator('#continue-mode').click(); await moving.locator('#continue-idea').click(); await moving.waitForFunction(() => document.getElementById('last-frame-preview').naturalWidth > 0); await capture('normal-continuation-paired', moving, {directory: motionArtifacts}); await rootLibrary(moving);
+  await moving.getByRole('button', {name: new RegExp(endID.slice(0, 8))}).tap(); await moving.locator('[data-screen="review"]').waitFor({state: 'visible'});
   const beforeMotion = posts().length;
-  await rootLibrary(moving);
+  await moving.locator('#screen-eyebrow').tap(); await moving.locator('[data-screen="library"]').waitFor({state:'visible'}); await expandFreestyle(moving);
   const mid = await moving.locator('#new-mode').evaluate(button => {
     button.click(); const animations = document.getAnimations().filter(animation => animation.effect?.target?.matches('[data-motion="heading"]'));
     for (const animation of animations) { animation.pause(); animation.currentTime = 90; }
     const heading = document.querySelector('[data-motion="heading"]'), style = getComputedStyle(heading);
     return {running: animations.length, transform: style.transform, opacity: Number(style.opacity), panel: document.querySelector('[data-screen]:not([hidden])').dataset.screen, focus: document.activeElement.id};
   });
-  assert.equal(mid.running, 1); assert.equal(mid.panel, 'context'); assert.equal(mid.focus, 'screen-title'); assert.ok(mid.opacity > .65 && mid.opacity < 1); assert.notEqual(mid.transform, 'none');
+  assert.equal(mid.running, 1); assert.equal(mid.panel, 'context'); assert.equal(mid.focus, 'screen-title'); assert.ok(mid.opacity > .65 && mid.opacity < 1); assert.equal(mid.transform, 'none');
   await capture('context-mid', moving, {directory: motionArtifacts, animations: 'allow'}); assert.equal(posts().length, beforeMotion);
   await moving.locator('#idea').fill('Uma cena viva, sem mudar os parâmetros.');
   await moving.locator('#back').click(); await beginIdea(moving);
@@ -540,11 +626,12 @@ try {
   decisionGate = new Promise(resolve => { releaseDecision = resolve; }); await moving.locator('#accept').tap();
   assert.equal(await moving.locator('#accept').getAttribute('aria-busy'), 'true'); assert.equal(await moving.locator('#reject').getAttribute('aria-busy'), 'false'); await audit('only-actual-review-action-busy', moving);
   releaseDecision(); decisionGate = null; await moving.locator('#run-state').filter({hasText: 'Aceito'}).waitFor(); assert.equal(inference().length, beforeNative + 1);
-  await moving.locator('#open-assembly').tap(); await moving.locator('#assemble').tap(); await moving.locator('#assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
+  await openAssembly(moving); await moving.locator('#assemble').tap(); await moving.locator('body > main #assembly-status').filter({hasText: 'Montagem publicada'}).waitFor();
   const assembledCount = assemblyPosts().length; await moving.evaluate(() => window.dispatchEvent(new Event('animationend'))); assert.equal(assemblyPosts().length, assembledCount);
   await moving.waitForFunction(() => document.getAnimations().every(animation => animation.playState !== 'running'));
+  if (assemblyMedia) { await moving.locator('#assembly-player').evaluate(async video => { await video.play(); }); await moving.waitForFunction(() => document.getElementById('assembly-player').currentTime > 0.05); await moving.locator('#assembly-player').evaluate(video => video.pause()); }
   await capture('assembly-settled', moving, {directory: motionArtifacts, animations: 'allow'});
-  const log = await moving.evaluate(() => motionLog); assert.ok(log.every(entry => !entry.unsafe)); assert.ok(log.some(entry => entry.options.duration === 240 && entry.id === 'run-state')); assert.ok(log.some(entry => entry.options.duration === 180)); assert.ok(log.every(entry => (entry.options.delay || 0) <= 80));
+  const log = await moving.evaluate(() => motionLog); assert.ok(log.every(entry => !entry.unsafe)); assert.ok(log.some(entry => entry.options.duration === 480 && entry.id === 'run-state')); assert.ok(log.some(entry => entry.options.duration === 320)); assert.ok(log.every(entry => (entry.options.delay || 0) <= 160));
   const video = moving.video(); await moving.evaluate(() => window.dispatchEvent(new Event('pagehide'))); assert.equal(await moving.evaluate(() => document.getAnimations().length), 0);
   await liveMotion.close(); Object.assign(motionEvidence, {normal: true, reduced: true, dynamicPreference: true, hiddenCancellation: true, rapidBackDraftPreserved: true, compositorOnlyTargets: true, observed: log, mid, video: await video.path()});
   const fallback = await browser.newContext({viewport: {width: 393, height: 852}, deviceScaleFactor: 2, isMobile: true, hasTouch: true, serviceWorkers: 'block'});
@@ -556,6 +643,7 @@ try {
   assert.deepEqual(await currentSourceHashes(), sourceHashes, 'Frontend must remain frozen throughout the evidence run');
   if (assemblyMedia) assert.equal(createHash('sha256').update(await readFile(resolve(root, process.env.H3_UI_TEST_ASSEMBLY))).digest('hex'), assemblyHash);
   console.log(`PASS progressive browser: ${requests.length} intercepted requests, ${posts().length} explicit fake POSTs, ${audits.length} bounds audits, zero API/provider/GPU`);
+  }
 } finally {
   await writeFile(resolve(artifacts, 'report.json'), JSON.stringify({requests, exceptions, violations, consoleMessages, failedRequests, audits, captures, motionEvidence, sourceHashes, sourceHashesAfter: await currentSourceHashes(), phone: {width: 393, height: 852, touch: true, scale: 2}, originalFilesProtected: Object.keys(beforeHashes).length, mediaFixture: Boolean(media), assemblyFixture: Boolean(assemblyMedia), assemblyHash, lastFrameFixture: Boolean(process.env.H3_UI_TEST_LAST_FRAME), lastFrameHash, physicalIMEVerified: false, liveAPI: 0, provider: 0, GPU: 0}, null, 2));
   await browser.close();

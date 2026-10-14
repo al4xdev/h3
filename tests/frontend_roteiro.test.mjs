@@ -24,6 +24,17 @@ test('actual story renderer opens pending blocks and attaches organization actio
   await moveDown.listeners.click();
   assert.deepEqual(saved[0].map(item => item.id), [intent, block]);
 });
+test('saving story blocks rebuilds actions only after releasing busy state, including errors', async () => {
+  const handler = source.slice(source.indexOf('  async function saveStoryBlocks('), source.indexOf('  async function saveStoryEdit('));
+  for (const failure of [false, true]) {
+    const doc = fixture(), story = {doc}, calls = []; let release;
+    const blocks = [...doc.blocks, {...doc.blocks[0], id: intent}];
+    const deps = {story, state: {drafts: new Map()}, batchBlocked: () => false, controls: () => calls.push(['controls', story.busy]), storyUpdate, $: () => ({value: doc.name}), renderStory: () => calls.push(['render', story.busy]), message() {}, stories: {save: () => new Promise((resolve, reject) => { release = () => failure ? reject(new HTTPError(409, 'changed')) : resolve({...doc, revision: 3, blocks}); })}};
+    const save = new Function(...Object.keys(deps), `${handler}; return saveStoryBlocks;`)(...Object.values(deps)); const pending = save(blocks);
+    assert.equal(story.busy, true); assert.deepEqual(calls, [['controls', true]]); release(); assert.equal(await pending, !failure);
+    assert.equal(story.busy, false); assert.deepEqual(calls.slice(-2), [['render', false], ['controls', false]]);
+  }
+});
 test('story pointers preserve assembly, extras and hash before submission', () => {
   const result = storyLocation(`http://local/?assembly=${intent}&extra=x#viewer`, {id, block, intent});
   assert.equal(result, `/roteiro?assembly=${intent}&extra=x&roteiro=${id}&block=${block}&intent=${intent}#viewer`);
@@ -305,7 +316,7 @@ test('actual navigation replaces generation entry after roteiro so Back reaches 
   const state = {screen: 'generation', navigationEpoch: 0, retryEpoch: 0, selected: {id}, trail: [{screen: 'library'}, storyView]};
   const story = {doc, block, intent}, historyViews = new Map(), recorded = [];
   const snapshot = () => ({screen: state.screen, storyDoc: doc, selectedId: id});
-  const deps = {state, story, TITLES: {review: 'Review', settings: 'Settings'}, saveDraft() {}, storyReviewOrigin, viewSnapshot: snapshot, historyViews, historyToken: 2, paintScreen() {}, controls() {}, recordView: (value, push) => recorded.push({value, push})};
+  const deps = {swipePresentation: {remember() {}}, state, story, TITLES: {review: 'Review', settings: 'Settings'}, saveDraft() {}, storyReviewOrigin, viewSnapshot: snapshot, historyViews, historyToken: 2, paintScreen() {}, controls() {}, recordView: (value, push) => recorded.push({value, push})};
   const navigate = new Function(...Object.keys(deps), `${handler}; return navigate;`)(...Object.values(deps));
   navigate('review'); assert.equal(recorded[0].push, false); assert.deepEqual(state.trail.map(view => view.screen), ['library', 'story']); assert.equal(state.screen, 'review');
   navigate('settings'); assert.equal(recorded[1].push, true); assert.deepEqual(state.trail.map(view => view.screen), ['library', 'story', 'review']);
@@ -364,22 +375,32 @@ test('Freestyle labels and batch option below planned blocks, conversion inside 
   assert.match(operations, /id="open-assembly"/); assert.match(operations, /id="convert-story"/);
 });
 function swipeFixture() {
-  const handlers = new Map(), options = [], calls = []; let epoch = 0, enabled = true;
-  const document = {addEventListener: (name, fn, opts) => { handlers.set(name, fn); options.push(opts); }, removeEventListener: name => handlers.delete(name)};
-  const swipe = createBackSwipe(document, {back: () => calls.push('back'), canGoBack: () => enabled, navigationEpoch: () => epoch});
-  const event = (x, y, extra = {}) => ({pointerType: 'touch', pointerId: 1, isPrimary: true, clientX: x, clientY: y, target: {closest: () => false}, preventDefault() { throw new Error('Native gesture must not be blocked'); }, ...extra});
-  return {handlers, calls, options, swipe, event, advance: () => epoch++, root: () => { enabled = false; }};
+  const handlers = new Map(), options = [], calls = []; let epoch = 0, enabled = true, time = 0;
+  const document = {addEventListener: (name, fn, opts) => { handlers.set(name, fn); options.push([name, opts]); }, removeEventListener: name => handlers.delete(name)};
+  const presentation = {begin: () => calls.push('begin'), move: dx => calls.push(['move', dx]), cancel: () => calls.push('cancel'), commit: () => calls.push('commit')};
+  const swipe = createBackSwipe(document, {back: () => calls.push('back'), canGoBack: () => enabled, navigationEpoch: () => epoch, presentation, now: () => time});
+  const event = (x, y, extra = {}) => ({touches: [{clientX: x, clientY: y}], changedTouches: [{clientX: x, clientY: y}], target: {closest: () => false}, cancelable: true, prevented: false, preventDefault() { this.prevented = true; }, ...extra});
+  return {handlers, calls, options, swipe, event, advance: () => epoch++, root: () => { enabled = false; }, tick: ms => { time += ms; }};
 }
-test('edge swipe triggers same Back only for intentional horizontal touch and passive native events', () => {
-  const f = swipeFixture(); f.handlers.get('pointerdown')(f.event(12, 100)); f.handlers.get('pointermove')(f.event(70, 102)); f.handlers.get('pointerup')(f.event(110, 106)); assert.deepEqual(f.calls, ['back']); assert.ok(f.options.every(option => option.passive));
-  for (const scenario of ['vertical', 'cancel', 'navigation', 'two-fingers', 'native', 'root', 'middle']) {
-    const s = swipeFixture(); if (scenario === 'root') s.root(); s.handlers.get('pointerdown')(s.event(scenario === 'middle' ? 80 : 12, 100, scenario === 'native' ? {target: {closest: () => true}} : {}));
-    if (scenario === 'vertical') s.handlers.get('pointermove')(s.event(18, 140));
-    if (scenario === 'cancel') s.handlers.get('pointercancel')();
+test('House-style swipe follows the finger from free space and commits only on release', () => {
+  const f = swipeFixture(); f.handlers.get('touchstart')(f.event(120, 100)); const move = f.event(190, 102); f.handlers.get('touchmove')(move);
+  assert.deepEqual(f.calls, ['begin', ['move', 70]]); assert.equal(move.prevented, true); f.tick(300); f.handlers.get('touchend')(f.event(230, 106)); assert.deepEqual(f.calls.slice(-2), ['commit', 'back']);
+  assert.equal(f.options.find(([name]) => name === 'touchmove')[1].passive, false);
+  for (const scenario of ['vertical', 'cancel', 'navigation', 'two-fingers', 'native', 'root']) {
+    const s = swipeFixture(); if (scenario === 'root') s.root(); s.handlers.get('touchstart')(s.event(80, 100, scenario === 'native' ? {target: {closest: () => true}} : {}));
+    if (scenario === 'vertical') { const event = s.event(86, 140); s.handlers.get('touchmove')(event); assert.equal(event.prevented, false); }
+    if (scenario === 'cancel') s.handlers.get('touchcancel')();
     if (scenario === 'navigation') s.advance();
-    if (scenario === 'two-fingers') s.handlers.get('pointerdown')(s.event(12, 100, {pointerId: 2, isPrimary: false}));
-    s.handlers.get('pointerup')(s.event(115, 102)); assert.equal(s.calls.length, 0, scenario);
+    if (scenario === 'two-fingers') s.handlers.get('touchstart')(s.event(80, 100, {touches: [{}, {}]}));
+    s.handlers.get('touchend')(s.event(210, 102)); assert.equal(s.calls.includes('back'), false, scenario);
     s.swipe.destroy(); assert.equal(s.handlers.size, 0);
+  }
+});
+test('short drags return to place; loading and navigation changes cannot commit Back', () => {
+  for (const condition of ['short', 'loading', 'navigation']) {
+    const f = swipeFixture(); f.handlers.get('touchstart')(f.event(100, 100)); f.handlers.get('touchmove')(f.event(140, 100)); f.tick(500);
+    if (condition === 'loading') f.root(); if (condition === 'navigation') f.advance();
+    f.handlers.get('touchend')(f.event(140, 100)); assert.equal(f.calls.at(-1), 'cancel'); assert.equal(f.calls.includes('back'), false);
   }
 });
 function navigationHistoryFixture() {
@@ -394,7 +415,7 @@ function navigationHistoryFixture() {
   const location = {href: 'http://local/'};
   const history = {state: null, pushState(value, unused, url) { entries.splice(cursor + 1); entries.push({value, url}); cursor++; this.state = value; location.href = new URL(url, location.href).href; }, replaceState(value, unused, url) { if (cursor < 0) { entries.push({value, url}); cursor = 0; } else entries[cursor] = {value, url}; this.state = value; location.href = new URL(url, location.href).href; }, back() { if (cursor > 0) { cursor--; this.state = entries[cursor].value; location.href = new URL(entries[cursor].url, location.href).href; popstate({state: this.state}); } }, forward() { if (cursor + 1 < entries.length) { cursor++; this.state = entries[cursor].value; popstate({state: this.state}); } }};
   const node = {disabled: false, closest: () => null, matches: () => false, focus() {}};
-  const deps = {state, story, document: {defaultView: {history, location, scrollTo() {}}}, removedStories: new Set(), removedRuns: new Set(), TITLES: {library: 'Library', story: 'Story', generation: 'Generation', review: 'Review', settings: 'Settings'}, storyReviewOrigin, saveDraft() {}, restoreDraft() {}, draft: () => ({submitted: true}), paintScreen() {}, controls() {}, $: () => node, message() {}, stopped: false, select: async selectedId => { state.selected = {id: selectedId}; }, viewSnapshot: () => ({screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: null, statusOnly: false, storyDoc: story.doc, storyBlock: story.block, selectedId: state.selected?.id || null, branchEnd: null, scroll: 0})};
+  const deps = {loadingScreen: {key: null}, swipePresentation: {remember() {}}, state, story, document: {defaultView: {history, location, scrollTo() {}}}, removedStories: new Set(), removedRuns: new Set(), TITLES: {library: 'Library', story: 'Story', generation: 'Generation', review: 'Review', settings: 'Settings'}, storyReviewOrigin, saveDraft() {}, restoreDraft() {}, draft: () => ({submitted: true}), paintScreen() {}, controls() {}, $: () => node, message() {}, stopped: false, select: async selectedId => { state.selected = {id: selectedId}; }, viewSnapshot: () => ({screen: state.screen, mode: state.mode, draftKey: state.draftKey, parent: null, statusOnly: false, storyDoc: story.doc, storyBlock: story.block, selectedId: state.selected?.id || null, branchEnd: null, scroll: 0})};
   const runtime = new Function(...Object.keys(deps), `const historyViews = new Map(); let historyToken = 0, historySerial = 0; ${record}${navigate}${restore}${back} const popstate = ${popFunction}; recordView(); return {navigate, back, popstate};`)(...Object.values(deps));
   popstate = runtime.popstate;
   return {state, story, history, entries, ...runtime};
@@ -407,6 +428,16 @@ test('real navigation record/popstate preserves library→roteiro→block→Back
 test('real history generated review and settings Back each restore exactly one intended screen', async () => {
   const f = navigationHistoryFixture(); f.story.doc = {...fixture(), attempts: [{run_id: id}]}; f.navigate('story'); f.navigate('generation'); f.story.block = block; f.state.selected = {id}; f.navigate('review'); assert.equal(f.entries.length, 3);
   f.navigate('settings'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'review'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'story'); f.back(); await Promise.resolve(); assert.equal(f.state.screen, 'library');
+});
+test('restoring a saved video view reuses its selected run and full branch without a read', async () => {
+  const handler = source.slice(source.indexOf('  async function restoreView('), source.indexOf('  function back()'));
+  const selected = {id, state: 'accepted'}, sequence = {end_run_id: id, blocks: [{id}]}, full = {end_run_id: intent, blocks: [{id}, {id: intent}]};
+  const snapshot = {screen: 'review', selectedId: id, selectedRun: selected, sequence, branchSequence: full, branchEnd: intent, draftKey: 'saved-draft', mode: 'continue', parent: selected, scroll: 317, storyDoc: fixture()};
+  const state = {selected: {id: intent}, drafts: new Map(), navigationEpoch: 0, retryEpoch: 0, uncertain: true, pendingRun: {id: intent}}, story = {}, calls = [];
+  const deps = {state, story, removedStories: new Set(), removedRuns: new Set(), saveDraft() {}, restoreDraft: () => calls.push('draft'), draft: () => ({submitted: false}), paintScreen() {}, controls() {}, $: () => ({disabled: false, closest: () => null, matches: () => false, focus() {}}), recordView() {}, navigate: () => { throw new Error('Unexpected navigation'); }, message() {}, select: () => { throw new Error('Cached Back must not fetch'); }, stopped: false, document: {defaultView: {scrollTo: value => calls.push(value)}}};
+  const restore = new Function(...Object.keys(deps), `${handler}; return restoreView;`)(...Object.values(deps)); await restore(snapshot, [{screen: 'story'}]);
+  assert.equal(state.selected, selected); assert.equal(state.sequence, sequence); assert.equal(state.branchSequence, full); assert.equal(state.openedBranchEnd, intent);
+  assert.equal(state.draftKey, 'saved-draft'); assert.equal(state.uncertain, true); assert.equal(state.pendingRun.id, intent); assert.equal(calls.at(-1).top, 317);
 });
 test('actual batch submission retains own uncertain ID and recovery never repeats POST', async () => {
   const start = source.slice(source.indexOf('  async function startBatch()'), source.indexOf('  function retryBlocked('));
