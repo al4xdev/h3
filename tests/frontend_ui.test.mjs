@@ -293,7 +293,9 @@ test('stale duration, image and originating parent drafts cannot pass Grok snaps
 });
 test('assets do not contain unsafe bindings, persistence, autoplay or polling', async () => {
   const html = await readFile(new URL('../src/h3_backend/web/index.html', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /innerHTML|localStorage|sessionStorage|setInterval|setTimeout/);
+  assert.doesNotMatch(source, /innerHTML|localStorage|sessionStorage|setInterval/);
+  const withoutWaiting = source.slice(0, source.indexOf('export function createGrokWaiting(')) + source.slice(source.indexOf('export function blockedActionReason('));
+  assert.doesNotMatch(withoutWaiting, /setTimeout/);
   assert.doesNotMatch(html, /autoplay|https?:\/\//);
   assert.match(html, /lang="pt-BR"/);
   assert.match(html, /preload="metadata"/);

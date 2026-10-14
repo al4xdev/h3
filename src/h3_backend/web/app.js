@@ -669,6 +669,62 @@ export function appendLibraryPage(existing, result, append = false) {
   return [...unique.values()];
 }
 
+export const GROK_WAIT_MESSAGES = Object.freeze([
+  'Só um instante, estou pensando.', 'Preparando uma resposta para você.',
+  'Aguardando uma proposta de texto.', 'Um momento enquanto consulto o Grok.',
+  'Estou organizando a ideia.', 'Aguarde só um pouquinho.',
+  'Deixa eu pensar nessa cena.', 'A proposta ainda está sendo preparada.',
+  'Estou cuidando da sua solicitação.', 'Só mais um instante.',
+  'Sua ideia está comigo.', 'Um momento para elaborar o texto.',
+  'Estou montando uma resposta.', 'A consulta ao Grok continua.',
+  'Aguarde enquanto preparo o texto.', 'Pensando em como descrever essa cena.',
+  'Um instante para responder com cuidado.', 'Estou consultando o Grok.',
+  'O texto ainda não chegou.', 'Aguardando algo para você revisar.',
+]);
+
+export function createGrokWaiting(document, timers = document.defaultView) {
+  const active = new Map(), preference = document.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  let timer = null, index = 0;
+  const visible = entry => !document.hidden && !entry.node.closest('[hidden],[inert]') && (entry.node.checkVisibility?.() ?? true);
+  function sync() {
+    if (timer !== null) { timers.clearTimeout(timer); timer = null; }
+    let moving = false;
+    for (const entry of active.values()) {
+      const paused = !visible(entry) || Boolean(preference?.matches);
+      entry.node.classList.toggle('grok-wait-paused', paused);
+      moving ||= !paused;
+    }
+    if (moving) timer = timers.setTimeout(() => {
+      timer = null;
+      for (const entry of active.values()) if (visible(entry)) {
+        entry.index = (entry.index + 1) % GROK_WAIT_MESSAGES.length;
+        entry.copy.textContent = GROK_WAIT_MESSAGES[entry.index];
+      }
+      sync();
+    }, 4800);
+  }
+  function begin(id, key = Symbol(id)) {
+    if (active.get(id)?.key === key) return key;
+    end(id);
+    const host = document.getElementById(id); if (!host) return key;
+    const node = document.createElement('div'), icon = document.createElement('span'), copy = document.createElement('span');
+    node.className = 'grok-wait'; node.setAttribute('aria-hidden', 'true');
+    icon.className = 'grok-wait-icon'; icon.textContent = '✦';
+    const entry = {key, node, copy, index: index++ % GROK_WAIT_MESSAGES.length};
+    copy.textContent = GROK_WAIT_MESSAGES[entry.index]; node.append(icon, copy);
+    if (host.matches('article')) host.append(node); else host.after(node);
+    active.set(id, entry); sync(); return key;
+  }
+  function end(id, key) {
+    const entry = active.get(id); if (!entry || key !== undefined && entry.key !== key) return;
+    entry.node.remove(); active.delete(id); sync();
+  }
+  document.addEventListener('visibilitychange', sync);
+  document.addEventListener('toggle', sync, true);
+  preference?.addEventListener?.('change', sync);
+  return {sync, set(id, running, key) { if (running) begin(id, key); else end(id); }, async track(id, operation) { const key = begin(id); try { return await operation(); } finally { end(id, key); } }};
+}
+
 export function blockedActionReason(button, state, story, context = {}) {
   const id = button.id, is = (...ids) => ids.includes(id);
   if (id === 'back') return 'Você já está na primeira tela. Toque em Estúdio local para abrir a biblioteca.';
@@ -764,6 +820,7 @@ export function startUI(document, client = createClient(), stories = createStory
   const motion = createPresentationMotion(document);
   const screenTransitions = createScreenTransitions(document);
   const loadingScreen = createLoadingScreen(document);
+  const grokWaiting = createGrokWaiting(document);
   let paintedKey = '', pendingDecision = null, settingsPointerOrigin = null;
   const stopViews = {}, submittedStops = new Set(), libraryCards = new Map(), libraryStops = new Map(), noticeStopKeys = new Map();
   let stopFactory = null;
@@ -1271,6 +1328,10 @@ export function startUI(document, client = createClient(), stories = createStory
     text('status-id', state.pendingRun?.id || state.noticeResult?.id || 'ID não confirmado. Não envie novamente.');
     $('status-review').disabled = !state.pendingRun || state.busy;
     blockedFeedback.sync();
+    const improving = !state.batchUncertain && state.batchRecord?.state === 'active' && state.batchRecord.phase === 'improving';
+    grokWaiting.set('batch-status', improving, state.batchRecord?.id);
+    grokWaiting.set('batch-library-card', improving, state.batchRecord?.id);
+    grokWaiting.sync();
     for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
@@ -1460,7 +1521,7 @@ export function startUI(document, client = createClient(), stories = createStory
     catch (error) { message('tail-status', error.message, true); return; }
     const owner = {id: newAssemblyUUID(document.defaultView.crypto), roteiro: story.doc.id}; story.tailOwner = owner; story.tailRecord = null; story.tailUncertain = true; story.busy = true; tailURL(); controls();
     message('tail-status', 'Planejando a continuação com o Grok… A proposta não gera vídeo.');
-    try { applyTail(verifiedTail(await stories.planTail(owner.roteiro, owner.id, body), owner)); }
+    try { applyTail(verifiedTail(await grokWaiting.track('tail-status', () => stories.planTail(owner.roteiro, owner.id, body)), owner)); }
     catch (error) {
       if (story.tailOwner !== owner) return;
       if (tailNotSubmitted(error, owner)) { story.tailOwner = null; story.tailRecord = null; story.tailUncertain = false; tailURL(); message('tail-status', `Planejamento recusado antes do envio ao Grok: ${error.message}. Sua frase foi mantida. Confira o roteiro antes de planejar novamente.`, true); return; }
@@ -1564,7 +1625,7 @@ export function startUI(document, client = createClient(), stories = createStory
     try {
       if (!story.doc) story.doc = await stories.create({name: $('story-create-name').value, idea: $('idea').value, reference: contextReference(), adopted: false, blocks: []});
       storyURL();
-      if (propose) { message('grok-status', 'Dividindo sua ideia em blocos…'); const originID = story.doc.id, revision = story.doc.revision; const candidate = await stories.proposal(originID, {expected_revision: revision, count, duration_seconds: duration, seed: parseSeed($('seed').value)}); if (story.doc?.id !== originID) { story.lateMacro = candidate; message('grok-status', 'Resposta anterior preservada; a tela atual não foi substituída.'); return; } story.candidate = candidate; }
+      if (propose) { message('grok-status', 'Dividindo sua ideia em blocos…'); const originID = story.doc.id, revision = story.doc.revision; const candidate = await grokWaiting.track('grok-status', () => stories.proposal(originID, {expected_revision: revision, count, duration_seconds: duration, seed: parseSeed($('seed').value)})); if (story.doc?.id !== originID) { story.lateMacro = candidate; message('grok-status', 'Resposta anterior preservada; a tela atual não foi substituída.'); return; } story.candidate = candidate; }
       else story.candidate = {name: $('story-create-name').value, source_revision: story.doc.revision, blocks: Array.from({length: count}, () => ({id: newAssemblyUUID(document.defaultView.crypto), action: $('idea').value, duration_seconds: duration, seed: parseSeed($('seed').value), prompt: $('idea').value}))};
       story.creating = false; renderStory(); navigate('story');
     } catch (error) { if (error.data?.error === 'invalid_proposal') { $('story-invalid').hidden = false; text('story-invalid-text', error.data.raw_text); } message('grok-status', `${error.data?.error === 'invalid_proposal' ? 'A resposta não pôde ser convertida em blocos válidos.' : 'Não foi possível obter a proposta.'} Sua ideia continua aqui. ${error.message}`, true); }
@@ -1623,7 +1684,7 @@ export function startUI(document, client = createClient(), stories = createStory
     saveDraft(); const origin = draft(), before = editorDraft(), revision = story.doc.revision;
     try { before.prompt = storyContext(story.doc, story.block, origin.duration, origin.chosenPrompt); grokPayload(before); } catch (error) { message('story-detail-status', error.message, true); return; }
     state.grokBusy = true; controls();
-    try { const result = await client.detail(before); let unchanged = false; if (story.doc && before.draftKey === state.draftKey) { const current = editorDraft(); current.prompt = storyContext(story.doc, story.block, draft().duration, draft().chosenPrompt); unchanged = draftMatches(before, current) && revision === story.doc.revision && !origin.submitted; } origin.storyCandidate = {text: result, key: before.draftKey, revision, stale: !unchanged}; if (before.draftKey === state.draftKey) { story.detailCandidate = origin.storyCandidate; $('story-block-proposal').value = result; text('story-block-candidate-context', story.detailCandidate.stale ? 'Resposta de contexto anterior. Confira antes de usar.' : contextLabel()); } }
+    try { const result = await grokWaiting.track('story-detail-status', () => client.detail(before)); let unchanged = false; if (story.doc && before.draftKey === state.draftKey) { const current = editorDraft(); current.prompt = storyContext(story.doc, story.block, draft().duration, draft().chosenPrompt); unchanged = draftMatches(before, current) && revision === story.doc.revision && !origin.submitted; } origin.storyCandidate = {text: result, key: before.draftKey, revision, stale: !unchanged}; if (before.draftKey === state.draftKey) { story.detailCandidate = origin.storyCandidate; $('story-block-proposal').value = result; text('story-block-candidate-context', story.detailCandidate.stale ? 'Resposta de contexto anterior. Confira antes de usar.' : contextLabel()); } }
     catch (error) { state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500; message('story-detail-status', `Não foi possível detalhar. Sua instrução foi mantida. ${error.message}`, true); }
     finally { state.grokBusy = false; controls(); }
   }
@@ -1749,7 +1810,7 @@ export function startUI(document, client = createClient(), stories = createStory
     state.grokBusy = true; controls();
     message('grok-status', `Enviando ideia e imagem ${originContext}. Pode levar até 120 s. Grok devolve só texto; nenhum vídeo será gerado.`);
     try {
-      const result = await client.detail(before);
+      const result = await grokWaiting.track('grok-status', () => client.detail(before));
       if (stopped) return;
       const unchanged = draftMatches(before, editorDraft()) && !state.busy && !state.uncertain;
       // Late output belongs to its origin, but an intervening manual proposal edit
@@ -2194,7 +2255,7 @@ export function startUI(document, client = createClient(), stories = createStory
   $('story-intent-read').addEventListener('click', readStoryIntent);
   const newSend = element('button', 'primary', 'Preparar novo envio'); newSend.id = 'story-new-send'; newSend.type = 'button'; newSend.hidden = true; newSend.addEventListener('click', prepareRejectedStory); $('story-intent-read').after(newSend);
   $('story-reload').addEventListener('click', async () => { if (story.editing || story.candidate) { message('story-status', 'Sua edição foi mantida. Salve ou descarte antes de reler.', true); return; } await openStory(story.doc.id); });
-  $('story-propose-again').addEventListener('click', async () => { if (batchBlocked() || story.busy) return; story.busy = true; try { story.candidate = await stories.proposal(story.doc.id, {expected_revision: story.doc.revision, count: story.doc.blocks.length || 3, duration_seconds: state.capabilities.default_requested_seconds, seed: parseSeed($('seed').value)}); renderStory(); } catch (error) { message('story-status', error.message, true); } finally { story.busy = false; } });
+  $('story-propose-again').addEventListener('click', async () => { if (batchBlocked() || story.busy) return; story.busy = true; try { story.candidate = await grokWaiting.track('story-status', () => stories.proposal(story.doc.id, {expected_revision: story.doc.revision, count: story.doc.blocks.length || 3, duration_seconds: state.capabilities.default_requested_seconds, seed: parseSeed($('seed').value)})); renderStory(); } catch (error) { message('story-status', error.message, true); } finally { story.busy = false; } });
   $('story-detail').addEventListener('click', detailStoryBlock);
   $('story-block-use').addEventListener('click', () => { if (!story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy) return; try { $('prompt').value = sceneText($('story-block-proposal').value); draft().promptOrigin = 'Grok'; draft().storyPromptRevision = story.detailCandidate.revision; draft().storyPromptStale = story.detailCandidate.revision !== story.doc.revision; ++draft().revision; saveDraft(); draft().storyCandidate = null; story.detailCandidate = null; controls(); } catch (error) { message('story-detail-status', error.message, true); } });
   $('story-block-keep').addEventListener('click', () => { draft().storyCandidate = null; story.detailCandidate = null; controls(); });
