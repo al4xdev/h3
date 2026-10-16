@@ -24,7 +24,7 @@ class H3App : Application() {
         const val PREFS_NAME = "h3_mock_prefs"
         const val KEY_BACKEND_URL = "backend_url"
         const val KEY_FCM_TOKEN = "fcm_token"
-        const val DEFAULT_BACKEND_URL = "http://192.168.0.100:8010"
+        const val DEFAULT_BACKEND_URL = "http://192.168.0.100:8888"
         private const val TAG = "H3App"
 
         fun registerTokenWithBackend(context: Context, token: String, backendUrl: String? = null) {
