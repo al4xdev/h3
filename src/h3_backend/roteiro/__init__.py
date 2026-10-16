@@ -17,20 +17,20 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
-from .generation.dispatcher import Conflict
-from .generation.i2v import I2VPipe
-from .generation.models import ContinueRequest, RunRequest
-from .generation.v2v import V2VPipe
-from .generation.workflow import (
+from ..generation.dispatcher import Conflict
+from ..generation.i2v import I2VPipe
+from ..generation.models import ContinueRequest, RunRequest
+from ..generation.v2v import V2VPipe
+from ..generation.workflow import (
     DEFAULT_DURATION_SECONDS,
     I2V_CONFIG,
     MAX_DURATION_SECONDS,
     V2V_CONFIG,
     frames_for_duration,
 )
-from .grok import FIXED_EDITOR_MODEL, PromptRequest, read_editor
-from .infrastructure.comfy import QueueBusy
-from .infrastructure.grok_image import (
+from ..grok import FIXED_EDITOR_MODEL, PromptRequest, read_editor
+from ..infrastructure.comfy import QueueBusy
+from ..infrastructure.grok_image import (
     IMAGE_MAX_BYTES,
     VIDEO_MAX_BYTES,
     EditorReference,
@@ -42,8 +42,8 @@ from .infrastructure.grok_image import (
     owned_image,
     snapshot_digest,
 )
-from .infrastructure.grok_oauth import OAuthError
-from .infrastructure.store import Store
+from ..infrastructure.grok_oauth import OAuthError
+from ..infrastructure.store import Store
 
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_BLOCKS = 50  # Local planning budget, not a model or GPU capacity claim.
@@ -442,8 +442,8 @@ class Roteiro:
         return self.view(doc)
 
     def check_revision(self, doc: Document, expected: int, *, edit_id: str | None = None):
-        from .roteiro_batch import assert_batch_available
-        from .roteiro_edit import assert_edit_available
+        from .batch import assert_batch_available
+        from .edit import assert_edit_available
 
         assert_batch_available(self.service, roteiro_id=doc.id)
         assert_edit_available(self.service, doc.id, exclude=edit_id)
@@ -453,7 +453,7 @@ class Roteiro:
             raise Conflict("Roteiro revision changed; preserve the local draft and reread")
 
     async def update(self, ident: str, payload: UpdatePlan) -> dict:
-        from .roteiro_batch import assert_batch_available
+        from .batch import assert_batch_available
         assert_batch_available(self.service, roteiro_id=ident)
         original = self.get(ident)
         self.check_revision(original, payload.expected_revision)
@@ -499,7 +499,7 @@ class Roteiro:
         return {**payload.model_dump(), "model": current["model"]}
 
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
-        from .roteiro_batch import assert_batch_available
+        from .batch import assert_batch_available
         assert_batch_available(self.service, roteiro_id=ident)
         doc = self.get(ident)
         self.check_revision(doc, payload.expected_revision)
@@ -770,7 +770,7 @@ class Roteiro:
             return value
         try:
             if intent.origin == "freestyle":
-                from .roteiro_conversion import observe_import
+                from .conversion import observe_import
                 current = observe_import(self, intent)
                 value.update(admission="admitted", state=current.state, run=current.model_dump())
                 value["error"] = None
@@ -805,7 +805,7 @@ class Roteiro:
             raise ValueError("Native input does not prove this owned intent snapshot")
         # Hydration validates canonical continuation options and provenance without executing.
         if intent.origin == "bridge":
-            from .generation.bridge import BridgePipe
+            from ..generation.bridge import BridgePipe
             BridgePipe.from_run(self.service, run)
             if run.input_info.get("continuation", {}).get("target_run_id") != intent.target_run_id:
                 raise ValueError("Bridge destination disagrees with owned intent")
@@ -867,7 +867,7 @@ class Roteiro:
         # observed(prior) recursively proves that parent's original owned ancestry as well.
 
     def reserve(self, doc: Document, key: str, intent_id: str, payload: Generate) -> Intent:
-        from .roteiro_batch import assert_batch_available
+        from .batch import assert_batch_available
         assert_batch_available(self.service)
         canonical(intent_id)
         canonical(key)
@@ -1020,7 +1020,7 @@ async def update_script_editor(request: Request):
 @router.post("/from-freestyle/{end_id}", status_code=201)
 async def convert_freestyle(end_id: str, request: Request):
     payload = await body(request, ConvertFreestyle)
-    from .roteiro_conversion import convert
+    from .conversion import convert
     return response(await convert(operation(request), end_id, payload.roteiro_id), 201)
 
 

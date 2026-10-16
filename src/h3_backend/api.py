@@ -27,9 +27,10 @@ from .library import router as library_router
 from .notifications import router as notifications_router
 from .pwa import router as pwa_router
 from .roteiro import router as roteiro_router
-from .roteiro_batch import RoteiroBatch
-from .roteiro_batch import router as roteiro_batch_router
-from .roteiro_edit import router as roteiro_edit_router
+from .roteiro.batch import RoteiroBatch
+from .roteiro.batch import router as roteiro_batch_router
+from .roteiro.edit import RoteiroEdit
+from .roteiro.edit import router as roteiro_edit_router
 
 WEB_ROOT = Path(__file__).with_name("web")
 MAX_INPUT_BYTES = 32 * 1024**2
@@ -64,7 +65,6 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
         try:
             if app.state.roteiro_batch is not None:
                 await app.state.roteiro_batch.startup()
-                from .roteiro_edit import RoteiroEdit
                 RoteiroEdit(app.state.service).recover()
             yield
         finally:
