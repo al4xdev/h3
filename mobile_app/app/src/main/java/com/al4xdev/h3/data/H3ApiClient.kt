@@ -91,8 +91,8 @@ class H3ApiClient(private val context: Context) {
         }
     }
 
-    suspend fun proposeWithGrok(roteiroId: String, revision: Int, count: Int = 3): List<BlockItem> = withContext(Dispatchers.IO) {
-        val url = "${baseUrl()}/roteiros/$roteiroId/proposals"
+    suspend fun proposeWithGrok(roteiroId: String, revision: Int, count: Int = 3): Pair<List<BlockItem>, String> = withContext(Dispatchers.IO) {
+        val url = "${baseUrl()}/roteiros/$roteiroId/proposal"
         val json = JSONObject().apply {
             put("expected_revision", revision)
             put("count", count)
@@ -105,10 +105,13 @@ class H3ApiClient(private val context: Context) {
             .build()
         try {
             val response = client.newCall(request).execute()
-            if (!response.isSuccessful) return@withContext emptyList()
-            val text = response.body?.string() ?: return@withContext emptyList()
+            val text = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                val detail = try { JSONObject(text).optString("detail", text) } catch (e: Exception) { text }
+                return@withContext Pair(emptyList(), detail)
+            }
             val candidate = JSONObject(text)
-            val blocksArray = candidate.optJSONArray("blocks") ?: return@withContext emptyList()
+            val blocksArray = candidate.optJSONArray("blocks") ?: return@withContext Pair(emptyList(), "Nenhum bloco retornado")
 
             val result = mutableListOf<BlockItem>()
             for (i in 0 until blocksArray.length()) {
@@ -123,11 +126,23 @@ class H3ApiClient(private val context: Context) {
                     )
                 )
             }
-            result
+            Pair(result, "")
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao propor com Grok: ${e.message}")
-            emptyList()
+            Pair(emptyList(), "Erro de rede: ${e.message}")
         }
+    }
+
+    suspend fun updateBlock(
+        roteiroId: String,
+        revision: Int,
+        name: String,
+        idea: String,
+        updatedBlock: BlockItem,
+        allBlocks: List<BlockItem>
+    ): Boolean = withContext(Dispatchers.IO) {
+        val newBlocks = allBlocks.map { if (it.id == updatedBlock.id) updatedBlock else it }
+        adoptBlocks(roteiroId, revision, name, idea, newBlocks)
     }
 
     suspend fun adoptBlocks(roteiroId: String, revision: Int, name: String, idea: String, blocks: List<BlockItem>): Boolean = withContext(Dispatchers.IO) {
@@ -165,7 +180,7 @@ class H3ApiClient(private val context: Context) {
         }
     }
 
-    suspend fun startBatch(roteiroId: String, revision: Int): Boolean = withContext(Dispatchers.IO) {
+    suspend fun startBatch(roteiroId: String, revision: Int): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val batchId = UUID.randomUUID().toString()
         val url = "${baseUrl()}/roteiros/$roteiroId/batches/$batchId"
         val json = JSONObject().apply {
@@ -179,9 +194,24 @@ class H3ApiClient(private val context: Context) {
             .build()
         try {
             val response = client.newCall(request).execute()
-            response.code in 200..202
+            val text = response.body?.string() ?: ""
+            if (response.code in 200..202) {
+                Pair(true, "Lote iniciado na GPU com sucesso!")
+            } else {
+                val detail = try {
+                    JSONObject(text).optString("detail", text)
+                } catch (e: Exception) {
+                    text
+                }
+                val msg = if (detail.contains("No never-submitted blocks")) {
+                    "Todos os blocos deste roteiro já foram gerados!"
+                } else {
+                    detail.ifBlank { "Erro HTTP ${response.code}" }
+                }
+                Pair(false, msg)
+            }
         } catch (e: Exception) {
-            false
+            Pair(false, "Erro de rede: ${e.message}")
         }
     }
 

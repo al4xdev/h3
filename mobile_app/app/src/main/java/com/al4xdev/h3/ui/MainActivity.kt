@@ -51,7 +51,7 @@ sealed class Screen {
     data class StoryDetail(val roteiroId: String) : Screen()
     data object CreateStory : Screen()
     data class ProposalReview(val roteiroId: String, val name: String, val blocks: List<BlockItem>, val revision: Int, val idea: String) : Screen()
-    data class VideoReview(val runId: String, val videoFile: File?, val videoUrl: String, val prompt: String) : Screen()
+    data class VideoReview(val runId: String, val videoFile: File?, val videoUrl: String, val prompt: String, val isAccepted: Boolean = false) : Screen()
     data object Settings : Screen()
 }
 
@@ -106,7 +106,6 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
         }
     }
 
-    // Broadcast receiver para atualizar quando um vídeo termina de baixar
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
@@ -153,7 +152,7 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                     if (roteiro != null) {
                         StoryDetailScreen(
                             roteiro = roteiro,
-                            onReviewBlock = { blockId, runId ->
+                            onReviewBlock = { blockId, runId, isAccepted ->
                                 val file = File(VideoDownloadWorker.getVideoDir(context), "$runId.mp4")
                                 val videoUrl = "${currentUrl}/runs/$runId/video"
                                 val block = roteiro.blocks.find { it.id == blockId }
@@ -162,19 +161,34 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                                         runId = runId,
                                         videoFile = if (file.exists()) file else null,
                                         videoUrl = videoUrl,
-                                        prompt = block?.prompt ?: ""
+                                        prompt = block?.prompt ?: "",
+                                        isAccepted = isAccepted
                                     )
                                 )
                             },
-                            onStartBatch = {
+                            onSaveBlock = { updatedBlock ->
                                 coroutineScope.launch {
-                                    val ok = apiClient.startBatch(roteiro.id, roteiro.revision)
+                                    val ok = apiClient.updateBlock(
+                                        roteiroId = roteiro.id,
+                                        revision = roteiro.revision,
+                                        name = roteiro.name,
+                                        idea = roteiro.idea,
+                                        updatedBlock = updatedBlock,
+                                        allBlocks = roteiro.blocks
+                                    )
                                     if (ok) {
-                                        Toast.makeText(context, "Lote iniciado na GPU!", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Bloco atualizado!", Toast.LENGTH_SHORT).show()
                                         refreshData()
                                     } else {
-                                        Toast.makeText(context, "Falha ao iniciar lote", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Erro ao atualizar bloco no PC", Toast.LENGTH_SHORT).show()
                                     }
+                                }
+                            },
+                            onStartBatch = {
+                                coroutineScope.launch {
+                                    val (ok, msg) = apiClient.startBatch(roteiro.id, roteiro.revision)
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                    if (ok) refreshData()
                                 }
                             }
                         )
@@ -191,7 +205,7 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                                 isLoading = true
                                 val newStory = apiClient.createRoteiro(name, idea)
                                 if (newStory != null) {
-                                    val proposed = apiClient.proposeWithGrok(newStory.id, newStory.revision, count)
+                                    val (proposed, errorMsg) = apiClient.proposeWithGrok(newStory.id, newStory.revision, count)
                                     isLoading = false
                                     if (proposed.isNotEmpty()) {
                                         screenStack.add(
@@ -204,11 +218,12 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                                             )
                                         )
                                     } else {
-                                        Toast.makeText(context, "Falha na proposta do Grok", Toast.LENGTH_SHORT).show()
+                                        val err = if (errorMsg.isNotBlank()) errorMsg else "Falha na proposta do Grok"
+                                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
                                     }
                                 } else {
                                     isLoading = false
-                                    Toast.makeText(context, "Erro ao criar roteiro", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Erro ao criar roteiro no PC", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
@@ -231,7 +246,6 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                                 if (ok) {
                                     Toast.makeText(context, "Roteiro adotado com sucesso!", Toast.LENGTH_SHORT).show()
                                     refreshData()
-                                    // Voltar à biblioteca
                                     screenStack.clear()
                                     screenStack.add(Screen.Library)
                                     screenStack.add(Screen.StoryDetail(currentScreen.roteiroId))
@@ -249,6 +263,7 @@ fun H3AppNavigation(apiClient: H3ApiClient, context: Context) {
                         videoFile = currentScreen.videoFile,
                         videoUrl = currentScreen.videoUrl,
                         prompt = currentScreen.prompt,
+                        isAccepted = currentScreen.isAccepted,
                         onAccept = {
                             coroutineScope.launch {
                                 val ok = apiClient.decideRun(currentScreen.runId, true)

@@ -39,6 +39,7 @@ fun VideoReviewScreen(
     videoFile: File?,
     videoUrl: String,
     prompt: String,
+    isAccepted: Boolean = false,
     onAccept: () -> Unit,
     onReject: () -> Unit
 ) {
@@ -138,29 +139,52 @@ fun VideoReviewScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            // Decisão
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onReject,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = H3Palette.StateError),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f)
+            if (isAccepted) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 24.dp),
+                    colors = CardDefaults.cardColors(containerColor = H3Palette.SurfaceCard),
+                    shape = RoundedCornerShape(14.dp)
                 ) {
-                    Text("✕ RECUSAR", fontWeight = FontWeight.Bold)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = androidx.compose.ui.Alignment.Center
+                    ) {
+                        Text(
+                            text = "✓ Bloco Aceito no Roteiro (Imutável)",
+                            color = H3Palette.StateAccepted,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
                 }
-
-                Button(
-                    onClick = onAccept,
-                    colors = ButtonDefaults.buttonColors(containerColor = H3Palette.TealPrimary),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f)
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("✓ ACEITAR", color = H3Palette.Midnight, fontWeight = FontWeight.Bold)
+                    OutlinedButton(
+                        onClick = onReject,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = H3Palette.StateError),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("✕ RECUSAR", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = onAccept,
+                        colors = ButtonDefaults.buttonColors(containerColor = H3Palette.TealPrimary),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("✓ ACEITAR", color = H3Palette.Midnight, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
