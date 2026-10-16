@@ -96,17 +96,28 @@ def validated_record(value):
     return record.model_dump()
 
 
-def assert_batch_available(service):
+def assert_batch_available(service, roteiro_id: str | None = None):
     try:
         with _directory(service.store.root, (".data", "roteiro-batches")) as directory:
             active = read_file(directory, "active.json")
     except FileNotFoundError:
         return
-    if (not isinstance(active, dict) or set(active) != {"id", "state"}
+    if (not isinstance(active, dict) or set(active) not in ({"id", "state"}, {"id", "state", "roteiro_id"})
             or active["state"] not in {"active", "ready_for_review", "interrupted", "stopped"}):
         raise ValueError("Invalid batch authorization marker")
     canonical(active["id"])
     if active["state"] == "active" and _owner.get() != active["id"]:
+        if roteiro_id is not None:
+            batch_roteiro_id = active.get("roteiro_id")
+            if batch_roteiro_id is None:
+                with _directory(service.store.root, (".data", "roteiro-batches")) as directory:
+                    try:
+                        record = read_file(directory, f"{active['id']}.json")
+                        batch_roteiro_id = record.get("roteiro_id")
+                    except (FileNotFoundError, ValueError):
+                        batch_roteiro_id = None
+            if batch_roteiro_id is not None and batch_roteiro_id != canonical(roteiro_id):
+                return
         raise Conflict("An authorized roteiro batch owns generation and review")
 
 
@@ -161,7 +172,7 @@ class RoteiroBatch:
                 pointer = read_file(directory, "active.json")
         except FileNotFoundError:
             return {"batch": None}
-        if not isinstance(pointer, dict) or set(pointer) != {"id", "state"}:
+        if not isinstance(pointer, dict) or set(pointer) not in ({"id", "state"}, {"id", "state", "roteiro_id"}):
             raise ValueError("Invalid batch authorization marker")
         canonical(pointer["id"])
         with _directory(self.root, (".data", "roteiro-batches")) as directory:
@@ -171,6 +182,8 @@ class RoteiroBatch:
                 raise ValueError("Batch authorization has no durable record") from exc
         if value["id"] != pointer["id"]:
             raise ValueError("Batch pointer identity disagrees with its record")
+        if pointer.get("roteiro_id") is not None and value["roteiro_id"] != pointer["roteiro_id"]:
+            raise ValueError("Batch pointer roteiro disagrees with its record")
         if pointer["state"] not in {"active", "ready_for_review", "interrupted", "stopped"}:
             raise ValueError("Invalid batch pointer state")
         return {"batch": value}
@@ -180,7 +193,9 @@ class RoteiroBatch:
         with (_directory(self.root, (".data", "roteiro-batches"), create=True) as directory,
               locked(directory)):
             write_file(directory, f"{value['id']}.json", value, exclusive=exclusive)
-            write_file(directory, "active.json", {"id": value["id"], "state": value["state"]})
+            write_file(directory, "active.json", {
+                "id": value["id"], "roteiro_id": value["roteiro_id"], "state": value["state"]
+            })
 
     async def startup(self):
         value = self.current()["batch"]

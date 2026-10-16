@@ -465,3 +465,17 @@ test('app navigation has unique settings fields, one top Back and no global Libr
   assert.match(css, /\.task-panel \.clip-list\{[^}]*max-height:none;overflow:visible/);
   assert.match(css, /\.task-panel \.film-strip\{display:grid;[^}]*overflow:visible/);
 });
+test('story batch isolation allows concurrent roteiro creation and block-level grok detailing', () => {
+  const handler = source.slice(source.indexOf('  function batchBlocked()'), source.indexOf('  async function discoverBatch()'));
+  const state = {editPending: false, stopBusy: false, stopUncertain: false, batchDiscoveryUncertain: false, batchUncertain: false, globalBatchRecord: {state: 'active', id: '11111111-1111-4111-8111-111111111111', roteiro_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', current_block_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'}, batchRecord: null, grokBusyDrafts: new Set(['block-1'])};
+  const story = {tailUncertain: false, doc: {id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'}};
+  const batchBlockedFn = new Function('state', 'story', `${handler}; return batchBlocked;`)(state, story);
+  assert.equal(batchBlockedFn(), true);
+  assert.equal(batchBlockedFn('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'), true);
+  assert.equal(batchBlockedFn('cccccccc-cccc-4ccc-8ccc-cccccccccccc'), false);
+  assert.equal(batchBlockedFn('dddddddd-dddd-4ddd-8ddd-dddddddddddd'), false);
+
+  const isGrokBusyFn = new Function('state', `${handler}; return isGrokBusy;`)(state);
+  assert.equal(isGrokBusyFn('block-1'), true);
+  assert.equal(isGrokBusyFn('block-2'), false);
+});

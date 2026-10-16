@@ -62,6 +62,21 @@ async def test_sequential_native_boundary_and_final_review(tmp_path, monkeypatch
     with pytest.raises(Conflict):
         assert_batch_available(service)
     with pytest.raises(Conflict):
+        assert_batch_available(service, roteiro_id=doc["id"])
+    other_id = str(uuid4())
+    assert_batch_available(service, roteiro_id=other_id)
+    other_doc = await roteiro.create(CreatePlan(**fields(count=2)))
+    assert other_doc["id"] != doc["id"]
+    from h3_backend.roteiro import UpdatePlan
+    updated_other = await roteiro.update(other_doc["id"], UpdatePlan(
+        name="Concurrent Other", idea=other_doc["idea"], reference=other_doc["reference"],
+        adopted=True, blocks=other_doc["blocks"], expected_revision=other_doc["revision"]))
+    assert updated_other["name"] == "Concurrent Other"
+    with pytest.raises(Conflict):
+        await roteiro.update(doc["id"], UpdatePlan(
+            name="Mutate Active", idea=doc["idea"], reference=doc["reference"],
+            adopted=True, blocks=doc["blocks"], expected_revision=doc["revision"]))
+    with pytest.raises(Conflict):
         await batch.start(doc["id"], str(uuid4()), consent())
     gate.set()
     await batch.task
@@ -547,3 +562,49 @@ async def test_invalid_provider_scene_is_preserved_without_native_fallback(tmp_p
     with pytest.raises(Conflict, match="previous text enhancement"):
         await batch.start(original["id"], str(uuid4()), consent())
     await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_grok_proposal_on_other_roteiro_during_batch(tmp_path, monkeypatch):
+    import json
+
+    from h3_backend.roteiro import ProposalRequest
+
+    service, roteiro = setup(tmp_path)
+    doc_a = await roteiro.create(CreatePlan(**fields(count=2)))
+    doc_b = await roteiro.create(CreatePlan(**fields(count=2)))
+
+    gate = asyncio.Event()
+
+    async def wait(run_id):
+        await gate.wait()
+
+    monkeypatch.setattr(service, "wait_run", wait)
+    batch = RoteiroBatch(service, FakeEnhancer())
+    ident = str(uuid4())
+    await batch.start(doc_a["id"], ident, consent())
+
+    class FakeGrok:
+        async def complete(self, request, output_schema=None, schema_name=None):
+            return {
+                "text": json.dumps({"name": "Proposed B", "blocks": [
+                    {"action": "Action 1", "prompt": "Prompt 1", "duration_seconds": 2.3},
+                    {"action": "Action 2", "prompt": "Prompt 2", "duration_seconds": 2.3},
+                ]})
+            }
+
+    # Propose on doc_b succeeds concurrently:
+    proposal = await roteiro.propose(doc_b["id"], ProposalRequest(
+        expected_revision=doc_b["revision"], count=2, duration_seconds=2.3, seed=123), FakeGrok())
+    assert proposal["name"] == "Proposed B"
+    assert len(proposal["blocks"]) == 2
+
+    # Propose on doc_a (the active batch roteiro) is rejected:
+    with pytest.raises(Conflict):
+        await roteiro.propose(doc_a["id"], ProposalRequest(
+            expected_revision=doc_a["revision"], count=2, duration_seconds=2.3, seed=123), FakeGrok())
+
+    gate.set()
+    await batch.task
+    await service.shutdown()
+

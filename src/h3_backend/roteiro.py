@@ -429,15 +429,12 @@ class Roteiro:
             self.service.store.get(run_id)
 
     async def create(self, payload: CreatePlan) -> dict:
-        from .roteiro_batch import assert_batch_available
-        assert_batch_available(self.service)
         digest = await self.reference_digest(payload.reference)
         doc = Document(**payload.model_dump(), id=str(uuid4()), revision=1,
                        reference_sha256=digest)
         encoded_metadata(doc.model_dump())  # Reject aggregate overflow before directory reservation.
         with (_directory(self.root, (".data", "roteiros"), create=True) as library,
               locked(library)):
-            assert_batch_available(self.service)
             self.reference_available(payload.reference)
             with (_directory(self.root, (".data", "roteiros", doc.id), create=True) as directory,
                   locked(directory)):
@@ -448,7 +445,7 @@ class Roteiro:
         from .roteiro_batch import assert_batch_available
         from .roteiro_edit import assert_edit_available
 
-        assert_batch_available(self.service)
+        assert_batch_available(self.service, roteiro_id=doc.id)
         assert_edit_available(self.service, doc.id, exclude=edit_id)
         if self.removed(doc.id):
             raise Conflict("Roteiro removed from library; history is read-only")
@@ -457,7 +454,7 @@ class Roteiro:
 
     async def update(self, ident: str, payload: UpdatePlan) -> dict:
         from .roteiro_batch import assert_batch_available
-        assert_batch_available(self.service)
+        assert_batch_available(self.service, roteiro_id=ident)
         original = self.get(ident)
         self.check_revision(original, payload.expected_revision)
         digest = await self.reference_digest(payload.reference)
@@ -503,7 +500,7 @@ class Roteiro:
 
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
         from .roteiro_batch import assert_batch_available
-        assert_batch_available(self.service)
+        assert_batch_available(self.service, roteiro_id=ident)
         doc = self.get(ident)
         self.check_revision(doc, payload.expected_revision)
         digest = await self.reference_digest(doc.reference)

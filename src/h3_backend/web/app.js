@@ -1110,7 +1110,7 @@ export function startUI(document, client = createClient(), stories = createStory
   let pointer = null, pointerError = null;
   try { if (document.defaultView?.location) pointer = assemblyPointer(document.defaultView.location.href); }
   catch (error) { pointerError = error.message; }
-  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 12, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
+  const state = {assemblyId: pointer, assemblyEnd: null, assemblyMode: null, assemblyBusy: false, assemblyReading: false, assemblyUncertain: Boolean(pointer || pointerError), assemblyLocked: Boolean(pointer), assembly: null, editorReady: false, editorSnapshot: null, editorSaving: false, grokBusy: false, grokBusyDrafts: new Set(), grokUncertain: false, draftRevision: 0, references: [], reference: null, uploadBusy: false, uploadUncertain: false, items: [], total: 0, offset: 0, limit: 12, selected: null, sequence: null, config: null, busy: false, uncertain: false, mode: 'new', epoch: 0, waitController: null};
   Object.assign(state, {screen: 'library', stopBusy: false, stopUncertain: false, stopOwner: null, batchOwner: null, batchRecord: null, globalBatchRecord: null, batchDiscoveryUncertain: true, batchDiscoveryEpoch: 0, batchUncertain: false, batchReading: false, batchEpoch: 0, conversionBusy: false, conversionUncertain: false, conversionEnd: null, conversionId: null, branchSequence: null, openedBranchEnd: null, trail: [], drafts: new Map(), draftKey: 'new', parent: null, capabilities: null, pendingRun: null, statusOnly: false, settingsOrigin: null, retryPreparing: false, retryEpoch: 0, navigationEpoch: 0, lastFrame: {parentId: null, state: 'none'}});
   const story = {tailOwner: null, tailRecord: null, tailUncertain: false, tailReading: false, tailDrafts: new Map(), tailWrappers: new Map(), tailFormID: null, available: false, items: [], runIDs: new Set(), creating: false, doc: null, candidate: null, block: null, intent: null, busy: false, editing: null, editDraft: null, pendingEdit: null, detailCandidate: null};
   const blockedFeedback = createBlockedActionFeedback(document, button => blockedActionReason(button, state, story, {
@@ -1479,7 +1479,25 @@ export function startUI(document, client = createClient(), stories = createStory
     catch (error) { message('conversion-status', `Conversão ${id} não confirmada: ${error.message}. Consulte o mesmo roteiro; não repita.`, true); }
     finally { state.conversionBusy = false; controls(); }
   }
-  function batchBlocked() { return state.editPending || story.tailUncertain || state.stopBusy || state.stopUncertain || state.batchDiscoveryUncertain || state.globalBatchRecord?.state === 'active' || state.batchUncertain || state.batchRecord?.state === 'active'; }
+  function batchBlocked() {
+    const storyId = arguments[0] || null;
+    if (state.editPending || story.tailUncertain || state.stopBusy || state.stopUncertain || state.batchDiscoveryUncertain || state.batchUncertain) return true;
+    const active = state.globalBatchRecord?.state === 'active' ? state.globalBatchRecord : (state.batchRecord?.state === 'active' ? state.batchRecord : null);
+    if (!active) return false;
+    if (storyId) return active.roteiro_id === storyId;
+    return true;
+  }
+  function activeBatchRecord() { return state.globalBatchRecord?.state === 'active' ? state.globalBatchRecord : (state.batchRecord?.state === 'active' ? state.batchRecord : null); }
+  function storyBatchBlocked() {
+    return batchBlocked(story.doc?.id);
+  }
+  function activeStoryBlockId() {
+    const active = activeBatchRecord();
+    return (active && story.doc && active.roteiro_id === story.doc.id) ? active.current_block_id : null;
+  }
+  function isGrokBusy(key = state.draftKey) {
+    return Boolean(state.grokBusyDrafts?.has(key));
+  }
   async function discoverBatch() {
     const epoch = ++state.batchDiscoveryEpoch;
     try {
@@ -1573,18 +1591,19 @@ export function startUI(document, client = createClient(), stories = createStory
     $('story-intent-read').disabled = !ownIntent || state.busy;
     $('new-mode').disabled = rootDraftViewBlocked();
     text('new-mode', retryBlocked() ? 'Reabrir Freestyle' : 'Freestyle');
-    $('story-new').disabled = batchBlocked() || !state.config || story.busy || !story.available;
+    $('story-new').disabled = !state.config || story.busy || !story.available;
     $('story-new').hidden = state.config?.roteiro_enabled === false;
-    $('story-propose').disabled = $('story-manual').disabled = batchBlocked() || story.busy || !state.capabilities;
-    $('story-detail').disabled = batchBlocked() || !state.editorReady || state.grokBusy || state.grokUncertain || (state.mode === 'continue' && state.lastFrame.state !== 'ready');
+    $('story-propose').disabled = $('story-manual').disabled = storyBatchBlocked() || story.busy || !state.capabilities;
+    const currentBlockActiveInBatch = activeStoryBlockId() !== null && activeStoryBlockId() === story.block;
+    $('story-detail').disabled = currentBlockActiveInBatch || !state.editorReady || isGrokBusy(state.draftKey) || state.grokUncertain || (state.mode === 'continue' && state.lastFrame.state !== 'ready');
     $('story-block-use').disabled = !story.detailCandidate || story.detailCandidate.key !== state.draftKey || draft().submitted || state.busy;
     $('story-block-candidate').hidden = !story.detailCandidate || story.detailCandidate.key !== state.draftKey;
     $('story-stale-prompt').hidden = !draft().storyPromptStale;
     $('story-new-send').hidden = !state.statusOnly || !story.rejectedReady || story.rejectedReady.owner.id !== story.doc?.id || story.rejectedReady.owner.block !== story.block || story.rejectedReady.owner.intent !== story.intent;
     $('story-new-send').disabled = batchBlocked() || state.busy || state.uncertain || state.uploadBusy || state.uploadUncertain || state.assemblyBusy || state.assemblyUncertain || state.retryPreparing || ['queued', 'running'].includes(state.pendingRun?.state);
-    for (const id of ['story-add', 'story-adopt', 'story-propose-again', 'story-delete']) $(id).disabled = batchBlocked() || story.busy;
-    for (const button of document.querySelectorAll('[data-story-remove]')) button.disabled = batchBlocked() || story.busy;
-    $('story-name').disabled = batchBlocked();
+    for (const id of ['story-add', 'story-adopt', 'story-propose-again', 'story-delete']) $(id).disabled = storyBatchBlocked() || story.busy;
+    for (const button of document.querySelectorAll('[data-story-remove]')) button.disabled = storyBatchBlocked() || story.busy;
+    $('story-name').disabled = storyBatchBlocked();
     renderTail();
     text('story-prompt-origin', `Origem: ${draft().promptOrigin || 'roteiro'}`);
     $('create-fields').disabled = $('generate').disabled = nativeExecutionBlocked({...state, submitted: draft().submitted});
@@ -1608,10 +1627,10 @@ export function startUI(document, client = createClient(), stories = createStory
     $('continuation-note').hidden = state.mode !== 'continue';
     text('generate', state.busy ? 'Solicitação em andamento…' : state.mode === 'continue' ? 'Gerar continuação' : 'Gerar Freestyle');
     text('parent-label', state.mode === 'continue' ? `Continuar o pai aceito ${state.parent?.id ?? '—'}. Identidade original herdada.` : state.reference ? 'Começar pela imagem escolhida.' : 'Começar pela referência original.');
-    $('grok-detail').disabled = batchBlocked() || !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy || !contextReference() || (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready'));
+    $('grok-detail').disabled = !state.editorReady || isGrokBusy(state.draftKey) || state.grokUncertain || state.uploadBusy || !contextReference() || (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready'));
     $('grok-save').disabled = !state.editorReady || state.editorSaving;
     $('grok-system').disabled = $('grok-model').disabled = !state.editorReady;
-    text('grok-detail', state.grokBusy ? 'Grok está detalhando…' : 'Detalhar ideia e imagem');
+    text('grok-detail', isGrokBusy(state.draftKey) ? 'Grok está detalhando…' : 'Detalhar ideia e imagem');
     text('grok-context', `No seu clique, Grok receberá: ${contextLabel()}${state.mode === 'continue' ? ' + último frame do mesmo pai aceito (pose e roupa atuais)' : ''}. Saída somente texto.`);
     text('generation-context', `${contextLabel()} · 480 × 864 · parâmetros nativos preservados.`);
     text('continuation-parent', `Pai aceito: ${state.parent?.id || '—'} · ${contextLabel()}`);
@@ -1645,7 +1664,7 @@ export function startUI(document, client = createClient(), stories = createStory
     grokWaiting.set('batch-status', improving, state.batchRecord?.id);
     grokWaiting.set('batch-library-card', improving, state.batchRecord?.id);
     grokWaiting.sync();
-    for (const [id, busy] of [['grok-detail', state.grokBusy], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
+    for (const [id, busy] of [['grok-detail', isGrokBusy(state.draftKey)], ['grok-save', state.editorSaving], ['upload', state.uploadBusy], ['generate', state.busy && !pendingDecision], ['accept', pendingDecision?.action === 'accept' && pendingDecision.id === state.selected?.id], ['reject', pendingDecision?.action === 'reject' && pendingDecision.id === state.selected?.id], ['assemble', state.assemblyBusy], ['assembly-refresh', state.assemblyReading], ['generation-status', state.busy && state.statusOnly]]) motion.busy($(id), busy);
   }
   function setMode(mode) {
     if (mode === 'new' ? rootDraftViewBlocked() : draftNavigationBlocked() || state.selected?.state !== 'accepted') return;
@@ -2041,8 +2060,8 @@ export function startUI(document, client = createClient(), stories = createStory
       const save = element('button', '', 'Salvar alterações'), cancel = element('button', '', 'Cancelar'); save.type = cancel.type = 'button'; save.addEventListener('click', () => saveStoryEdit()); cancel.addEventListener('click', () => { story.editing = null; renderStory(); }); li.append(action, duration, save, cancel);
     } else {
       li.append(element('p', 'block-preview', block.action), element('p', 'mono', `${block.duration_seconds} s · ${alignedFrames(block.duration_seconds)} frames`));
-      const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked() && !info.latest;
-      edit.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (batchBlocked() && !latest.latest) return; if (latest.latest) void openStoryAttempt(latest.accepted || latest.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...current}; renderStory(); } }); li.append(edit);
+      const edit = element('button', '', info.accepted ? 'Assistir bloco' : info.frozen ? 'Ver tentativa' : 'Editar'); edit.type = 'button'; edit.disabled = batchBlocked(story.doc?.id) && !info.latest;
+      edit.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (batchBlocked(story.doc?.id) && !latest.latest) return; if (latest.latest) void openStoryAttempt(latest.accepted || latest.latest); else if (story.editing && story.editing !== block.id) { story.pendingEdit = block.id; $('story-unsaved').hidden = false; } else { story.editing = block.id; story.editDraft = {...current}; renderStory(); } }); li.append(edit);
       if (!info.accepted && info.latest?.origin !== 'bridge' && ['rejected', 'interrupted'].includes(info.latest?.run?.state)) {
         const retry = element('button', '', 'Preparar nova tentativa'); retry.type = 'button'; retry.dataset.storyRetry = 'true'; retry.disabled = retryBlocked();
         retry.addEventListener('click', () => { const current = storyBlocks().find(item => item.id === block.id); if (!current) return; const latest = storyBlockState(story.doc, current); if (!latest.accepted && latest.latest?.origin !== 'bridge' && ['rejected', 'interrupted'].includes(latest.latest?.run?.state)) void prepareStoryRetry(latest.latest); }); li.append(retry);
@@ -2050,9 +2069,9 @@ export function startUI(document, client = createClient(), stories = createStory
       if (!previous && !info.latest) li.append(element('p', 'caption', `Aguarda o bloco ${index} ser aceito.`));
     }
     if (!info.frozen) {
-      const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.dataset.storyRemove = 'true'; remove.disabled = story.busy || batchBlocked();
+      const remove = element('button', '', 'Apagar bloco'); remove.type = 'button'; remove.dataset.storyRemove = 'true'; remove.disabled = story.busy || batchBlocked(story.doc?.id);
       remove.addEventListener('click', async () => {
-        if (batchBlocked() || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
+        if (batchBlocked(story.doc?.id) || story.busy || !document.defaultView.confirm('Apagar este bloco ainda não enviado do roteiro?')) return;
         const changed = storyBlocks().filter(item => item.id !== block.id);
         if (story.candidate) { story.candidate.blocks = changed; story.editing = null; renderStory(); }
         else if (await saveStoryBlocks(changed, changed.length ? story.doc.adopted : false)) { story.editing = null; renderStory(); }
@@ -2061,9 +2080,9 @@ export function startUI(document, client = createClient(), stories = createStory
     if (!info.frozen) {
       const organize = element('details'), summary = element('summary', '', 'Organizar bloco'); organize.append(summary);
       for (const [label, delta] of [['Mover para cima', -1], ['Mover para baixo', 1]]) {
-        const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked() || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
+        const button = element('button', '', label); button.type = 'button'; button.disabled = batchBlocked(story.doc?.id) || delta !== 0 && (!blocks[index + delta] || storyBlockState(story.doc, blocks[index + delta]).frozen);
         if (delta !== 0) button.dataset.blockReason = !blocks[index + delta] ? 'Este bloco já está no limite da lista nessa direção.' : 'O bloco vizinho já tem uma tentativa registrada. Sua posição precisa ser preservada.';
-        button.addEventListener('click', async () => { if (batchBlocked() || story.busy) return; const current = storyBlocks(), position = current.findIndex(item => item.id === block.id); if (position < 0 || storyBlockState(story.doc, current[position]).frozen || !current[position + delta] || storyBlockState(story.doc, current[position + delta]).frozen) return; const changed = current.map(item => ({...item})); [changed[position], changed[position + delta]] = [changed[position + delta], changed[position]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
+        button.addEventListener('click', async () => { if (batchBlocked(story.doc?.id) || story.busy) return; const current = storyBlocks(), position = current.findIndex(item => item.id === block.id); if (position < 0 || storyBlockState(story.doc, current[position]).frozen || !current[position + delta] || storyBlockState(story.doc, current[position + delta]).frozen) return; const changed = current.map(item => ({...item})); [changed[position], changed[position + delta]] = [changed[position + delta], changed[position]]; if (story.candidate) { story.candidate.blocks = changed; renderStory(); } else await saveStoryBlocks(changed); }); organize.append(button);
       } li.append(organize);
     }
     if (info.attempts.length) {
@@ -2096,7 +2115,7 @@ export function startUI(document, client = createClient(), stories = createStory
     if (editRecovery?.roteiro === story.doc.id) { const pending = element('li', 'pending-card'); pending.append(element('p', 'operation', `Edição ${editRecovery.id} com resultado ainda não confirmado.`)); const read = element('button', '', 'Reler mesma edição'); read.type = 'button'; read.addEventListener('click', recoverStoryEdit); pending.append(read); recovery.push(pending); }
     storyCards.reconcile(story.doc.id, blocks.map((block, index) => {
       const info = storyBlockState(story.doc, block);
-      const signature = JSON.stringify([index, block.action, block.prompt, block.duration_seconds, block.seed, info.attempts.map(item => [item.intent_id, item.run_id, item.run?.state, item.state, Boolean(item.run?.output?.path)]), story.doc.selected_runs?.[block.id], index ? Boolean(storyBlockState(story.doc, blocks[index - 1]).accepted) : true, index ? storyBlockState(story.doc, blocks[index - 1]).frozen : null, index + 1 < blocks.length ? storyBlockState(story.doc, blocks[index + 1]).frozen : null, story.editing === block.id, Boolean(story.candidate), batchBlocked(), editFence(), edit.busy, story.busy, edit.lists.get(story.doc.id)?.filter(record => record.block_id === block.id).map(record => [record.id, record.state])]);
+      const signature = JSON.stringify([index, block.action, block.prompt, block.duration_seconds, block.seed, info.attempts.map(item => [item.intent_id, item.run_id, item.run?.state, item.state, Boolean(item.run?.output?.path)]), story.doc.selected_runs?.[block.id], index ? Boolean(storyBlockState(story.doc, blocks[index - 1]).accepted) : true, index ? storyBlockState(story.doc, blocks[index - 1]).frozen : null, index + 1 < blocks.length ? storyBlockState(story.doc, blocks[index + 1]).frozen : null, story.editing === block.id, Boolean(story.candidate), batchBlocked(story.doc?.id), editFence(), edit.busy, story.busy, edit.lists.get(story.doc.id)?.filter(record => record.block_id === block.id).map(record => [record.id, record.state])]);
       return {id: block.id, title: `${index + 1} · ${info.accepted ? 'Aceito' : 'Bloco do roteiro'}`, action: block.action, editing: story.editing === block.id, signature, build: () => { const current = storyBlocks(), position = current.findIndex(item => item.id === block.id); return renderStoryBlock(current[position], position, current); }};
     }), recovery);
     text('story-adopt', story.candidate?.kind === 'tail' ? 'Usar esta continuação' : 'Usar este roteiro');
@@ -2105,7 +2124,7 @@ export function startUI(document, client = createClient(), stories = createStory
     text('story-next', !next ? 'Preparar montagem' : info.latest ? ['rejected', 'interrupted'].includes(info.latest.run?.state) ? 'Preparar outra tentativa' : info.latest.run?.state === 'ready_for_review' ? 'Revisar bloco' : 'Consultar envio do bloco' : `Preparar bloco ${story.doc.blocks.indexOf(next) + 1}`);
   }
   async function saveStoryBlocks(blocks, adopted = story.doc.adopted) {
-    if (batchBlocked() || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true; controls();
+    if (batchBlocked(story.doc?.id) || state.conversionBusy || state.conversionUncertain || story.busy) return false; story.busy = true; controls();
     try { const body = storyUpdate(story.doc, blocks, adopted); body.name = $('story-name').value; const before = story.doc; story.doc = await stories.save(story.doc.id, body); if (JSON.stringify(before.blocks) !== JSON.stringify(story.doc.blocks)) for (const [key, cached] of state.drafts) if (key.startsWith(`story:${story.doc.id}:`) && !cached.submitted) cached.storyPromptStale = true; story.candidate = null; message('story-status', ''); return true; }
     catch (error) { message('story-status', error.status === 409 ? 'O roteiro mudou no PC. Confira a outra versão antes de salvar. Sua edição foi mantida.' : `Não foi possível salvar: ${error.message}`, true); return false; }
     finally { story.busy = false; renderStory(); controls(); }
@@ -2117,7 +2136,7 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { message('story-status', error.message, true); } return false;
   }
   async function createStory(propose) {
-    if (batchBlocked() || story.busy || !state.capabilities) return; saveDraft();
+    if (story.busy || !state.capabilities) return; saveDraft();
     let count, duration;
     try { count = parseSeed($('story-count').value); if (count < 1 || count > 50) throw new Error('Escolha entre 1 e 50 blocos.'); duration = parseDuration($('story-duration').value, state.capabilities); sceneText($('idea').value); }
     catch (error) { message('grok-status', error.message, true); return; }
@@ -2190,13 +2209,35 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) { message('operation', error.message, true); }
   }
   async function detailStoryBlock() {
-    if (!story.doc || !story.block || state.grokBusy || state.grokUncertain || !state.editorReady || (state.mode === 'continue' && state.lastFrame.state !== 'ready')) return;
-    saveDraft(); const origin = draft(), before = editorDraft(), revision = story.doc.revision;
+    const origin = draft(), before = editorDraft(), revision = story.doc?.revision;
+    const key = before.draftKey;
+    if (!story.doc || !story.block || isGrokBusy(key) || state.grokUncertain || !state.editorReady || (state.mode === 'continue' && state.lastFrame.state !== 'ready')) return;
+    saveDraft();
     try { before.prompt = storyContext(story.doc, story.block, origin.duration, origin.chosenPrompt); grokPayload(before); } catch (error) { message('story-detail-status', error.message, true); return; }
-    state.grokBusy = true; controls();
-    try { const result = await grokWaiting.track('story-detail-status', () => client.detail(before)); let unchanged = false; if (story.doc && before.draftKey === state.draftKey) { const current = editorDraft(); current.prompt = storyContext(story.doc, story.block, draft().duration, draft().chosenPrompt); unchanged = draftMatches(before, current) && revision === story.doc.revision && !origin.submitted; } origin.storyCandidate = {text: result, key: before.draftKey, revision, stale: !unchanged}; if (before.draftKey === state.draftKey) { story.detailCandidate = origin.storyCandidate; $('story-block-proposal').value = result; text('story-block-candidate-context', story.detailCandidate.stale ? 'Resposta de contexto anterior. Confira antes de usar.' : contextLabel()); } }
+    state.grokBusyDrafts.add(key);
+    state.grokBusy = state.grokBusyDrafts.size > 0;
+    controls();
+    try {
+      const result = await grokWaiting.track('story-detail-status', () => client.detail(before));
+      let unchanged = false;
+      if (story.doc && before.draftKey === state.draftKey) {
+        const current = editorDraft();
+        current.prompt = storyContext(story.doc, story.block, draft().duration, draft().chosenPrompt);
+        unchanged = draftMatches(before, current) && revision === story.doc.revision && !origin.submitted;
+      }
+      origin.storyCandidate = {text: result, key: before.draftKey, revision, stale: !unchanged};
+      if (before.draftKey === state.draftKey) {
+        story.detailCandidate = origin.storyCandidate;
+        $('story-block-proposal').value = result;
+        text('story-block-candidate-context', story.detailCandidate.stale ? 'Resposta de contexto anterior. Confira antes de usar.' : contextLabel());
+      }
+    }
     catch (error) { state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500; message('story-detail-status', `Não foi possível detalhar. Sua instrução foi mantida. ${error.message}`, true); }
-    finally { state.grokBusy = false; controls(); }
+    finally {
+      state.grokBusyDrafts.delete(key);
+      state.grokBusy = state.grokBusyDrafts.size > 0;
+      controls();
+    }
   }
   function rememberAssembly(record) {
     if (record.id !== state.assemblyId) return;
@@ -2316,13 +2357,16 @@ export function startUI(document, client = createClient(), stories = createStory
     finally { state.editorSaving = false; controls(); }
   }
   async function detailScene() {
-    if (state.screen !== 'context' || !state.editorReady || state.grokBusy || state.grokUncertain || state.uploadBusy) return;
+    const key = state.draftKey;
+    if (state.screen !== 'context' || !state.editorReady || isGrokBusy(key) || state.grokUncertain || state.uploadBusy) return;
     if (state.mode === 'continue' && (state.parent?.state !== 'accepted' || state.lastFrame.parentId !== state.parent.id || state.lastFrame.state !== 'ready')) { message('grok-status', 'O último frame do pai não está disponível. Grok precisa dos dois contextos; usar sua própria instrução continua separado.', true); return; }
     const before = editorDraft();
     try { grokPayload(before); } catch (error) { message('grok-status', error.message, true); return; }
     if (!before.reference) { message('grok-status', 'A identidade original não foi comprovada. Nenhuma imagem foi enviada.', true); return; }
     const origin = draft(), originContext = contextLabel();
-    state.grokBusy = true; controls();
+    state.grokBusyDrafts.add(key);
+    state.grokBusy = state.grokBusyDrafts.size > 0;
+    controls();
     message('grok-status', `Enviando ideia e imagem ${originContext}. Pode levar até 120 s. Grok devolve só texto; nenhum vídeo será gerado.`);
     try {
       const result = await grokWaiting.track('grok-status', () => client.detail(before));
@@ -2341,7 +2385,11 @@ export function startUI(document, client = createClient(), stories = createStory
     } catch (error) {
       state.grokUncertain = !(error instanceof HTTPError) || error.status >= 500;
       message('grok-status', `Grok não confirmou uma cena: ${error.message}. ${state.grokUncertain ? 'Resultado incerto; não repita esta ideia às cegas nesta sessão.' : 'O rascunho foi mantido; corrija a configuração ou verifique a conexão.'}`, true);
-    } finally { state.grokBusy = false; controls(); }
+    } finally {
+      state.grokBusyDrafts.delete(key);
+      state.grokBusy = state.grokBusyDrafts.size > 0;
+      controls();
+    }
   }
   function useProposal() {
     if (state.screen !== 'proposal' || state.busy || state.uploadBusy) return;
