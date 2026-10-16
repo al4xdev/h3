@@ -269,7 +269,16 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
       uploading = true;
       try {
         const response = await fetcher(`/inputs?name=${encodeURIComponent(file.name)}`, {method: 'POST', body: file, headers: {'Content-Type': file.type || 'application/octet-stream'}});
-        if (!response.ok) throw new HTTPError(response.status, 'Upload não confirmado. O PC não publicou a referência.');
+        if (!response.ok) {
+          let detail = 'O PC não confirmou a publicação da referência.';
+          try {
+            const data = await response.json();
+            if (typeof data.detail === 'string' && data.detail.trim()) detail = data.detail;
+          } catch { /* Preserve the HTTP status even when the bridge returns non-JSON. */ }
+          const guidance = response.status === 400 && /Corrupt or unsupported identity image/.test(detail)
+            ? ' Abra a imagem e exporte uma nova cópia em PNG ou JPG antes de enviar.' : '';
+          throw new HTTPError(response.status, `Upload não confirmado. ${detail}${guidance}`);
+        }
         const item = await response.json();
         referenceValue(item);
         if (!imageURL(item.image_url)) throw new Error('Upload retornou uma imagem local inválida; publicação incerta.');

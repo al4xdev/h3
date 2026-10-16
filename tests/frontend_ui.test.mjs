@@ -147,6 +147,18 @@ test('raw File upload is guarded and never serialized or followed by inference',
   assert.equal(calls.length, 1); assert.equal(calls[0].url, '/inputs?name=phone%20photo.png'); assert.equal(calls[0].options.body, file); assert.equal(calls[0].options.headers['Content-Type'], 'image/png');
   for (const invalid of [{size: 0, type: 'image/png'}, {size: 32 * 1024 * 1024 + 1, type: 'image/png'}, {size: 1, type: 'text/html'}]) assert.throws(() => validateUpload(invalid));
 });
+test('upload errors preserve the bridge reason and give actionable image guidance without replay', async () => {
+  const file = new File(['encoded fixture'], 'photo.png', {type: 'image/png'});
+  const reason = 'Corrupt or unsupported identity image: ffmpeg failed: Invalid PNG signature';
+  let calls = 0;
+  const client = createClient(async () => { calls++; return reply({detail: reason}, 400); });
+  await assert.rejects(client.upload(file), error => error.status === 400 && error.message.includes(reason) && /nova cópia em PNG ou JPG/.test(error.message));
+  assert.equal(calls, 1);
+  const nonJSON = createClient(async () => ({ok: false, status: 502, json: async () => { throw new Error('not JSON'); }}));
+  await assert.rejects(nonJSON.upload(file), error => error.status === 502 && /não confirmou/.test(error.message));
+  const tooLarge = createClient(async () => reply({detail: 'Image exceeds 32 MiB upload limit'}, 413));
+  await assert.rejects(tooLarge.upload(file), error => error.status === 413 && /32 MiB/.test(error.message) && !/nova cópia/.test(error.message));
+});
 test('SSE hints normalize worker paths, ignore temporary telemetry and accept overflow', () => {
   for (const path of ['.data', '.data/runs/own/manifest.json', 'runs/own/request.json', '.data/inputs/id/metadata.json']) assert.equal(relevantChange({path, invalidation: true}), true);
   for (const path of ['runs/own/telemetry.jsonl', '.data/inputs/id/.part', 'runs/own/tmp/manifest.json', 'elsewhere']) assert.equal(relevantChange({path, invalidation: true}), false);
