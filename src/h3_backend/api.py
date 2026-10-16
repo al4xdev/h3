@@ -19,7 +19,6 @@ from .generation.i2v import router as i2v_router
 from .generation.models import CONTINUATION_PROMPT, DEFAULT_PROMPT, Run, Settings
 from .generation.v2v import router as v2v_router
 from .generation.workflow import DEFAULT_DURATION_SECONDS, duration_capabilities
-from .grok import grok_lifespan
 from .grok import router as grok_router
 from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import prepare_png_upload, sha256_file, verify_image
@@ -59,22 +58,21 @@ def same_origin(origin: str, request: Request) -> bool:
 def create_app(*, settings: Settings | None = None, service: RunService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        async with grok_lifespan(app):
-            app.state.service = service or RunService(settings or Settings.from_env())
-            app.state.roteiro_batch = (RoteiroBatch(app.state.service, grok=app.state.grok)
-                                      if hasattr(app.state.service, "store") else None)
-            await app.state.service.startup()
+        app.state.service = service or RunService(settings or Settings.from_env())
+        app.state.roteiro_batch = (RoteiroBatch(app.state.service)
+                                  if hasattr(app.state.service, "store") else None)
+        await app.state.service.startup()
+        try:
+            if app.state.roteiro_batch is not None:
+                await app.state.roteiro_batch.startup()
+                RoteiroEdit(app.state.service).recover()
+            yield
+        finally:
             try:
                 if app.state.roteiro_batch is not None:
-                    await app.state.roteiro_batch.startup()
-                    RoteiroEdit(app.state.service).recover()
-                yield
+                    await app.state.roteiro_batch.shutdown()
             finally:
-                try:
-                    if app.state.roteiro_batch is not None:
-                        await app.state.roteiro_batch.shutdown()
-                finally:
-                    await app.state.service.shutdown()
+                await app.state.service.shutdown()
 
     app = FastAPI(title="H3 local", lifespan=lifespan)
     app.include_router(grok_router)
