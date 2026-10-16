@@ -121,6 +121,13 @@ class RunService:
         self.media = media
         self.frames_for_duration = frames_for_duration
         self.telemetry = telemetry
+        self.notifications = None
+        if hasattr(self.store, "root"):
+            try:
+                from ..notifications import NotificationManager
+                self.notifications = NotificationManager(self.store.root)
+            except (OSError, ValueError) as exc:
+                logging.getLogger(__name__).debug("Notifications unavailable: %s", exc)
         # Legacy memory_available/settings are accepted but ignored: the external
         # owner manages Comfy's RAM/lifecycle; telemetry remains observational.
         self._lock = asyncio.Lock()
@@ -456,6 +463,16 @@ class RunService:
                     await asyncio.gather(telemetry_task, return_exceptions=True)
             if self._active == run_id:
                 self._active = None
+            if self.notifications is not None:
+                try:
+                    completed_run = self.store.get(run_id)
+                    self.notifications.notify_run_terminal_sync(
+                        completed_run, duration_seconds=monotonic() - start
+                    )
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Notification dispatch failed for run %s", run_id, exc_info=True
+                    )
 
     async def _record_telemetry(self, run_id, stop):
         try:

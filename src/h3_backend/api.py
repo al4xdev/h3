@@ -24,6 +24,7 @@ from .infrastructure.comfy import QueueBusy
 from .infrastructure.media import prepare_png_upload, sha256_file, verify_image
 from .infrastructure.store import IMAGE_NAMES, IMAGE_TYPES, safe_path, storage_guard
 from .library import router as library_router
+from .notifications import router as notifications_router
 from .pwa import router as pwa_router
 from .roteiro import router as roteiro_router
 from .roteiro_batch import RoteiroBatch
@@ -81,6 +82,7 @@ def create_app(*, settings: Settings | None = None, service: RunService | None =
     app.include_router(bridge_router)
     app.include_router(library_router)
     app.include_router(favorites_router)
+    app.include_router(notifications_router)
     app.include_router(pwa_router)
     app.include_router(assembly_router)
     if service is not None:
