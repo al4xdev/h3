@@ -5,3 +5,6 @@ app/build/
 *.aab
 .idea/
 *.iml
+
+# Debug APK published for the owner to sideload from git.
+!release/h3-studio-debug.apk
