@@ -190,10 +190,11 @@ class RoteiroEdit:
         if right >= len(doc.blocks):
             raise Conflict("A edição exige um vídeo seguinte aceito. Use Tail para acrescentar ao fim.")
         if payload.mode != "replace" and len(doc.blocks) >= MAX_BLOCKS:
-            raise Conflict("Roteiro already contains 50 blocks")
-        if any(self.roteiro.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
-               for a in doc.attempts):
-            raise Conflict("Resolva as tentativas pendentes de revisão ou resultado incerto antes de editar.")
+            raise Conflict(f"Roteiro already contains {MAX_BLOCKS} blocks")
+        with self.roteiro.observing():
+            if any(self.roteiro.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
+                   for a in doc.attempts):
+                raise Conflict("Resolva as tentativas pendentes de revisão ou resultado incerto antes de editar.")
         selected = []
         for position in (left, right):
             attempt = self.roteiro.selected_attempt(doc, doc.blocks[position].id)
@@ -440,11 +441,12 @@ class RoteiroEdit:
             self.roteiro.check_revision(doc, payload.expected_revision)
             attempt = next((a for a in doc.attempts if a.block_id == canonical(block_id)
                             and a.run_id == canonical(run_id)), None)
-            if attempt is None or self.roteiro.observed(attempt)["state"] != "accepted":
-                raise Conflict("Only an accepted owned block version can be selected")
-            if any(self.roteiro.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
-                   for a in doc.attempts):
-                raise Conflict("Resolve outstanding attempts before selecting versions")
+            with self.roteiro.observing():
+                if attempt is None or self.roteiro.observed(attempt)["state"] != "accepted":
+                    raise Conflict("Only an accepted owned block version can be selected")
+                if any(self.roteiro.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
+                       for a in doc.attempts):
+                    raise Conflict("Resolve outstanding attempts before selecting versions")
             updated = doc.model_copy(update={"revision": doc.revision + 1,
                                             "selected_runs": {**doc.selected_runs, block_id: run_id},
                                             "blocks": [b.model_copy(update={

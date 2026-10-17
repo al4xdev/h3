@@ -21,7 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from ..infrastructure.store import safe_path, storage_guard, timestamp
 from .dispatcher import Conflict
 
-MAX_METADATA = 256 * 1024
+MAX_METADATA = 2 * 1024 * 1024  # Editorial requests list up to 1000 clip proofs.
+MAX_FREESTYLE_CLIPS = 100
+MAX_EDITORIAL_CLIPS = 1000  # Mirrors roteiro.MAX_BLOCKS without importing the roteiro vertical.
 MAX_BODY = 1024
 MECHANISM = "external_concat_no_overlap_trim_no_crossfade"
 
@@ -79,7 +81,7 @@ class AssemblyIntent(BaseModel):
     end_run_id: str
     created_at: str
     mode: Literal["preview", "accepted_sequence"]
-    inputs: list[AssemblyInput] = Field(min_length=1, max_length=100)
+    inputs: list[AssemblyInput] = Field(min_length=1, max_length=MAX_EDITORIAL_CLIPS)
     roteiro_id: str | None = None
     roteiro_revision: int | None = Field(default=None, ge=1)
     roteiro_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -91,6 +93,8 @@ class AssemblyIntent(BaseModel):
         editorial = self.roteiro_id is not None
         if editorial:
             canonical_id(self.roteiro_id)
+        elif len(self.inputs) > MAX_FREESTYLE_CLIPS:
+            raise ValueError("Freestyle assembly chain exceeds 100 clips")
         if editorial != (self.roteiro_revision is not None) or editorial != (self.roteiro_sha256 is not None):
             raise ValueError("Editorial assembly requires a complete roteiro revision proof")
         previous = None
@@ -437,7 +441,7 @@ class AssemblyPipe:
             # Cap traversal BEFORE calling the existing read-only sequence method.
             current, seen = state.end_run_id, set()
             while current is not None:
-                if current in seen or len(seen) >= 100:
+                if current in seen or len(seen) >= MAX_FREESTYLE_CLIPS:
                     raise ValueError("Assembly chain exceeds capacity or contains a cycle")
                 seen.add(current)
                 run = service.store.get(current)
@@ -491,7 +495,7 @@ class AssemblyPipe:
         if doc.revision != revision:
             raise Conflict("Roteiro revision changed before editorial assembly")
         run_ids = roteiro.selected_run_ids(doc)
-        if not run_ids or len(run_ids) > 50 or len(set(run_ids)) != len(run_ids):
+        if not run_ids or len(run_ids) > MAX_EDITORIAL_CLIPS or len(set(run_ids)) != len(run_ids):
             raise ValueError("Editorial assembly requires unique selected owned clips")
         if _digest(path) != before:
             raise ValueError("Roteiro changed during editorial assembly preparation")

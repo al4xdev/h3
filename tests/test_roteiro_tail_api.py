@@ -37,7 +37,7 @@ async def test_http_explicit_uuid_propose_get_adopt_preserves_prefix_and_no_gene
         duplicate = await client.post(url, json=payload(doc).model_dump())
         assert duplicate.status_code == 409
         assert not duplicate.json().get("tail_not_submitted")
-        assert len(fake.calls) == 1
+        assert len(fake.calls) == 3
         edited = candidate["blocks"][::-1]
         edited[0]["prompt"] = "Explicit user edited instruction"
         adopted = await client.put(url, json={"expected_revision": doc.revision, "blocks": edited})
@@ -51,7 +51,7 @@ async def test_http_explicit_uuid_propose_get_adopt_preserves_prefix_and_no_gene
         assert (await client.put(url, json={"expected_revision": doc.revision,
                                           "blocks": edited})).status_code == 409
     assert op.get(doc.id).attempts == doc.attempts
-    assert len(service.comfy.submitted) == calls and len(fake.calls) == 1
+    assert len(service.comfy.submitted) == calls and len(fake.calls) == 3
     await service.shutdown()
 
 
@@ -84,7 +84,7 @@ async def test_http_strict_dto_same_origin_and_definitive_preflight_marker(tmp_p
         rejected = await client.put(url, json={"expected_revision": doc.revision, "blocks": foreign})
         assert rejected.status_code == 409
         assert op.get(doc.id) == doc
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 3
     await service.shutdown()
 
 

@@ -17,10 +17,14 @@
 
 ## Gerar os blocos restantes
 
-Abaixo da lista, **Gerar os blocos restantes** aparece para um roteiro salvo e
-adotado com um prefixo aceito e um restante nunca enviado. Rascunhos não salvos,
-revisões pendentes, tentativas recusadas/interrompidas ou resultados incertos
-precisam ser resolvidos explicitamente antes de autorizar o lote.
+**Gerar os blocos restantes** gera todos os blocos nunca enviados, na ordem do
+roteiro, inclusive no meio. Cada trecho pendente continua da versão aceita
+selecionada do bloco anterior (o primeiro bloco do roteiro é I2V). Quando o bloco
+seguinte a um trecho já tem versão aceita, o último bloco do trecho é gerado como
+**bridge** até o primeiro frame dele, com o contexto Grok de edição (identidade +
+último frame do pai + primeiro frame do destino, configuração de `roteiro-edits`).
+Um bloco anterior recusado/sem versão aceita, revisões pendentes ou resultados
+incertos bloqueiam o lote com mensagem.
 
 A confirmação autoriza uma chamada ao Grok antes de cada bloco, o uso automático
 do texto melhorado e a aceitação técnica dos intermediários para encadear o próximo.
@@ -46,7 +50,7 @@ Após concluir e aceitar todos os vídeos atuais, abra **Continuar roteiro · Ta
 abaixo dos blocos. Escreva o que deve acontecer a seguir, escolha a quantidade,
 duração e seed, e peça a proposta ao Grok. O planejamento recebe a identidade
 original e o frame final real do último vídeo aceito, com saída JSON estruturada.
-O limite atual é de 50 blocos no roteiro inteiro, incluindo os existentes.
+O limite atual é de 1000 blocos no roteiro inteiro, incluindo os existentes.
 
 Edite, reorganize ou remova os novos blocos e confirme a continuação. Essa ação
 acrescenta apenas o trecho novo: preserva os blocos, vídeos e tentativas anteriores
@@ -64,6 +68,49 @@ origem invalidam a adoção da proposta antiga. Planejamento mantém o limite de
 `POST /roteiros/<id>/tail/<UUID>` planeja; `GET` consulta sem executar;
 `PUT` adota os novos blocos com a revisão de origem. Nenhuma dessas consultas
 gera vídeo. A validação usa clientes falsos e mídia CPU, sem inferência real.
+
+## Roteiros longos (contrato do app)
+
+- `GET /roteiros/summary` → `{items:[{id, name, idea, adopted, revision, block_count,
+  states:{accepted, ready_for_review, active, failed, planned}, strip:[estado por bloco],
+  updated_at}], total}`. Estado do bloco = versão selecionada (ou última tentativa):
+  `queued/running/uncertain` → `active`; `rejected/interrupted/failed/not_admitted` →
+  `failed`; sem tentativa → `planned`. `updated_at` = maior entre o mtime de `plan.json`
+  e o `updated_at` dos runs observados.
+- `POST /roteiros/<id>/blocks/<block_id>/remove` `{expected_revision}` → roteiro. O bloco
+  sai de `blocks`/`selected_runs`; com tentativas vai para `removed_blocks` (vídeos,
+  tentativas e decisões preservados). Bloqueado por tentativa ativa/incerta, vídeo do
+  próprio bloco aguardando revisão, lote ativo ou edição pendente. Depois, as versões
+  aceitas ficam fixadas em `selected_runs` (modo editorial).
+- `PUT /roteiros/<id>`: a subsequência de blocos com tentativas deve ficar idêntica e na
+  mesma ordem; blocos nunca enviados podem ser inseridos, editados, reordenados ou apagados.
+- `POST /roteiros/<id>/segments/<UUID>` `{expected_revision, after_block_id|null, idea,
+  count, duration_seconds, seed}` planeja blocos para inserir (sem gravar o roteiro);
+  `GET` no mesmo ID recupera. O app adota inserindo os blocos via `PUT`.
+- `Generate` aceita `target_run_id` opcional: bridge até a versão aceita selecionada do
+  bloco seguinte.
+
+### Planejamento (proposta, Tail e segmento)
+
+Cadeia de chamadas estreitas, com o mesmo modelo fixo e o system prompt salvo do roteirista
+inalterado; tarefa e formato vão na mensagem e no schema estruturado:
+
+1. **Diretor** (`h3_roteiro_timeline`): cenas → beats `{kind: action|transition|hold, action,
+   seconds, dialogue|null}` cobrindo `total_seconds = count × block_seconds`; cada fala pedida
+   aparece uma vez.
+2. **Crítico/DoP** (`h3_roteiro_critic`): revisa o rascunho e define `vision`; suas cenas
+   substituem as do diretor.
+3. Fatiamento determinístico: segundos escalados proporcionalmente; o bloco k recebe o beat
+   que contém o ponto médio de `[k·d, (k+1)·d)`; ação `"<cena> · <beat> — parte i/n"`;
+   duração de todo bloco = a pedida.
+4. **Roteiristas** (`h3_roteiro_prompts`): pedaços de até 10 blocos, até 4 em paralelo, com
+   visão, cenas (sem falas), bloco anterior e micro-movimentos; a fala vai só na primeira
+   fatia do beat que a contém.
+
+O resultado guarda `draft_scenes`, `scenes`, `vision`, `slices` e todos os `raw_texts`
+(`[diretor, crítico, pedaço 1, …]`; `""` marca um pedaço sem texto). Falha do diretor por
+rede/cancelamento deixa o pedido incerto, como antes; qualquer falha posterior deixa
+`invalid`. Sem retry automático.
 
 ## Converter Freestyle para roteiro
 
@@ -170,8 +217,8 @@ ou resultado mais recente.
 
 ## Limites operacionais, não qualidade/performance
 
-- Até50blocos por documento; listagem até1000roteiros; metadata porarquivo≤1MiB inclusive histórico. Rejeitar excesso, não descartar história.
-- Proposta macro raw≤512KiB e candidato completo≤1MiB. JSON estrito, número de blocos exato; sem interpretar Markdown/HTML, clamp ou seed/ID arbitrário do provider.
+- Até1000blocos por documento (lote, Tail, segmento, edição e montagem editorial); cadeia da montagem freestyle continua100; listagem até1000roteiros; metadata porarquivo≤16MiB inclusive histórico. Rejeitar excesso, não descartar história.
+- Cada texto bruto do planejamento≤512KiB. JSON estrito, número de blocos exato; sem interpretar Markdown/HTML, clamp ou seed/ID arbitrário do provider.
 - Ação/instrução até12000caracteres; contexto manual até12000 e contexto integral do lote até100000. Erro preserva texto, sem truncamento silencioso.
 - Original de roteiro usa o contexto compatível com editor: JPEG/PNG próprio até20MiB/16MP. WebP nativo Freestyle permanece conforme contrato anterior.
 - Duração porbloco requested(0,10], até2casas,24fps/5+17k/Pythonhalf-even. Default8s→192frames/8s; benchmark2.3→56frames/2.333s permanece congelado. Tail3/audioTrue independentes. Não certifica qualidade, VRAM/RAM ou geração longa real.

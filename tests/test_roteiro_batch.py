@@ -566,7 +566,6 @@ async def test_invalid_provider_scene_is_preserved_without_native_fallback(tmp_p
 
 @pytest.mark.asyncio
 async def test_concurrent_grok_proposal_on_other_roteiro_during_batch(tmp_path, monkeypatch):
-    import json
 
     from h3_backend.roteiro import ProposalRequest
 
@@ -584,19 +583,12 @@ async def test_concurrent_grok_proposal_on_other_roteiro_during_batch(tmp_path, 
     ident = str(uuid4())
     await batch.start(doc_a["id"], ident, consent())
 
-    class FakeGrok:
-        async def complete(self, request, output_schema=None, schema_name=None):
-            return {
-                "text": json.dumps({"name": "Proposed B", "blocks": [
-                    {"action": "Action 1", "prompt": "Prompt 1", "duration_seconds": 2.3},
-                    {"action": "Action 2", "prompt": "Prompt 2", "duration_seconds": 2.3},
-                ]})
-            }
+    from test_roteiro import FakeGrok
 
     # Propose on doc_b succeeds concurrently:
     proposal = await roteiro.propose(doc_b["id"], ProposalRequest(
         expected_revision=doc_b["revision"], count=2, duration_seconds=2.3, seed=123), FakeGrok())
-    assert proposal["name"] == "Proposed B"
+    assert proposal["name"] == "Proposta"
     assert len(proposal["blocks"]) == 2
 
     # Propose on doc_a (the active batch roteiro) is rejected:

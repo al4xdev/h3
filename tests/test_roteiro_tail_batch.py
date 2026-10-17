@@ -58,23 +58,35 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
     ]
     wires = []
 
+    scenes = [{"title": "Janela", "beats": [
+        {"kind": "action", "action": block["action"], "seconds": 2.3, "dialogue": None}
+        for block in planned]}]
+    vision = {"style": "s", "camera": "c", "light_and_color": "l", "rhythm": "r", "notes": "n"}
+    enhanced = []
+
     def provider(request):
         wire = json.loads(request.content)
         wires.append(wire)
         assert int(request.headers["content-length"]) == len(request.content)
         assert wire["model"] == FIXED_EDITOR_MODEL
-        if len(wires) == 1:
+        if "text" in wire:
             assert wire["max_output_tokens"] == 20000
             assert wire["text"]["format"]["type"] == "json_schema"
             assert wire["text"]["format"]["strict"] is True
             assert idea in wire["input"][-1]["content"][-1]["text"]
-            text = json.dumps({"name": "Tail intentions", "blocks": planned})
+            step = wire["text"]["format"]["name"]
+            text = json.dumps({"name": "Tail intentions", "scenes": scenes}
+                              if step == "h3_roteiro_timeline" else
+                              {"vision": vision, "scenes": scenes}
+                              if step == "h3_roteiro_critic" else
+                              {"blocks": [{"prompt": block["prompt"]} for block in planned]})
         else:
-            assert wire["max_output_tokens"] == 12000 and "text" not in wire
+            assert wire["max_output_tokens"] == 12000
             context = wire["input"][-1]["content"][-1]["text"]
-            intent = planned[len(wires) - 2]
+            intent = planned[len(enhanced)]
             assert intent["action"] in context and intent["prompt"] in context
-            text = f"Actual enhanced instruction {len(wires) - 1}"
+            enhanced.append(wire)
+            text = f"Actual enhanced instruction {len(enhanced)}"
         return httpx.Response(200, json=finished(text))
 
     class RecordedGrok(Grok):
@@ -95,10 +107,11 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
         proposal = await roteiro.propose_tail(doc.id, tail_id, TailRequest(
             expected_revision=doc.revision, idea=idea, count=2, seed=97, duration_seconds=2.3), grok)
         assert roteiro.get(doc.id) == doc and len(service.comfy.submitted) == 1
+        assert proposal["state"] == "proposed", proposal.get("detail")
         adopted = await roteiro.adopt_tail(doc.id, tail_id, AdoptTail(
             expected_revision=doc.revision,
             blocks=[Block.model_validate(block) for block in proposal["blocks"]]))
-        assert len(service.comfy.submitted) == 1 and len(grok.calls) == 1
+        assert len(service.comfy.submitted) == 1 and len(grok.calls) == 3
         assert roteiro.get(doc.id).blocks[:1] == original_blocks
         assert roteiro.get(doc.id).attempts == original_attempts
         native_execute = service.comfy.execute
@@ -112,14 +125,14 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
         initial = await batch.start(doc.id, batch_id, consent(adopted["revision"]))
         assert initial["initial_parent_id"] == root_id
         assert [block["id"] for block in initial["blocks"]] == [block["id"] for block in proposal["blocks"]]
-        await asyncio.wait_for(batch.task, 30)
+        await asyncio.wait_for(batch.task, 120)
         result = batch.get(doc.id, batch_id)
         assert result["state"] == "ready_for_review", result["error"]
         final_doc = roteiro.get(doc.id)
         runs = [service.store.get(attempt.run_id) for attempt in final_doc.attempts]
         assert [run.parent_id for run in runs] == [None, root_id, runs[1].id]
         assert [run.state for run in runs] == ["accepted", "accepted", "ready_for_review"]
-        assert [request.continuation_parent_id for request in grok.calls] == [root_id, root_id, runs[1].id]
+        assert [request.continuation_parent_id for request in grok.calls] == [root_id] * 4 + [runs[1].id]
         assert [run.prompt for run in runs[1:]] == ["Actual enhanced instruction 1", "Actual enhanced instruction 2"]
         assert [run.seed for run in runs[1:]] == [97, 97]
         assert [run.duration_seconds for run in runs[1:]] == [2.3, 2.3]
@@ -129,12 +142,12 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
                    for part in wire["input"][-1]["content"] if part["type"] == "input_image"]
                   for wire in wires]
         assert all(len(pair) == 2 and pair[0] == identity for pair in images)
-        assert images[0][1] == images[1][1] and images[1][1] != images[2][1]
+        assert images[0][1] == images[3][1] and images[3][1] != images[4][1]
         assert final_doc.blocks[:1] == original_blocks
         assert final_doc.attempts[:1] == original_attempts
         assert {path.name: path.read_bytes() for path in root_directory.iterdir()
                 if path.is_file()} == original_files
-        assert len(service.comfy.submitted) == len(wires) == 3
+        assert len(service.comfy.submitted) == 3 and len(wires) == 5
     finally:
         await batch.shutdown()
         await service.shutdown()

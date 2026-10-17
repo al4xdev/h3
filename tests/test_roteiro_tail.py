@@ -57,7 +57,7 @@ async def test_plan_actual_parent_and_explicit_atomic_adoption_preserve_prefix(t
     assert prefix[0]["prompt"] == doc.attempts[0].snapshot.prompt
     assert prefix[0]["run_id"] == parent_id
     assert prefix[0]["editorial_intention"] == doc.blocks[0].action
-    assert fake.schemas[0]["schema_name"] == "h3_roteiro"
+    assert fake.schemas[0]["schema_name"] == "h3_roteiro_timeline"
     assert op.get(doc.id) == doc
     assert op.get_tail(doc.id, ident)["raw_text"] == fake.text
     result = await op.adopt_tail(doc.id, ident, adoption(doc, candidate))
@@ -69,7 +69,7 @@ async def test_plan_actual_parent_and_explicit_atomic_adoption_preserve_prefix(t
     assert len(service.comfy.submitted) == before_calls
     with pytest.raises(Conflict):
         await op.propose_tail(doc.id, ident, payload(updated), fake)
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 3
     await service.shutdown()
 
 
@@ -175,7 +175,7 @@ async def test_partial_adoption_get_proves_committed_plan_no_replay(tmp_path, mo
     monkeypatch.setattr(module, "write_file", original)
     assert op.get_tail(doc.id, ident)["state"] == "adopted"
     assert op.get(doc.id).revision == doc.revision + 1
-    assert len(op.get(doc.id).blocks) == 3 and len(fake.calls) == 1
+    assert len(op.get(doc.id).blocks) == 3 and len(fake.calls) == 3
     await service.shutdown()
 
 
@@ -195,7 +195,7 @@ async def test_known_provider_refusal_is_terminal_not_uncertain(tmp_path):
     assert op.get_tail(doc.id, ident)["state"] == "invalid"
     fake = FakeGrok()
     result = await op.propose_tail(doc.id, str(uuid4()), payload(doc), fake)
-    assert result["state"] == "proposed" and len(fake.calls) == 1
+    assert result["state"] == "proposed" and len(fake.calls) == 3
     await service.shutdown()
 
 
@@ -203,9 +203,9 @@ async def test_known_provider_refusal_is_terminal_not_uncertain(tmp_path):
 async def test_late_proposal_is_stale_and_count_budget_precedes_provider(tmp_path):
     service, op, doc, _ = await accepted_root(tmp_path)
     fake = FakeGrok()
-    with pytest.raises(Conflict, match="50-block"):
+    with pytest.raises(Conflict, match="1000-block"):
         await op.propose_tail(doc.id, str(uuid4()), TailRequest(
-            expected_revision=doc.revision, idea="More", count=50, seed=42), fake)
+            expected_revision=doc.revision, idea="More", count=1000, seed=42), fake)
     assert not fake.calls
     gate = asyncio.Event()
     fake = FakeGrok(gate=gate)

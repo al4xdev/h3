@@ -315,7 +315,7 @@ class NotificationManager:
             "event": "run_terminal",
             "run_id": str(run_id),
             "state": str(state),
-            "video_url": f"/runs/{run_id}/chunk.mp4" if state == "ready_for_review" else "",
+            "video_url": f"/runs/{run_id}/video" if state == "ready_for_review" else "",
         }
 
         try:

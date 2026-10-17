@@ -121,9 +121,9 @@ def observe_import(op, intent):
             raise ValueError("Imported terminal decision changed")
     elif current.state not in {"ready_for_review", "accepted", "rejected"}:
         raise ValueError("Imported review has an invalid transition")
-    doc = op.get(intent.roteiro_id)
-    index = next(i for i, block in enumerate(doc.blocks) if block.id == intent.block_id)
-    op.parent(doc, index, snap.parent_id)
+    if snap.parent_id is not None:
+        # Same index-free ancestry proof as native attempts: blocks may later move or be removed.
+        op.historical_parent(intent)
     return current
 
 

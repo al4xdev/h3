@@ -145,8 +145,16 @@ async def test_concrete_accepted_predecessor_and_frozen_submitted_prefix(tmp_pat
     await op.update(doc.id, update(doc, blocks=changed))
     fresh = op.get(doc.id)
     assert fresh.blocks[0] == doc.blocks[0]
+    # Never-sent blocks may move anywhere; the attempted block itself stays frozen.
+    reordered = await op.update(fresh.id, update(fresh, blocks=list(reversed(fresh.blocks))))
+    assert [b["id"] for b in reordered["blocks"]] == [b.id for b in reversed(fresh.blocks)]
+    moved = op.get(doc.id)
     with pytest.raises(Conflict):
-        await op.update(fresh.id, update(fresh, blocks=list(reversed(fresh.blocks))))
+        await op.update(moved.id, update(moved, blocks=[
+            b.model_copy(update={"prompt": "changed"}) if b.id == doc.blocks[0].id else b
+            for b in moved.blocks]))
+    await op.update(moved.id, update(moved, blocks=changed))
+    fresh = op.get(doc.id)
     foreign = await service.create(RunRequest(seed=9, duration_seconds=2.3))
     await service._task
     await service.decide(foreign.id, True)

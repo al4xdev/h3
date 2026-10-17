@@ -50,16 +50,36 @@ def update(doc, **changes):
         expected_revision=doc.revision).model_copy(update=changes)
 
 
+VISION = {"style": "Naturalista", "camera": "Plano médio estável", "light_and_color": "Neon frio",
+          "rhythm": "Calmo", "notes": "Respiros entre ações"}
+SCENES = [{"title": "Sala", "beats": [
+    {"kind": "action", "action": "Dança de preto", "seconds": 8, "dialogue": None},
+    {"kind": "transition", "action": "Muda para vermelho", "seconds": 8, "dialogue": None},
+]}]
+
+
 class FakeGrok:
-    def __init__(self, *, text=None, gate=None):
+    """Answers the director, critic and prompt-writer steps; `text` fixes every response."""
+
+    def __init__(self, *, text=None, gate=None, scenes=None, critic=None):
         self.calls = []
         self.schemas = []
         self.gate = gate
         self.entered = asyncio.Event()
-        self.text = text or json.dumps({"name": "Proposta", "blocks": [
-            {"action": "Preto", "duration_seconds": 8, "prompt": "Dança de preto"},
-            {"action": "Vermelho", "duration_seconds": 8, "prompt": "Muda para vermelho"},
-        ]})
+        self.fixed = text
+        self.scenes = scenes or SCENES
+        self.critic = critic
+        self.text = text or json.dumps({"name": "Proposta", "scenes": self.scenes})
+
+    def answer(self, request, schema_name, output_schema):
+        if schema_name == "h3_roteiro_timeline":
+            return self.text
+        if schema_name == "h3_roteiro_critic":
+            return json.dumps({"vision": VISION, "scenes": self.critic or self.scenes})
+        blocks = json.loads(request.prompt)["blocks"]
+        assert output_schema["properties"]["blocks"]["minItems"] == len(blocks)
+        return json.dumps({"blocks": [{"prompt": f"Prompt {b['index']}: {b['beat_action']}"}
+                                      for b in blocks]})
 
     async def complete(self, request, **kwargs):
         self.calls.append(request)
@@ -67,7 +87,9 @@ class FakeGrok:
         self.entered.set()
         if self.gate:
             await self.gate.wait()
-        return {"text": self.text, "model": FIXED_EDITOR_MODEL}
+        text = self.fixed if self.fixed is not None else self.answer(
+            request, kwargs.get("schema_name"), kwargs.get("output_schema"))
+        return {"text": text, "model": FIXED_EDITOR_MODEL}
 
 
 @pytest.mark.asyncio
@@ -121,17 +143,25 @@ async def test_candidate_separate_exact_count_seed_and_late_revision(tmp_path):
     assert candidate["name"] == "Proposta"
     assert all(block["seed"] == 42 and block["duration_seconds"] == 8
                for block in candidate["blocks"])
+    assert [b["action"] for b in candidate["blocks"]] == ["Sala · Dança de preto",
+                                                          "Sala · Muda para vermelho"]
+    assert candidate["vision"]["camera"] and candidate["scenes"] and candidate["draft_scenes"]
+    assert len(candidate["raw_texts"]) == 3 and candidate["raw_text"] == fake.text
     assert not {b["id"] for b in candidate["blocks"]} & {b.id for b in doc.blocks}
     assert op.get(doc.id).blocks == doc.blocks
     assert op.get(doc.id).name == edited["name"]
-    assert len(fake.calls) == 1
-    assert fake.schemas[0]["schema_name"] == "h3_roteiro"
-    schema = fake.schemas[0]["output_schema"]
+    assert len(fake.calls) == 3
+    assert [s["schema_name"] for s in fake.schemas] == [
+        "h3_roteiro_timeline", "h3_roteiro_critic", "h3_roteiro_prompts"]
+    timeline = json.loads(fake.calls[0].prompt)
+    assert timeline["count"] == 2 and timeline["block_seconds"] == 8
+    assert timeline["total_seconds"] == 16 and "task" in timeline
+    schema = fake.schemas[2]["output_schema"]
     assert schema["properties"]["blocks"]["minItems"] == 2
     assert schema["properties"]["blocks"]["maxItems"] == 2
-    assert fake.calls[0].reference == doc.reference
-    assert fake.calls[0].system_prompt == op.script_config()["system_prompt"]
-    assert fake.calls[0].model == FIXED_EDITOR_MODEL
+    assert all(call.reference == doc.reference for call in fake.calls)
+    assert all(call.system_prompt == op.script_config()["system_prompt"] for call in fake.calls)
+    assert all(call.model == FIXED_EDITOR_MODEL for call in fake.calls)
     assert not service.comfy.submitted
     await service.shutdown()
 
@@ -172,7 +202,7 @@ def test_strict_blocks_reject_without_clamping(change):
 
 def test_plan_count_duplicate_keys_and_metadata_limits():
     with pytest.raises(ValidationError):
-        CreatePlan(**fields(count=51))
+        CreatePlan(**fields(count=1001))
     payload = fields()
     payload["blocks"][1]["id"] = payload["blocks"][0]["id"]
     with pytest.raises(ValidationError):
@@ -241,11 +271,11 @@ async def test_http_strict_body_no_server_owned_fields_and_no_provider_on_reads(
 @pytest.mark.asyncio
 async def test_aggregate_metadata_overflow_leaves_no_empty_document(tmp_path):
     service, op = setup(tmp_path)
-    payload = fields(count=50)
+    payload = fields(count=1000)
     for block in payload["blocks"]:
         block["action"] = "a" * 12000
         block["prompt"] = "p" * 12000
-    with pytest.raises(ValueError, match="1 MiB"):
+    with pytest.raises(ValueError, match="16 MiB"):
         await op.create(CreatePlan(**payload))
     assert op.list() == {"items": [], "total": 0}
     assert not service.comfy.submitted

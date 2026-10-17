@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from stat import S_ISREG
@@ -17,11 +18,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
+from ..generation.bridge import BridgePipe
 from ..generation.dispatcher import Conflict
 from ..generation.i2v import I2VPipe
-from ..generation.models import ContinueRequest, RunRequest
+from ..generation.models import BridgeRequest, ContinueRequest, RunRequest
 from ..generation.v2v import V2VPipe
 from ..generation.workflow import (
+    BRIDGE_CONFIG,
     DEFAULT_DURATION_SECONDS,
     I2V_CONFIG,
     MAX_DURATION_SECONDS,
@@ -45,8 +48,16 @@ from ..infrastructure.grok_image import (
 from ..infrastructure.grok_oauth import OAuthError
 from ..infrastructure.store import Store
 
-MAX_METADATA_BYTES = 1024 * 1024
-MAX_BLOCKS = 50  # Local planning budget, not a model or GPU capacity claim.
+MAX_METADATA_BYTES = 16 * 1024 * 1024  # plan.json with up to 1000 blocks and their attempts.
+MAX_RAW_TEXT_BYTES = 512 * 1024
+MAX_BLOCKS = 1000  # Local planning budget (~1 h at 8 s), not a model or GPU capacity claim.
+PLAN_CHUNK = 10  # Above this count planning becomes outline + parallel chunks.
+PLAN_PARALLEL = 4
+PLAN_EVIDENCE = ("draft_scenes", "scenes", "vision", "raw_texts")
+CONTEXT_ACTIONS = 20  # Long-roteiro Grok context: recent intentions...
+CONTEXT_PROMPTS = 3  # ...and submitted prompts only for the latest blocks.
+BLOCK_STATES = {"accepted": "accepted", "ready_for_review": "ready_for_review",
+                "queued": "active", "running": "active", "uncertain": "active"}
 DEFAULT_SCRIPT_SYSTEM = (
     'Divide the user idea into consecutive video blocks without generating videos. '
     'Preserve identity, actions and the order of changes. Do not invent facts about future frames. '
@@ -161,10 +172,19 @@ class Generate(StrictDTO):
     seed: StrictInt = Field(ge=0, le=2**53 - 1)
     duration_seconds: float = Field(gt=0, le=MAX_DURATION_SECONDS, allow_inf_nan=False)
     parent_id: str | None
+    # Present only for a bridge: the selected accepted run of the next block is the destination.
+    target_run_id: str | None = None
 
     _prompt = field_validator("prompt")(Block.nonblank.__func__)
     _duration = field_validator("duration_seconds")(Block.duration.__func__)
-    _parent = field_validator("parent_id")(Snapshot.parent.__func__)
+    _parent = field_validator("parent_id", "target_run_id")(Snapshot.parent.__func__)
+
+    @model_validator(mode="after")
+    def bridge(self):
+        if self.target_run_id is not None and (self.parent_id is None
+                                               or self.target_run_id == self.parent_id):
+            raise ValueError("A bridge requires a distinct accepted predecessor and destination")
+        return self
 
 
 class MediaProof(StrictDTO):
@@ -216,21 +236,30 @@ class Document(PlanFields):
     reference_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     attempts: list[Intent] = Field(default_factory=list)
     selected_runs: dict[str, str] = Field(default_factory=dict)
+    # Blocks taken out of the sequence keep their attempts, videos and decisions as history.
+    removed_blocks: list[Block] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def integrity(self):
         canonical(self.id)
         keys = {block.id for block in self.blocks}
+        removed = {block.id for block in self.removed_blocks}
+        if len(removed) != len(self.removed_blocks) or keys & removed:
+            raise ValueError("Removed block keys must be unique and absent from the plan")
         ids = set()
+        owned = set()
         for attempt in self.attempts:
-            if (attempt.roteiro_id != self.id or attempt.block_id not in keys
+            if (attempt.roteiro_id != self.id or attempt.block_id not in keys | removed
                     or attempt.source_revision > self.revision or attempt.intent_id in ids
                     or attempt.snapshot.reference != self.reference
                     or attempt.snapshot.reference_sha256 != self.reference_sha256):
                 raise ValueError("Roteiro intent ownership or snapshot is corrupt")
             ids.add(attempt.intent_id)
+            owned.add((attempt.block_id, attempt.run_id))
+        if not removed <= {block for block, _ in owned}:
+            raise ValueError("Only blocks with attempts are kept as removed history")
         for key, ident in self.selected_runs.items():
-            if key not in keys or not any(a.block_id == key and a.run_id == ident for a in self.attempts):
+            if key not in keys or (key, ident) not in owned:
                 raise ValueError("Selected version must belong to its planned block")
         return self
 
@@ -279,6 +308,161 @@ class ProposedPlan(StrictDTO):
     _name = field_validator("name")(Block.nonblank.__func__)
 
 
+class Beat(StrictDTO):
+    kind: Literal["action", "transition", "hold"]
+    action: str = Field(min_length=1, max_length=12000)
+    seconds: float = Field(gt=0, le=100000, allow_inf_nan=False)
+    # Required-but-nullable: strict structured output rejects optional fields with defaults.
+    dialogue: str | None = Field(min_length=1, max_length=4000)
+
+    _action = field_validator("action")(Block.nonblank.__func__)
+
+
+class Scene(StrictDTO):
+    title: str = Field(min_length=1, max_length=256)
+    beats: list[Beat] = Field(min_length=1, max_length=MAX_BLOCKS)
+
+    _title = field_validator("title")(Block.nonblank.__func__)
+
+
+class Timeline(StrictDTO):
+    name: str = Field(min_length=1, max_length=256)
+    scenes: list[Scene] = Field(min_length=1, max_length=MAX_BLOCKS)
+
+    _name = field_validator("name")(Block.nonblank.__func__)
+
+
+class Vision(StrictDTO):
+    style: str = Field(min_length=1, max_length=4000)
+    camera: str = Field(min_length=1, max_length=4000)
+    light_and_color: str = Field(min_length=1, max_length=4000)
+    rhythm: str = Field(min_length=1, max_length=4000)
+    notes: str = Field(min_length=1, max_length=4000)
+
+
+class Critique(StrictDTO):
+    vision: Vision
+    scenes: list[Scene] = Field(min_length=1, max_length=MAX_BLOCKS)
+
+
+class SlicePrompt(StrictDTO):
+    prompt: str = Field(min_length=1, max_length=12000)
+
+    _prompt = field_validator("prompt")(Block.nonblank.__func__)
+
+
+class PromptChunk(StrictDTO):
+    blocks: list[SlicePrompt] = Field(min_length=1, max_length=PLAN_CHUNK)
+
+
+# Planning is a chain of narrow calls with the owner's saved system prompt unchanged; every task
+# text and output format travels in the user message and the structured output schema.
+BEAT_FORMAT = '{"kind":"action","action":"...","seconds":30,"dialogue":null}'
+TIMELINE_TASK = (
+    "Step 1 of 3 (director): plan the film's timeline without writing video prompts. "
+    "total_seconds is the whole film. Split it into scenes (a place, mood or situation), each "
+    "lasting as long as the idea needs. Inside a scene, alternate actions with breathing room "
+    'using contiguous beats: "action" = a sustained action; "hold" = the character holds a pose, '
+    'reacts or breathes; "transition" = movement that links two actions (turning, walking into '
+    "position, a clothing change in progress). After a strong action leave a hold. Sustained "
+    "actions usually span 20-60 seconds, i.e. many blocks of block_seconds; do not cram a new "
+    "action into every block. Scenes are contiguous, beats inside a scene are contiguous, and all "
+    "beats together cover total_seconds. Each line of dialogue the user explicitly requested is "
+    "placed ONCE, verbatim, in the dialogue field of exactly one beat; never repeat a requested "
+    "line in several beats; dialogue is null otherwise. Future frames are unknown; do not claim "
+    'exact timing or guaranteed artistic continuity. Output format for this step: {"name":"title",'
+    f'"scenes":[{{"title":"scene","beats":[{BEAT_FORMAT}]}}]}}.'
+)
+CRITIC_TASK = (
+    "Step 2 of 3 (critic and director of photography): review draft_scenes as a plan for a real "
+    "film made of block_seconds clips. Fix monotony, missing breathing room (holds), abrupt jumps "
+    "without transitions, overcrowded actions, implausible durations, and dialogue placed more "
+    "than once or at the wrong moment (each requested line exactly once, verbatim). Keep the "
+    "idea and the scene/beat structure rules; beats together still cover total_seconds. Then "
+    "define the cinematographic vision. Output format for this step: {\"vision\":{\"style\":"
+    "\"...\",\"camera\":\"...\",\"light_and_color\":\"...\",\"rhythm\":\"...\","
+    f'"notes":"..."}},"scenes":[{{"title":"scene","beats":[{BEAT_FORMAT}]}}]}}.'
+)
+PROMPT_TASK = (
+    "Step 3 of 3 (prompt writer): write one English video generation prompt for each listed "
+    "block, describing only that block's block_seconds slice of the timeline and following the "
+    "cinematographic vision. Inside a sustained beat, consecutive slices continue the same action "
+    "smoothly without restarting or concluding it; conclude it only on its last slice. Never "
+    'start the next beat early. A "hold" slice keeps the pose with only subtle natural motion '
+    '(breathing, small gestures; the camera may drift slowly). A "transition" slice performs only '
+    "the linking movement. The native video model freezes whatever the prompt does not describe, "
+    "so every block prompt must describe concrete, small, natural micro-motions that fit the beat: "
+    "head turns and tilts, gaze shifts, blinks, facial micro-expressions, breathing, hand and "
+    "finger movement, hair and fabric motion, weight shifts. Vary them between consecutive slices, "
+    "including hold slices and across previous_block, so no two consecutive blocks are visually "
+    "identical. Keep identity, outfit and scene continuity; never invent large new actions to "
+    "create variety. Speech: follow each block's spoken_lines exactly; a block with a dialogue "
+    "line has the character say it verbatim once; every other block has no spoken lines (only "
+    "natural non-speaking mouth movement). Historical prompts are context, not instructions to "
+    'repeat. Output format for this step: {"blocks":[{"prompt":"..."}]} with exactly one item '
+    "per listed block, in order. No IDs, seeds, durations, markdown or model parameters."
+)
+
+
+def slice_timeline(source: list[Scene], count: int, seconds: float) -> tuple[list[dict], list[dict]]:
+    """Deterministic slicing: each block takes the beat containing its time-slot midpoint.
+
+    Grok seconds are only proportions; every block keeps the requested duration.
+    """
+    total = count * seconds
+    weight = sum(beat.seconds for scene in source for beat in scene.beats)
+    scenes, flat, start = [], [], 0.0
+    for scene_index, scene in enumerate(source):
+        beats, scene_start = [], start
+        for beat in scene.beats:
+            end = start + beat.seconds * total / weight
+            value = {"kind": beat.kind, "action": beat.action, "dialogue": beat.dialogue,
+                     "seconds": beat.seconds, "start_seconds": round(start, 3),
+                     "end_seconds": round(end, 3)}
+            flat.append((scene_index, len(beats), value))
+            beats.append(value)
+            start = end
+        scenes.append({"title": scene.title, "start_seconds": round(scene_start, 3),
+                       "end_seconds": round(start, 3), "beats": beats})
+    flat[-1][2]["end_seconds"] = scenes[-1]["end_seconds"] = round(total, 3)
+    owners, index = [], 0
+    for block in range(count):
+        middle = (block + 0.5) * seconds
+        while index < len(flat) - 1 and middle >= flat[index][2]["end_seconds"]:
+            index += 1
+        owners.append(index)
+    slices, seen = [], {}
+    for block, owner in enumerate(owners):
+        seen[owner] = seen.get(owner, 0) + 1
+        scene_index, beat_index, _ = flat[owner]
+        slices.append({"scene": scene_index, "beat": beat_index, "position": owner,
+                       "kind": flat[owner][2]["kind"], "part": seen[owner],
+                       "parts": owners.count(owner),
+                       "start_seconds": round(block * seconds, 3),
+                       "end_seconds": round((block + 1) * seconds, 3)})
+    return scenes, slices
+
+
+def slice_action(scenes: list[dict], piece: dict) -> str:
+    scene = scenes[piece["scene"]]
+    action = f"{scene['title']} · {scene['beats'][piece['beat']]['action']}"
+    return action + (f" — parte {piece['part']}/{piece['parts']}" if piece["parts"] > 1 else "")
+
+
+class SegmentRequest(StrictDTO):
+    expected_revision: StrictInt = Field(ge=1)
+    after_block_id: str | None
+    idea: str = Field(min_length=1, max_length=12000)
+    count: StrictInt = Field(ge=1, le=MAX_BLOCKS)
+    duration_seconds: float = Field(default=DEFAULT_DURATION_SECONDS, gt=0,
+                                    le=MAX_DURATION_SECONDS, allow_inf_nan=False)
+    seed: StrictInt = Field(ge=0, le=2**53 - 1)
+
+    _after = field_validator("after_block_id")(Snapshot.parent.__func__)
+    _idea = field_validator("idea")(Block.nonblank.__func__)
+    _duration = field_validator("duration_seconds")(Block.duration.__func__)
+
+
 class ScriptConfig(StrictDTO):
     system_prompt: str = Field(min_length=1, max_length=100000)
 
@@ -298,7 +482,7 @@ def strict_json(raw: bytes | str):
         raise ValueError("Non-finite JSON number")
 
     if len(raw.encode("utf-8") if isinstance(raw, str) else raw) > MAX_METADATA_BYTES:
-        raise ValueError("Roteiro metadata exceeds 1 MiB")
+        raise ValueError("Roteiro metadata exceeds 16 MiB")
     try:
         return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid)
     except (RecursionError, UnicodeError) as exc:
@@ -324,7 +508,7 @@ def read_file(directory: int, name: str):
 def encoded_metadata(value) -> bytes:
     raw = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
     if len(raw) > MAX_METADATA_BYTES:
-        raise ValueError("Roteiro metadata exceeds 1 MiB")
+        raise ValueError("Roteiro metadata exceeds 16 MiB")
     return raw
 
 
@@ -376,12 +560,45 @@ def locked(directory: int):
         os.close(fd)
 
 
+class _Memo:
+    """Observations for one synchronous call; never kept across awaits or requests."""
+
+    def __init__(self):
+        self.documents: dict[str, tuple[Document, dict[str, int], dict[str, tuple[int, Intent]]]] = {}
+        self.observed: dict[tuple, dict] = {}
+
+
 class Roteiro:
     """One vertical owns document mutation, proposal isolation and intent correlation."""
 
     def __init__(self, service):
         self.service = service
         self.root: Path = service.store.root
+        self._memo: _Memo | None = None
+
+    @contextmanager
+    def observing(self):
+        # Reentrant: nested calls share the outermost memo. Only wrap synchronous sections, so
+        # disk state cannot change underneath a memoized proof except by this same call.
+        if self._memo is not None:
+            yield
+            return
+        self._memo = _Memo()
+        try:
+            yield
+        finally:
+            self._memo = None
+
+    def history(self, ident: str):
+        memo = self._memo
+        if memo is not None and ident in memo.documents:
+            return memo.documents[ident]
+        doc = self.get(ident)
+        entry = (doc, {a.intent_id: i for i, a in enumerate(doc.attempts)},
+                 {a.run_id: (i, a) for i, a in enumerate(doc.attempts)})
+        if memo is not None:
+            memo.documents[ident] = entry
+        return entry
 
     def get(self, ident: str) -> Document:
         if self.removed(ident):
@@ -392,12 +609,12 @@ class Roteiro:
             raise ValueError("Roteiro ID disagrees with owned directory")
         return doc
 
-    def list(self):
+    def identifiers(self) -> list[str]:
         try:
             with _directory(self.root, (".data", "roteiros")) as directory:
                 names = os.listdir(directory)
         except FileNotFoundError:
-            return {"items": [], "total": 0}
+            return []
         ids = []
         for name in names:
             if name in {"editor.json", ".lock", ".locks"} or name.startswith(".write-"):
@@ -406,7 +623,42 @@ class Roteiro:
         # Bound library work independently of any native run history.
         if len(ids) > 1000:
             raise ValueError("Roteiro library exceeds 1000 documents")
-        items = [self.view(self.get(ident)) for ident in sorted(ids) if not self.removed(ident)]
+        return [ident for ident in sorted(ids) if not self.removed(ident)]
+
+    def list(self):
+        items = [self.view(self.get(ident)) for ident in self.identifiers()]
+        return {"items": items, "total": len(items)}
+
+    def block_state(self, doc: Document, block_id: str) -> tuple[str, dict | None]:
+        attempt = self.selected_attempt(doc, block_id)
+        if attempt is None:
+            return "planned", None
+        observed = self.observed(attempt)
+        # Rejected, interrupted, failed and not admitted all need an explicit new attempt.
+        return BLOCK_STATES.get(observed["state"], "failed"), observed["run"]
+
+    def summary(self) -> dict:
+        items = []
+        for ident in self.identifiers():
+            doc = self.get(ident)
+            with _directory(self.root, (".data", "roteiros", ident)) as directory:
+                changed = os.stat("plan.json", dir_fd=directory, follow_symlinks=False).st_mtime_ns
+            updated = datetime.fromtimestamp(changed / 1e9, UTC)
+            strip = []
+            with self.observing():
+                for block in doc.blocks:
+                    state, run = self.block_state(doc, block.id)
+                    strip.append(state)
+                    if run is not None:
+                        # Reviews change run manifests, not plan.json; both count as activity.
+                        moment = datetime.fromisoformat(run["updated_at"])
+                        updated = max(updated, moment if moment.tzinfo else moment.replace(tzinfo=UTC))
+            states = dict.fromkeys(("accepted", "ready_for_review", "active", "failed", "planned"), 0)
+            for state in strip:
+                states[state] += 1
+            items.append({"id": doc.id, "name": doc.name, "idea": doc.idea, "adopted": doc.adopted,
+                          "revision": doc.revision, "block_count": len(doc.blocks),
+                          "states": states, "strip": strip, "updated_at": updated.isoformat()})
         return {"items": items, "total": len(items)}
 
     def removed(self, ident: str) -> bool:
@@ -468,14 +720,17 @@ class Roteiro:
                 if (payload.reference != doc.reference or digest != doc.reference_sha256
                         or payload.idea != doc.idea or not payload.adopted):
                     raise Conflict("Submitted identity, idea and adoption are immutable")
+                # Removed blocks also have attempts, so they cannot silently return via PUT.
                 submitted = {a.block_id for a in doc.attempts}
-                frozen = max(i for i, block in enumerate(doc.blocks) if block.id in submitted) + 1
-                if payload.blocks[:frozen] != doc.blocks[:frozen]:
-                    raise Conflict("Submitted prefix is immutable; edit only future unsent blocks")
+                if ([b for b in payload.blocks if b.id in submitted]
+                        != [b for b in doc.blocks if b.id in submitted]):
+                    raise Conflict("Blocks with attempts are immutable and keep their order; "
+                                   "insert, edit, reorder or delete only never-sent blocks")
             updated = Document(**payload.model_dump(exclude={"expected_revision"}),
                                id=doc.id, revision=doc.revision + 1,
                                reference_sha256=digest, attempts=doc.attempts,
-                               selected_runs=doc.selected_runs)
+                               selected_runs=doc.selected_runs,
+                               removed_blocks=doc.removed_blocks)
             write_file(directory, "plan.json", updated.model_dump())
         return self.view(updated)
 
@@ -498,6 +753,151 @@ class Roteiro:
             write_file(directory, "editor.json", payload.model_dump())
         return {**payload.model_dump(), "model": current["model"]}
 
+    @staticmethod
+    def timeline_request(base: dict, context: dict, count: int, seconds: float) -> PromptRequest:
+        return PromptRequest(**base, prompt=json.dumps({
+            "task": TIMELINE_TASK, **context, "block_seconds": seconds, "count": count,
+            "total_seconds": round(count * seconds, 3)}, ensure_ascii=False))
+
+    async def plan(self, grok, base: dict, context: dict, count: int, seconds: float, seed: int,
+                   save=None) -> dict:
+        """Director timeline, critic revision, deterministic slicing, parallel prompt writers.
+
+        The director call raises like the former single call: its provider result is uncertain.
+        Any later failure leaves an invalid outcome with every raw text. Nothing is retried.
+        """
+        def text(result):
+            raw = result.get("text") if isinstance(result, dict) else None
+            if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_RAW_TEXT_BYTES:
+                raise ValueError("Planning response is missing text or exceeds 512 KiB; not truncated")
+            return raw
+
+        def bounded(model):
+            schema = model.model_json_schema()
+            schema["properties"]["scenes"]["maxItems"] = count
+            schema["$defs"]["Scene"]["properties"]["beats"]["maxItems"] = count
+            return schema
+
+        total = round(count * seconds, 3)
+        outcome = {"name": None, "blocks": [], "draft_scenes": [], "scenes": [], "vision": None,
+                   "slices": [], "raw_texts": [], "error": None, "detail": None}
+
+        def invalid(detail, code="invalid_proposal"):
+            # Raw invalid text is bounded data, not an instruction or permission to guess fields.
+            return {**outcome, "error": code, "detail": detail}
+
+        raw = text(await grok.complete(self.timeline_request(base, context, count, seconds),
+                                       output_schema=bounded(Timeline),
+                                       schema_name="h3_roteiro_timeline"))
+        outcome["raw_texts"].append(raw)
+        try:
+            timeline = Timeline.model_validate(strict_json(raw))
+        except ValueError:
+            return invalid("Timeline cannot be converted into strict scenes and beats")
+        outcome.update(name=timeline.name, draft_scenes=slice_timeline(timeline.scenes, count, seconds)[0])
+        if save is not None:
+            save(outcome)
+        try:
+            raw = text(await grok.complete(PromptRequest(**base, prompt=json.dumps({
+                "task": CRITIC_TASK, **context, "block_seconds": seconds, "count": count,
+                "total_seconds": total, "draft_scenes": [scene.model_dump() for scene in timeline.scenes],
+            }, ensure_ascii=False)), output_schema=bounded(Critique), schema_name="h3_roteiro_critic"))
+        except Exception as exc:  # noqa: BLE001 - a failed later step is terminal evidence, not a retry.
+            outcome["raw_texts"].append("")
+            code = getattr(exc, "code", None)
+            return invalid(f"{type(exc).__name__}: {exc}"[:256],
+                           code if isinstance(code, str) else "critic_failed")
+        outcome["raw_texts"].append(raw)
+        try:
+            critique = Critique.model_validate(strict_json(raw))
+        except ValueError:
+            return invalid("Critic response cannot be converted into a strict revised plan")
+        scenes, slices = slice_timeline(critique.scenes, count, seconds)
+        outcome.update(scenes=scenes, slices=slices, vision=critique.vision.model_dump())
+        if save is not None:
+            save(outcome)
+        flat = [(i, j) for i, scene in enumerate(scenes) for j in range(len(scene["beats"]))]
+
+        def beat(position):
+            if not 0 <= position < len(flat):
+                return None
+            value = scenes[flat[position][0]]["beats"][flat[position][1]]
+            return {"kind": value["kind"], "action": value["action"]}
+
+        def describe(index):
+            piece = slices[index]
+            scene = scenes[piece["scene"]]
+            current = scene["beats"][piece["beat"]]
+            offset = scene["start_seconds"]
+            # A requested line is spoken once: only on the first slice of its beat.
+            line = current["dialogue"] if piece["part"] == 1 else None
+            return {"index": index + 1, "scene_title": scene["title"], "beat_kind": current["kind"],
+                    "beat_action": current["action"], "slice": f"{piece['part']}/{piece['parts']}",
+                    "film_seconds": [piece["start_seconds"], piece["end_seconds"]],
+                    "scene_seconds": [round(piece["start_seconds"] - offset, 3),
+                                      round(piece["end_seconds"] - offset, 3)],
+                    "previous_beat": beat(piece["position"] - 1),
+                    "next_beat": beat(piece["position"] + 1),
+                    "dialogue": line,
+                    "spoken_lines": (f"The character says, verbatim: {line}" if line else
+                                     "No spoken lines in this block; only natural non-speaking "
+                                     "mouth movement.")}
+
+        # Writers get the scene structure without dialogue text, so only flagged blocks see a line.
+        silent = [{**scene, "beats": [{k: v for k, v in item.items() if k != "dialogue"}
+                                      for item in scene["beats"]]} for scene in scenes]
+        semaphore = asyncio.Semaphore(PLAN_PARALLEL)
+        chunks = [range(start, min(start + PLAN_CHUNK, count)) for start in range(0, count, PLAN_CHUNK)]
+
+        async def expand(chunk):
+            async with semaphore:
+                request = PromptRequest(**base, prompt=json.dumps({
+                    "task": PROMPT_TASK, "background": context,
+                    "background_note": "Story background only. Do not speak any dialogue that "
+                                       "appears in it; follow each block's spoken_lines.",
+                    "block_seconds": seconds,
+                    "total_seconds": total, "vision": outcome["vision"], "scenes": silent,
+                    # Parallel chunks cannot see each other's text; the preceding slice's known
+                    # beat context still lets this chunk vary micro-motions across the boundary.
+                    "previous_block": describe(chunk[0] - 1) if chunk[0] else None,
+                    "blocks": [describe(index) for index in chunk]}, ensure_ascii=False))
+                chunk_schema = PromptChunk.model_json_schema()
+                chunk_schema["properties"]["blocks"].update(minItems=len(chunk), maxItems=len(chunk))
+                return text(await grok.complete(request, output_schema=chunk_schema,
+                                                schema_name="h3_roteiro_prompts"))
+
+        results = await asyncio.gather(*(expand(chunk) for chunk in chunks), return_exceptions=True)
+        prompts, failure = [], None
+        for chunk, result in zip(chunks, results, strict=True):
+            if isinstance(result, BaseException):
+                outcome["raw_texts"].append("")  # Keeps raw_texts[2 + k] aligned with chunk k.
+                code = getattr(result, "code", None)
+                failure = failure or (code if isinstance(code, str) else "prompt_failed",
+                                      f"{type(result).__name__}: {result}"[:256])
+                continue
+            outcome["raw_texts"].append(result)
+            try:
+                parsed = PromptChunk.model_validate(strict_json(result))
+                if len(parsed.blocks) != len(chunk):
+                    raise ValueError("Prompt count differs from its chunk")
+            except ValueError:
+                failure = failure or ("invalid_proposal",
+                                      "Prompt response cannot be converted into strict block prompts")
+                continue
+            prompts.extend(item.prompt for item in parsed.blocks)
+        if failure is not None:
+            return invalid(failure[1], failure[0])
+        try:
+            blocks = [Block(id=str(uuid4()), action=slice_action(scenes, piece),
+                            duration_seconds=seconds, seed=seed, prompt=prompt)
+                      for piece, prompt in zip(slices, prompts, strict=True)]
+        except ValueError:
+            return invalid("Sliced beat actions cannot form strict planned blocks")
+        for piece, block in zip(slices, blocks, strict=True):
+            piece["block_id"] = block.id
+        outcome["blocks"] = [block.model_dump() for block in blocks]
+        return outcome
+
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
         from .batch import assert_batch_available
         assert_batch_available(self.service, roteiro_id=ident)
@@ -507,53 +907,37 @@ class Roteiro:
         if digest != doc.reference_sha256:
             raise Conflict("Original reference changed")
         config = self.script_config()
-        prompt = json.dumps({"idea": doc.idea, "name": doc.name, "count": payload.count,
-                             "duration_seconds": payload.duration_seconds}, ensure_ascii=False)
+        base = {"system_prompt": config["system_prompt"], "model": config["model"],
+                "reference": doc.reference}
+        context = {"idea": doc.idea, "name": doc.name}
+        # Validate the first request before any durable reservation.
+        self.timeline_request(base, context, payload.count, payload.duration_seconds)
         candidate_id = str(uuid4())
         source = {"name": doc.name, "idea": doc.idea, "reference": doc.reference.model_dump(),
                   "reference_sha256": doc.reference_sha256}
+        reserved = {"id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
+                    "state": "uncertain", "request": payload.model_dump(), "source": source}
         # Reservation is durable, but locks do not span provider/media awaits. No automatic retry.
         with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
               locked(directory)):
             self.check_revision(self.get(doc.id), doc.revision)
-            write_file(directory, f"proposal-{candidate_id}.json", {
-                "id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
-                "state": "uncertain", "request": payload.model_dump(), "source": source,
-            }, exclusive=True)
-        schema = ProposedPlan.model_json_schema()
-        schema["properties"]["blocks"]["minItems"] = payload.count
-        schema["properties"]["blocks"]["maxItems"] = payload.count
-        result = await grok.complete(PromptRequest(system_prompt=config["system_prompt"],
-                                                  prompt=prompt, model=config["model"],
-                                                  reference=doc.reference),
-                                     output_schema=schema, schema_name="h3_roteiro")
-        raw = result.get("text") if isinstance(result, dict) else None
-        if not isinstance(raw, str):
-            raise ValueError("Grok proposal did not contain text")  # noqa: TRY004 - invalid wire response.
-        if len(raw.encode("utf-8")) > MAX_METADATA_BYTES // 2:
-            raise ValueError("Proposal text exceeds 512 KiB; not truncated or adopted")
-        try:
-            proposed = ProposedPlan.model_validate(strict_json(raw))
-            if len(proposed.blocks) != payload.count:
-                raise ValueError("Proposal count does not match the explicit request")
-        except ValueError:
-            # Raw invalid text is bounded data, not an instruction or permission to guess fields.
-            invalid = {"id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
-                       "source": source,
-                       "raw_text": raw, "error": "invalid_proposal",
-                       "detail": "Response cannot be converted into strict planned blocks",
-                       "stale": self.get(doc.id).revision != doc.revision}
+            write_file(directory, f"proposal-{candidate_id}.json", reserved, exclusive=True)
+
+        def progress(outcome):
             with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
                   locked(directory)):
-                invalid["stale"] = self.get(doc.id).revision != doc.revision
-                write_file(directory, f"proposal-{candidate_id}.json", invalid)
-            return invalid
-        blocks = [Block(id=str(uuid4()), seed=payload.seed, **b.model_dump())
-                  for b in proposed.blocks]
+                write_file(directory, f"proposal-{candidate_id}.json", {
+                    **reserved, **{key: outcome[key] for key in PLAN_EVIDENCE}})
+
+        outcome = await self.plan(grok, base, context, payload.count, payload.duration_seconds,
+                                  payload.seed, progress)
         candidate = {"id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
-                     "source": source,
-                     "name": proposed.name, "blocks": [b.model_dump() for b in blocks],
-                     "raw_text": raw, "stale": False}
+                     "source": source, "raw_text": outcome["raw_texts"][0],
+                     **{key: outcome[key] for key in PLAN_EVIDENCE}, "stale": False}
+        if outcome["error"]:
+            candidate.update(error=outcome["error"], detail=outcome["detail"])
+        else:
+            candidate.update(name=outcome["name"], blocks=outcome["blocks"], slices=outcome["slices"])
         with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
               locked(directory)):
             candidate["stale"] = self.get(doc.id).revision != doc.revision
@@ -564,18 +948,21 @@ class Roteiro:
         if not doc.adopted or not doc.blocks:
             raise Conflict("Tail requires an adopted roteiro with complete accepted videos")
         parent_id = None
-        for index, block in enumerate(doc.blocks):
-            attempts = [a for a in doc.attempts if a.block_id == block.id]
-            if not attempts:
-                raise Conflict("Finish every existing planned block before extending the tail")
-            attempt = self.selected_attempt(doc, block.id)
-            observed = self.observed(attempt)
-            if observed["state"] != "accepted" or observed["run"] is None:
-                raise Conflict("Every latest block attempt must be accepted and proven")
-            if not doc.selected_runs and attempt.snapshot.parent_id != parent_id:
-                raise Conflict("Accepted blocks do not form the exact current sequence")
-            self.parent(doc, index + 1, attempt.run_id)
-            parent_id = attempt.run_id
+        editorial = bool(doc.selected_runs or doc.removed_blocks
+                         or any(a.origin == "bridge" for a in doc.attempts))
+        with self.observing():
+            for index, block in enumerate(doc.blocks):
+                attempt = self.selected_attempt(doc, block.id)
+                if attempt is None:
+                    raise Conflict("Finish every existing planned block before extending the tail")
+                observed = self.observed(attempt)
+                if observed["state"] != "accepted" or observed["run"] is None:
+                    raise Conflict("Every latest block attempt must be accepted and proven")
+                # Bridges and removals make the order editorial rather than genealogical.
+                if not editorial and attempt.snapshot.parent_id != parent_id:
+                    raise Conflict("Accepted blocks do not form the exact current sequence")
+                self.parent(doc, index + 1, attempt.run_id)
+                parent_id = attempt.run_id
         return parent_id
 
     def tail_media(self, parent_id: str) -> dict:
@@ -632,7 +1019,7 @@ class Roteiro:
         doc = self.get(ident)
         self.check_revision(doc, payload.expected_revision)
         if len(doc.blocks) + payload.count > MAX_BLOCKS:
-            raise Conflict("Tail exceeds the existing 50-block planning budget")
+            raise Conflict(f"Tail exceeds the existing {MAX_BLOCKS}-block planning budget")
         parent_id = self.tail_parent(doc)
         if await self.reference_digest(doc.reference) != doc.reference_sha256:
             raise Conflict("Original reference changed")
@@ -642,28 +1029,35 @@ class Roteiro:
                 raise Conflict("Tail parent identity disagrees with original reference")
             parent_proof = await asyncio.to_thread(self.tail_media, parent_id)
         config = self.script_config()
-        prompt = json.dumps({
-            "task": "Plan only new tail block intentions after the accepted video sequence. "
-                    "Image 1 is original identity; image 2 is the actual final frame of the "
-                    "accepted parent. Future frames are unknown. Preserve the existing prefix. "
-                    "Do not claim exact timing or guaranteed artistic continuity.",
-            "original_idea": doc.idea, "name": doc.name,
+        base = {"system_prompt": config["system_prompt"], "model": config["model"],
+                "reference": doc.reference, "continuation_parent_id": parent_id}
+        context = {
+            "situation": "Plan only new tail blocks after the accepted video sequence. "
+                         "Image 1 is original identity; image 2 is the actual final frame of the "
+                         "accepted parent. Preserve the existing prefix; continue from that frame.",
+            "idea": payload.idea, "original_idea": doc.idea, "name": doc.name,
+            "earlier_block_count": max(0, len(doc.blocks) - CONTEXT_ACTIONS),
+            # Bounded for long roteiros: recent intentions, plus prompts only for the last few.
             "accepted_prefix": [
-                {"id": b.id, "editorial_intention": b.action, "run_id": attempt.run_id,
-                 "prompt": attempt.snapshot.prompt, "duration_seconds": attempt.snapshot.duration_seconds}
-                for b in doc.blocks if (attempt := self.selected_attempt(doc, b.id)) is not None
+                {"id": b.id, "position": position + 1, "editorial_intention": b.action,
+                 "run_id": attempt.run_id, "duration_seconds": attempt.snapshot.duration_seconds,
+                 **({"prompt": attempt.snapshot.prompt}
+                    if position >= len(doc.blocks) - CONTEXT_PROMPTS else {})}
+                for position, b in enumerate(doc.blocks)
+                if position >= len(doc.blocks) - CONTEXT_ACTIONS
+                and (attempt := self.selected_attempt(doc, b.id)) is not None
             ],
-            "tail_idea": payload.idea, "count": payload.count,
-            "duration_seconds": payload.duration_seconds,
-        }, ensure_ascii=False)
+        }
+        first = self.timeline_request(base, context, payload.count, payload.duration_seconds)
         candidate = {
             "id": tail_id, "roteiro_id": doc.id, "source_revision": doc.revision,
             "parent_id": parent_id, "prefix_block_ids": [b.id for b in doc.blocks],
             "prefix_blocks": [b.model_dump() for b in doc.blocks],
             "source": self.tail_source(doc), "parent_proof": parent_proof,
-            "name": doc.name, "blocks": [], "raw_text": "",
+            "name": doc.name, "blocks": [], "raw_text": "", "raw_texts": [], "scenes": [],
+            "draft_scenes": [], "vision": None,
             "state": "uncertain", "stale": False, "request": payload.model_dump(),
-            "config": config, "planning_prompt": prompt,
+            "config": config, "planning_prompt": first.prompt,
         }
         with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
               locked(directory)):
@@ -680,13 +1074,17 @@ class Roteiro:
             if submission is not None:
                 submission["reserved"] = True
             write_file(directory, f"tail-{tail_id}.json", candidate, exclusive=True)
-        schema = ProposedPlan.model_json_schema()
-        schema["properties"]["blocks"].update(minItems=payload.count, maxItems=payload.count)
+
+        def progress(outcome):
+            candidate.update({key: outcome[key] for key in PLAN_EVIDENCE},
+                             raw_text=outcome["raw_texts"][0])
+            with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+                  locked(directory)):
+                write_file(directory, f"tail-{tail_id}.json", candidate)
+
         try:
-            result = await grok.complete(PromptRequest(
-                system_prompt=config["system_prompt"], prompt=prompt, model=config["model"],
-                reference=doc.reference, continuation_parent_id=parent_id),
-                output_schema=schema, schema_name="h3_roteiro")
+            outcome = await self.plan(grok, base, context, payload.count,
+                                      payload.duration_seconds, payload.seed, progress)
         except OAuthError as exc:
             if 400 <= exc.status < 500:
                 candidate.update(state="invalid", error=exc.code,
@@ -695,20 +1093,12 @@ class Roteiro:
                       locked(directory)):
                     write_file(directory, f"tail-{tail_id}.json", candidate)
             raise
-        raw = result.get("text") if isinstance(result, dict) else None
-        if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_METADATA_BYTES // 2:
-            raise ValueError("Tail response is missing text or exceeds 512 KiB; not truncated")
-        candidate["raw_text"] = raw
-        try:
-            proposed = ProposedPlan.model_validate(strict_json(raw))
-            if len(proposed.blocks) != payload.count:
-                raise ValueError("Tail proposal count differs from request")
-            candidate["blocks"] = [Block(id=str(uuid4()), seed=payload.seed, **b.model_dump())
-                                   .model_dump() for b in proposed.blocks]
-            candidate["state"] = "proposed"
-        except ValueError:
-            candidate.update(state="invalid", error="invalid_proposal",
-                             detail="Response cannot be converted into strict new tail blocks")
+        candidate.update({key: outcome[key] for key in PLAN_EVIDENCE},
+                         raw_text=outcome["raw_texts"][0])
+        if outcome["error"]:
+            candidate.update(state="invalid", error=outcome["error"], detail=outcome["detail"])
+        else:
+            candidate.update(state="proposed", blocks=outcome["blocks"], slices=outcome["slices"])
         with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
               locked(directory)):
             try:
@@ -750,6 +1140,157 @@ class Roteiro:
             write_file(directory, f"tail-{tail_id}.json", candidate)
         return self.view(updated)
 
+    def remove_block(self, ident: str, key: str, payload: RemovePlan) -> dict:
+        """Take one block out of the sequence; its attempts, videos and decisions stay history."""
+        canonical(key)
+        with (_directory(self.root, (".data", "roteiros")) as library, locked(library),
+              _directory(self.root, (".data", "roteiros", canonical(ident))) as directory,
+              locked(directory)):
+            doc = self.get(ident)
+            self.check_revision(doc, payload.expected_revision)
+            block = next((b for b in doc.blocks if b.id == key), None)
+            if block is None:
+                raise FileNotFoundError("Unknown planned block")
+            remaining = [b for b in doc.blocks if b.id != key]
+            if doc.adopted and not remaining:
+                raise Conflict("Um roteiro adotado precisa de pelo menos um bloco")
+            owned = [a for a in doc.attempts if a.block_id == key]
+            with self.observing():
+                if any(self.observed(a)["state"] in {"uncertain", "queued", "running"}
+                       for a in doc.attempts):
+                    raise Conflict("Uma tentativa está ativa ou incerta; consulte-a antes de remover")
+                if any(self.observed(a)["state"] == "ready_for_review" for a in owned):
+                    raise Conflict("Aceite ou recuse o vídeo deste bloco antes de removê-lo")
+                # Editorial mode: pin every accepted version so Tail and the batch follow the
+                # visible order instead of requiring an exact generation chain across the cut.
+                selected = {k: v for k, v in doc.selected_runs.items() if k != key}
+                for planned in remaining:
+                    attempt = self.selected_attempt(doc, planned.id)
+                    if attempt is not None and self.observed(attempt)["state"] == "accepted":
+                        selected[planned.id] = attempt.run_id
+            updated = Document(**{**doc.model_dump(), "revision": doc.revision + 1,
+                                  "blocks": [b.model_dump() for b in remaining],
+                                  "selected_runs": selected,
+                                  "removed_blocks": [b.model_dump() for b in (
+                                      [*doc.removed_blocks, block] if owned else doc.removed_blocks)]})
+            write_file(directory, "plan.json", updated.model_dump())
+        return self.view(updated)
+
+    def segment_neighbor(self, doc: Document, position: int) -> tuple[dict | None, str | None]:
+        if not 0 <= position < len(doc.blocks):
+            return None, None
+        block = doc.blocks[position]
+        value = {"position": position + 1, "editorial_intention": block.action}
+        attempt = self.selected_attempt(doc, block.id)
+        observed = self.observed(attempt) if attempt is not None else None
+        if observed is not None and observed["state"] == "accepted" and observed["run"] is not None:
+            value["historical_prompt_actually_submitted"] = attempt.snapshot.prompt
+            return value, attempt.run_id
+        value["planned_prompt_not_generated"] = block.prompt
+        return value, None
+
+    def segment_record(self, directory: int, ident: str, segment_id: str) -> dict:
+        record = read_file(directory, f"segment-{segment_id}.json")
+        if record.get("id") != segment_id or record.get("roteiro_id") != ident:
+            raise ValueError("Segment ownership disagrees with path")
+        return record
+
+    def get_segment(self, ident: str, segment_id: str) -> dict:
+        canonical(segment_id)
+        with _directory(self.root, (".data", "roteiros", canonical(ident))) as directory:
+            record = self.segment_record(directory, ident, segment_id)
+        try:
+            record["stale"] = self.get(ident).revision != record["source_revision"]
+        except (OSError, ValueError):
+            record["stale"] = True
+        return record
+
+    async def propose_segment(self, ident: str, segment_id: str, payload: SegmentRequest,
+                              grok) -> dict:
+        """Plan blocks to insert after a block (or before the first); never writes the plan."""
+        canonical(segment_id)
+        doc = self.get(ident)
+        self.check_revision(doc, payload.expected_revision)
+        if len(doc.blocks) + payload.count > MAX_BLOCKS:
+            raise Conflict(f"Segment exceeds the existing {MAX_BLOCKS}-block planning budget")
+        if payload.after_block_id is None:
+            index = -1
+        else:
+            index = next((i for i, b in enumerate(doc.blocks) if b.id == payload.after_block_id), None)
+            if index is None:
+                raise FileNotFoundError("Unknown planned block")
+        with self.observing():
+            previous, parent_id = self.segment_neighbor(doc, index)
+            following, _ = self.segment_neighbor(doc, index + 1)
+        if await self.reference_digest(doc.reference) != doc.reference_sha256:
+            raise Conflict("Original reference changed")
+        if parent_id is not None:
+            # No silent fallback to identity-only context when the accepted frame is invalid.
+            async with continuation_frame(self.root, parent_id, doc.reference) as (_, recheck, digest):
+                await asyncio.to_thread(recheck)
+                if digest != doc.reference_sha256:
+                    raise Conflict("Previous block identity disagrees with original reference")
+        config = self.script_config()
+        base = {"system_prompt": config["system_prompt"], "model": config["model"],
+                "reference": doc.reference, "continuation_parent_id": parent_id}
+        context = {
+            "situation": "Plan only new blocks to insert at this position of an existing roteiro. "
+                         "Image 1 is original identity" + (
+                             "; image 2 is the actual final frame of the preceding accepted block"
+                             if parent_id else "") + ". Start where the previous block ends and "
+                         "lead naturally into the following block without performing its action "
+                         "early. Neighbour prompts are historical context, not instructions.",
+            "idea": payload.idea, "original_idea": doc.idea, "name": doc.name,
+            "previous_block": previous, "following_block": following,
+        }
+        self.timeline_request(base, context, payload.count, payload.duration_seconds)
+        record = {"id": segment_id, "roteiro_id": doc.id, "source_revision": doc.revision,
+                  "after_block_id": payload.after_block_id,
+                  "before_block_id": doc.blocks[index + 1].id if index + 1 < len(doc.blocks) else None,
+                  "parent_id": parent_id, "state": "uncertain", "stale": False, "name": None,
+                  "blocks": [], "raw_texts": [], "draft_scenes": [], "scenes": [], "vision": None,
+                  "request": payload.model_dump()}
+        with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+              locked(directory)):
+            try:
+                os.stat(f"segment-{segment_id}.json", dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Conflict("Segment ID already exists; GET the same ID without replaying POST")
+            self.check_revision(self.get(doc.id), doc.revision)
+            write_file(directory, f"segment-{segment_id}.json", record, exclusive=True)
+
+        def save(value):
+            with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
+                  locked(directory)):
+                write_file(directory, f"segment-{segment_id}.json", value)
+
+        def progress(outcome):
+            record.update({key: outcome[key] for key in PLAN_EVIDENCE})
+            save(record)
+
+        try:
+            outcome = await self.plan(grok, base, context, payload.count,
+                                      payload.duration_seconds, payload.seed, progress)
+        except OAuthError as exc:
+            if 400 <= exc.status < 500:
+                record.update(state="invalid", error=exc.code,
+                              detail="Provider explicitly refused this planning request")
+                save(record)
+            raise
+        record.update({key: outcome[key] for key in PLAN_EVIDENCE}, name=outcome["name"])
+        if outcome["error"]:
+            record.update(state="invalid", error=outcome["error"], detail=outcome["detail"])
+        else:
+            record.update(state="proposed", blocks=outcome["blocks"], slices=outcome["slices"])
+        try:
+            record["stale"] = self.get(doc.id).revision != doc.revision
+        except (OSError, ValueError):
+            record["stale"] = True
+        save(record)
+        return record
+
     def intent(self, doc: Document, key: str, intent_id: str) -> Intent:
         canonical(key)
         canonical(intent_id)
@@ -759,6 +1300,40 @@ class Roteiro:
         raise FileNotFoundError("Unknown owned intent")
 
     def observed(self, intent: Intent) -> dict:
+        with self.observing():
+            memo = self._memo
+            key = (intent.intent_id, intent.admission, intent.error)
+            if key not in memo.observed:
+                self._warm_ancestors(intent)
+                memo.observed[key] = self._observe(intent)
+            return memo.observed[key]
+
+    def _warm_ancestors(self, intent: Intent):
+        """Observe uncached ancestors root-first, so each proof finds its parent memoized.
+
+        This keeps long chains linear and the call stack shallow instead of one recursion level
+        per historical continuation.
+        """
+        if intent.snapshot.parent_id is None:
+            return
+        try:
+            _, order, by_run = self.history(intent.roteiro_id)
+        except (OSError, ValueError):
+            return  # The proof itself classifies unreadable ownership as uncertain.
+        chain, current = [], intent
+        while current.snapshot.parent_id is not None and current.intent_id in order:
+            found = by_run.get(current.snapshot.parent_id)
+            if found is None or found[0] >= order[current.intent_id]:
+                break
+            parent = found[1]
+            if (parent.intent_id, parent.admission, parent.error) in self._memo.observed:
+                break
+            chain.append(parent)
+            current = parent
+        for parent in reversed(chain):
+            self.observed(parent)
+
+    def _observe(self, intent: Intent) -> dict:
         value = intent.model_dump()
         value["snapshot"]["reference"] = {
             **value["snapshot"]["reference"], "sha256": intent.snapshot.reference_sha256,
@@ -814,16 +1389,23 @@ class Roteiro:
         else:
             I2VPipe.from_run(self.service, run)
         if snap.parent_id:
-            doc = self.get(intent.roteiro_id)
-            earlier = doc.attempts[:next(i for i, a in enumerate(doc.attempts)
-                                       if a.intent_id == intent.intent_id)]
-            parent = next((a for a in earlier if a.run_id == snap.parent_id), None)
-            if parent is None or self.observed(parent)["state"] != "accepted":
-                raise ValueError("Historical generation parent is not a proven accepted attempt")
-            published_parent = self.service.store.get(parent.run_id)
-            self.service.video_path(parent.run_id)
-            if published_parent.decision is None or published_parent.decision.get("accepted") is not True:
-                raise ValueError("Historical generation parent has no accepted decision")
+            self.historical_parent(intent)
+
+    def historical_parent(self, intent: Intent):
+        """The parent must be an earlier owned attempt, accepted and published.
+
+        Position in the current block order is not part of this proof: removals, insertions and
+        editorial versions may legitimately change neighbours after generation.
+        """
+        _, order, by_run = self.history(intent.roteiro_id)
+        found = by_run.get(intent.snapshot.parent_id)
+        if (found is None or intent.intent_id not in order or found[0] >= order[intent.intent_id]
+                or self.observed(found[1])["state"] != "accepted"):
+            raise ValueError("Historical generation parent is not a proven accepted attempt")
+        published_parent = self.service.store.get(found[1].run_id)
+        self.service.video_path(found[1].run_id)
+        if published_parent.decision is None or published_parent.decision.get("accepted") is not True:
+            raise ValueError("Historical generation parent has no accepted decision")
 
     def selected_attempt(self, doc: Document, block_id: str) -> Intent | None:
         attempts = [a for a in doc.attempts if a.block_id == block_id]
@@ -833,15 +1415,17 @@ class Roteiro:
 
     def selected_run_ids(self, doc: Document) -> list[str]:
         result = []
-        for block in doc.blocks:
-            attempt = self.selected_attempt(doc, block.id)
-            if attempt is None or self.observed(attempt)["state"] != "accepted":
-                raise Conflict("Accept a selected version of every block before assembling")
-            result.append(attempt.run_id)
+        with self.observing():
+            for block in doc.blocks:
+                attempt = self.selected_attempt(doc, block.id)
+                if attempt is None or self.observed(attempt)["state"] != "accepted":
+                    raise Conflict("Accept a selected version of every block before assembling")
+                result.append(attempt.run_id)
         return result
 
     def view(self, doc: Document) -> dict:
-        return {**doc.model_dump(), "attempts": [self.observed(a) for a in doc.attempts]}
+        with self.observing():
+            return {**doc.model_dump(), "attempts": [self.observed(a) for a in doc.attempts]}
 
     def parent(self, doc: Document, index: int, selected: str | None):
         if index == 0:
@@ -866,6 +1450,21 @@ class Roteiro:
             raise Conflict("Predecessor has no explicit accepted decision")
         # observed(prior) recursively proves that parent's original owned ancestry as well.
 
+    def bridge_target(self, doc: Document, index: int, target: str):
+        """A bridge ends at the first frame of the next block's selected accepted version."""
+        if index + 1 >= len(doc.blocks):
+            raise Conflict("A bridge requires a following block; use Tail at the end")
+        following = self.selected_attempt(doc, doc.blocks[index + 1].id)
+        if following is None or following.run_id != target:
+            raise Conflict("Bridge destination must be the next block's selected version")
+        observed = self.observed(following)
+        if observed["state"] != "accepted" or observed["run"] is None:
+            raise Conflict("Bridge destination must be natively accepted and proven")
+        run = self.service.store.get(target)
+        self.service.video_path(target)
+        if run.decision is None or run.decision.get("accepted") is not True:
+            raise Conflict("Bridge destination has no explicit accepted decision")
+
     def reserve(self, doc: Document, key: str, intent_id: str, payload: Generate) -> Intent:
         from .batch import assert_batch_available
         assert_batch_available(self.service)
@@ -886,23 +1485,30 @@ class Roteiro:
                     raise FileNotFoundError("Unknown planned block")
                 block = doc.blocks[index]
                 old = [a for a in doc.attempts if a.block_id == key]
-                if old:
-                    latest = self.observed(old[-1])
-                    if latest["state"] not in {"rejected", "interrupted", "not_admitted"}:
-                        raise Conflict("Previous attempt is accepted, active, failed or uncertain")
-                    if old[-1].snapshot.parent_id != payload.parent_id:
-                        raise Conflict("Retry must preserve the original parent")
-                elif (payload.prompt, payload.seed, payload.duration_seconds) != (
-                        block.prompt, block.seed, block.duration_seconds):
-                    raise Conflict("Save the chosen draft before creating an intent")
-                # Any other outstanding attempt fences this roteiro even if the native slot vanished.
-                if any(self.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
-                       for a in doc.attempts):
-                    raise Conflict("An owned attempt is still active, awaiting review or uncertain")
-                self.parent(doc, index, payload.parent_id)
+                with self.observing():
+                    if old:
+                        latest = self.observed(old[-1])
+                        if latest["state"] not in {"rejected", "interrupted", "not_admitted"}:
+                            raise Conflict("Previous attempt is accepted, active, failed or uncertain")
+                        if (old[-1].snapshot.parent_id, old[-1].target_run_id) != (
+                                payload.parent_id, payload.target_run_id):
+                            raise Conflict("Retry must preserve the original parent and destination")
+                    elif (payload.prompt, payload.seed, payload.duration_seconds) != (
+                            block.prompt, block.seed, block.duration_seconds):
+                        raise Conflict("Save the chosen draft before creating an intent")
+                    # Any other outstanding attempt fences this roteiro even if the native slot vanished.
+                    if any(self.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
+                           for a in doc.attempts):
+                        raise Conflict("An owned attempt is still active, awaiting review or uncertain")
+                    self.parent(doc, index, payload.parent_id)
+                    if payload.target_run_id is not None:
+                        self.bridge_target(doc, index, payload.target_run_id)
                 attempt = Intent(intent_id=intent_id, run_id=intent_id, roteiro_id=doc.id,
                                  block_id=key, source_revision=doc.revision,
-                                 snapshot=Snapshot(**payload.model_dump(exclude={"expected_revision"}),
+                                 origin="native" if payload.target_run_id is None else "bridge",
+                                 target_run_id=payload.target_run_id,
+                                 snapshot=Snapshot(**payload.model_dump(
+                                     exclude={"expected_revision", "target_run_id"}),
                                                    reference=doc.reference,
                                                    reference_sha256=doc.reference_sha256))
                 # The intent is the first durable write. A crash at any later boundary stays fenced.
@@ -937,7 +1543,18 @@ class Roteiro:
             digest = await self.reference_digest(attempt.snapshot.reference)
             if digest != attempt.snapshot.reference_sha256:
                 raise Conflict("Original reference changed; native admission was not attempted")
-            if payload.parent_id is None:
+            if payload.target_run_id is not None:
+                current = self.get(ident)
+                index = next(i for i, b in enumerate(current.blocks) if b.id == key)
+                self.parent(current, index, payload.parent_id)
+                self.bridge_target(current, index, payload.target_run_id)
+                native = BridgeRequest(seed=payload.seed, prompt=payload.prompt,
+                                       duration_seconds=payload.duration_seconds,
+                                       target_run_id=payload.target_run_id)
+                pipe = (BridgePipe(self.service).have(native).with_run_id(intent_id)
+                        .from_parent(payload.parent_id).with_last_frame().with_original_identity()
+                        .with_motion_tail().with_workflow(BRIDGE_CONFIG).save_chunk())
+            elif payload.parent_id is None:
                 native = RunRequest(seed=payload.seed, prompt=payload.prompt,
                                     duration_seconds=payload.duration_seconds,
                                     references=[attempt.snapshot.reference.model_dump()])
@@ -954,7 +1571,8 @@ class Roteiro:
             pipe.with_identity_proof(attempt.snapshot.reference.source_root,
                                      attempt.snapshot.reference.path,
                                      attempt.snapshot.reference_sha256)
-        except (OSError, ValueError):
+        except (OSError, ValueError, Conflict):
+            # Nothing reached the native dispatcher yet, so this outcome is known, not uncertain.
             self.finish(attempt, "rejected", "Preflight rejected before native submission")
             raise
         try:
@@ -985,7 +1603,7 @@ async def body(request: Request, model):
     raw = bytearray()
     async for chunk in request.stream():
         if len(raw) + len(chunk) > MAX_METADATA_BYTES:
-            raise HTTPException(413, "Roteiro JSON exceeds 1 MiB")
+            raise HTTPException(413, "Roteiro JSON exceeds 16 MiB")
         raw.extend(chunk)
     try:
         return model.model_validate(strict_json(bytes(raw)))
@@ -1005,6 +1623,11 @@ async def list_roteiros(request: Request):
 @router.post("", status_code=201)
 async def create_roteiro(request: Request):
     return response(await operation(request).create(await body(request, CreatePlan)), 201)
+
+
+@router.get("/summary")
+async def roteiro_summary(request: Request):
+    return response(operation(request).summary())
 
 
 @router.get("/editor")
@@ -1043,6 +1666,26 @@ async def propose_roteiro(ident: str, request: Request):
         return response(value, 422 if value.get("error") else 200)
     except OAuthError as exc:
         return response({"error": exc.code, "detail": str(exc)}, exc.status)
+
+
+@router.post("/{ident}/blocks/{key}/remove")
+async def remove_block(ident: str, key: str, request: Request):
+    return response(operation(request).remove_block(ident, key, await body(request, RemovePlan)))
+
+
+@router.post("/{ident}/segments/{segment_id}")
+async def propose_segment(ident: str, segment_id: str, request: Request):
+    try:
+        value = await operation(request).propose_segment(
+            ident, segment_id, await body(request, SegmentRequest), request.app.state.grok)
+        return response(value, 422 if value.get("error") else 200)
+    except OAuthError as exc:
+        return response({"error": exc.code, "detail": str(exc)}, exc.status)
+
+
+@router.get("/{ident}/segments/{segment_id}")
+async def get_segment(ident: str, segment_id: str, request: Request):
+    return response(operation(request).get_segment(ident, segment_id))
 
 
 @router.post("/{ident}/blocks/{key}/attempts/{intent_id}", status_code=202)

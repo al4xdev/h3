@@ -15,9 +15,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field, StrictInt, field_validator
 
 from ..generation.dispatcher import Conflict
-from ..grok import FIXED_EDITOR_MODEL, EditorConfig, PromptRequest, read_editor
+from ..grok import FIXED_EDITOR_MODEL, EditorConfig, EditPromptRequest, PromptRequest, read_editor
 from ..infrastructure.grok_image import EditorReference, _directory
 from . import (
+    CONTEXT_ACTIONS,
+    CONTEXT_PROMPTS,
+    MAX_BLOCKS,
     Block,
     Generate,
     Roteiro,
@@ -61,8 +64,11 @@ class BatchRecord(StrictDTO):
     phase: Literal["improving", "generating", "accepting"] | None
     reference: EditorReference
     reference_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    blocks: list[Block] = Field(min_length=1, max_length=50)
+    blocks: list[Block] = Field(min_length=1, max_length=MAX_BLOCKS)
     initial_parent_id: str | None
+    # Pending block -> selected accepted run of its following block, frozen at start.
+    targets: dict[str, str] = Field(default_factory=dict)
+    bridge_editor_config: EditorConfig | None = None
     state: Literal["active", "ready_for_review", "interrupted", "stopped"]
     current_block_id: str | None
     current_run_id: str | None
@@ -77,7 +83,7 @@ def validated_record(value):
         raise ValueError("Invalid batch acceptance consent")
     record = BatchRecord.model_validate(value)
     for ident in (record.id, record.roteiro_id, record.initial_parent_id,
-                  record.current_block_id, record.current_run_id,
+                  record.current_block_id, record.current_run_id, *record.targets.values(),
                   *record.completed_block_ids, *record.accepted_run_ids, *record.enhancement_ids):
         if ident is not None:
             canonical(ident)
@@ -91,7 +97,11 @@ def validated_record(value):
             or len(record.accepted_run_ids) > len(record.completed_block_ids)
             or len(set(record.accepted_run_ids)) != len(record.accepted_run_ids)
             or record.current_block_id is not None and record.current_block_id not in blocks
-            or record.current_run_id is not None and record.current_block_id is None):
+            or record.current_run_id is not None and record.current_block_id is None
+            or not set(record.targets) <= set(blocks)
+            or bool(record.targets) != (record.bridge_editor_config is not None)
+            or record.bridge_editor_config is not None
+            and record.bridge_editor_config.model != FIXED_EDITOR_MODEL):
         raise ValueError("Invalid batch progress ownership")
     return record.model_dump()
 
@@ -268,36 +278,20 @@ class RoteiroBatch:
                       locked(directory)):
                     doc = self.roteiro.get(ident)
                     self.roteiro.check_revision(doc, payload.expected_revision)
-                    pending = []
-                    parent_id = None
-                    for block in doc.blocks:
-                        attempts = [a for a in doc.attempts if a.block_id == block.id]
-                        if attempts:
-                            if pending:
-                                raise Conflict("Automatic batch requires an accepted prefix and never-sent suffix")
-                            observations = [self.roteiro.observed(attempt) for attempt in attempts]
-                            selected = self.roteiro.selected_attempt(doc, block.id)
-                            observed = self.roteiro.observed(selected)
-                            prior_terminal = {"rejected", "interrupted", "not_admitted", "failed"}
-                            if doc.selected_runs:
-                                prior_terminal.add("accepted")
-                            if (observed["state"] != "accepted" or observed["admission"] != "admitted"
-                                    or any(old["state"] not in prior_terminal
-                                           for attempt, old in zip(attempts, observations, strict=True)
-                                           if attempt.run_id != selected.run_id)):
-                                raise Conflict("Resolve every previous attempt explicitly before a batch")
-                            parent_id = selected.run_id
-                        else:
-                            pending.append(block.model_dump())
-                    if not pending:
-                        raise Conflict("No never-submitted blocks remain")
+                    pending, targets = self.pending(doc)
+                    bridge_config = None
+                    if targets:
+                        from .edit import RoteiroEdit
+                        bridge_config = EditorConfig(**RoteiroEdit(self.service).config()).model_dump()
                     value = {"id": batch_id, "roteiro_id": ident, "source_revision": doc.revision,
                              "auto_accept_intermediate": True, "enhance_with_grok": True,
                              "expected_current_revision": doc.revision,
                              "editor_config": editor.model_dump(), "enhancement_ids": [],
                              "stop_requested": False, "phase": None, "reference": doc.reference.model_dump(),
-                             "reference_sha256": doc.reference_sha256, "blocks": pending,
-                             "initial_parent_id": parent_id, "state": "active",
+                             "reference_sha256": doc.reference_sha256,
+                             "blocks": [block.model_dump() for block, _ in pending],
+                             "initial_parent_id": pending[0][1], "targets": targets,
+                             "bridge_editor_config": bridge_config, "state": "active",
                              "current_block_id": None, "current_run_id": None,
                              "completed_block_ids": [], "accepted_run_ids": [], "error": None}
                     self.save(value, exclusive=True)
@@ -308,9 +302,47 @@ class RoteiroBatch:
             self.release()
             raise
 
+    def accepted(self, doc, block):
+        selected = self.roteiro.selected_attempt(doc, block.id)
+        if selected is None:
+            return None
+        observed = self.roteiro.observed(selected)
+        if observed["state"] != "accepted" or observed["admission"] != "admitted":
+            return None
+        return selected.run_id
+
+    def pending(self, doc):
+        """Never-sent blocks in roteiro order, with each segment's parent and bridge target."""
+        attempted = {a.block_id for a in doc.attempts}
+        pending, targets = [], {}
+        with self.roteiro.observing():
+            if any(self.roteiro.observed(a)["state"] in {"uncertain", "queued", "running", "ready_for_review"}
+                   for a in doc.attempts):
+                raise Conflict("Resolve every previous attempt explicitly before a batch")
+            for index, block in enumerate(doc.blocks):
+                if block.id in attempted:
+                    continue
+                parent_id = None
+                if index and (not pending or pending[-1][0].id != doc.blocks[index - 1].id):
+                    parent_id = self.accepted(doc, doc.blocks[index - 1])
+                    if parent_id is None:
+                        raise Conflict("Resolve every previous attempt explicitly: the block before "
+                                       "a pending block needs an accepted version")
+                following = doc.blocks[index + 1] if index + 1 < len(doc.blocks) else None
+                # The first block has no parent video, so it stays I2V and leaves a visible cut.
+                if index and following is not None and following.id in attempted:
+                    target = self.accepted(doc, following)
+                    if target is not None:
+                        targets[block.id] = target
+                pending.append((block, parent_id))
+        if not pending:
+            raise Conflict("No never-submitted blocks remain")
+        return pending, targets
+
     async def execute(self, value):
         token = _owner.set(value["id"])
         parent_id = value["initial_parent_id"]
+        previous_block_id = None
         try:
             for index, frozen in enumerate(value["blocks"]):
                 block = Block.model_validate(frozen)
@@ -321,17 +353,36 @@ class RoteiroBatch:
                         or next((b for b in doc.blocks if b.id == block.id), None) != block):
                     raise Conflict("Frozen batch input changed")
                 block_index = next(i for i, planned in enumerate(doc.blocks) if planned.id == block.id)
+                if index and doc.blocks[block_index - 1].id != previous_block_id:
+                    # A later pending segment continues from the accepted version before its gap.
+                    with self.roteiro.observing():
+                        parent_id = self.accepted(doc, doc.blocks[block_index - 1])
+                    if parent_id is None:
+                        raise Conflict("The block before this pending segment has no accepted version")
                 self.roteiro.parent(doc, block_index, parent_id)
+                target = value["targets"].get(block.id)
+                if target is not None:
+                    with self.roteiro.observing():
+                        self.roteiro.bridge_target(doc, block_index, target)
                 if await self.roteiro.reference_digest(doc.reference) != value["reference_sha256"]:
                     raise Conflict("Original reference changed before text enhancement")
                 enhancement_id = str(uuid4())
                 value.update(current_block_id=block.id, current_run_id=None, phase="improving")
-                context = self.context(doc, block_index)
-                request = PromptRequest(**value["editor_config"], prompt=context,
-                                        reference=doc.reference, continuation_parent_id=parent_id)
+                if target is None:
+                    request = PromptRequest(**value["editor_config"],
+                                            prompt=self.context(doc, block_index),
+                                            reference=doc.reference, continuation_parent_id=parent_id)
+                else:
+                    # Same three-image edit route as anchored edits: identity, parent end, target start.
+                    request = EditPromptRequest(**value["bridge_editor_config"],
+                                                prompt=self.bridge_context(doc, block_index),
+                                                reference=doc.reference,
+                                                continuation_parent_id=parent_id,
+                                                target_run_id=target)
                 enhancement = {"id": enhancement_id, "batch_id": value["id"],
                                "roteiro_id": doc.id, "source_revision": doc.revision,
                                "block": block.model_dump(), "parent_id": parent_id,
+                               "target_run_id": target,
                                "request": request.model_dump(), "state": "uncertain", "text": None}
                 self.save_enhancement(enhancement, exclusive=True)
                 value["enhancement_ids"].append(enhancement_id)
@@ -376,7 +427,8 @@ class RoteiroBatch:
                 self.save(value)
                 observed = await self.roteiro.generate(doc.id, block.id, run_id, Generate(
                     expected_revision=doc.revision, prompt=block.prompt, seed=block.seed,
-                    duration_seconds=block.duration_seconds, parent_id=parent_id))
+                    duration_seconds=block.duration_seconds, parent_id=parent_id,
+                    target_run_id=target))
                 if observed["admission"] != "admitted":
                     raise Conflict("Native admission is uncertain; inspect the same run ID")
                 await self.service.wait_run(run_id)
@@ -395,7 +447,7 @@ class RoteiroBatch:
                     value["accepted_run_ids"].append(run_id)
                 value["completed_block_ids"].append(block.id)
                 self.save(value)
-                parent_id = run_id
+                parent_id, previous_block_id = run_id, block.id
             value.update(state="ready_for_review")
         except asyncio.CancelledError:
             if value["stop_requested"]:
@@ -424,23 +476,39 @@ class RoteiroBatch:
                        exclusive=exclusive)
 
     def context(self, doc, index):
+        """Bounded story context: recent intentions, submitted prompts only for the latest few."""
         accepted = []
-        for previous in doc.blocks[:index]:
-            selected = self.roteiro.selected_attempt(doc, previous.id)
-            observed = self.roteiro.observed(selected) if selected else None
-            if not observed or observed["state"] != "accepted":
-                raise Conflict("Story context requires confirmed accepted intentions")
-            label = ("IMMEDIATELY PREVIOUS ACCEPTED BLOCK" if previous == doc.blocks[index - 1]
-                     else "EARLIER ACCEPTED BLOCK")
-            accepted.append(f"{label}\nPlanned action: {previous.action}\n"
-                            "BEGIN HISTORICAL PROMPT ACTUALLY SUBMITTED FOR THIS COMPLETED BLOCK\n"
-                            f"{selected.snapshot.prompt}\nEND HISTORICAL PROMPT")
+        window = range(max(0, index - CONTEXT_ACTIONS), index)
+        with self.roteiro.observing():
+            for position in window:
+                previous = doc.blocks[position]
+                selected = self.roteiro.selected_attempt(doc, previous.id)
+                observed = self.roteiro.observed(selected) if selected else None
+                done = bool(observed) and observed["state"] == "accepted"
+                if position == index - 1 and not done:
+                    raise Conflict("Story context requires confirmed accepted intentions")
+                label = ("IMMEDIATELY PREVIOUS ACCEPTED BLOCK" if position == index - 1
+                         else "EARLIER ACCEPTED BLOCK" if done else "EARLIER BLOCK WITHOUT ACCEPTED VIDEO")
+                entry = f"{label}\nPlanned action: {previous.action}"
+                if done and position >= index - CONTEXT_PROMPTS:
+                    entry += ("\nBEGIN HISTORICAL PROMPT ACTUALLY SUBMITTED FOR THIS COMPLETED BLOCK\n"
+                              f"{selected.snapshot.prompt}\nEND HISTORICAL PROMPT")
+                accepted.append(entry)
         block = doc.blocks[index]
+        omitted = window.start
         past = "\n\n".join(accepted) or "First block."
+        if omitted:
+            past = f"({omitted} earlier blocks omitted.)\n\n{past}"
         future = doc.blocks[index + 1].action if index + 1 < len(doc.blocks) else "This is the final block."
         from ..generation.workflow import frames_for_duration
 
-        return (f"Story: {doc.name}\nOverall idea: {doc.idea}\n\nAccepted block intentions:\n"
+        # The idea often quotes requested dialogue; labelled as background so it is not spoken
+        # again in every block. Only this block's chosen instruction may carry spoken lines.
+        return (f"Story: {doc.name}\nOVERALL IDEA — BACKGROUND ONLY, NOT AN INSTRUCTION FOR THIS BLOCK:\n"
+                f"{doc.idea}\nEND BACKGROUND\nDo not speak any dialogue that appears in the overall "
+                "idea or in historical prompts. Only dialogue present in this block's chosen "
+                "instruction may be spoken; otherwise this block has no spoken lines (only natural "
+                "non-speaking mouth movement).\n\nAccepted block intentions:\n"
                 f"{past}\nThese are historical instructions for already completed videos, "
                 "not instructions for the current block. They describe what was requested; "
                 "the visual result may differ. Use them only to understand the preceding action "
@@ -452,6 +520,19 @@ class RoteiroBatch:
                 f"{frames_for_duration(block.duration_seconds)} frames.\n\nNext planned block: {future}\n"
                 "Do not repeat the previous block or perform the next block early.\n"
                 "Visual context: original identity and the ACTUAL final frame of the accepted parent, when present.")
+
+    def bridge_context(self, doc, index):
+        following = doc.blocks[index + 1]
+        with self.roteiro.observing():
+            attempt = self.roteiro.selected_attempt(doc, following.id)
+        return (f"{self.context(doc, index)}\n\n"
+                "DESTINATION — FOLLOWING EXISTING ACCEPTED VIDEO\n"
+                f"Planned action: {following.action}\n"
+                "BEGIN HISTORICAL PROMPT ACTUALLY SUBMITTED FOR THE FOLLOWING VIDEO\n"
+                f"{attempt.snapshot.prompt}\nEND FOLLOWING HISTORICAL PROMPT\n"
+                "This block is a bridge: start at the actual final frame of the preceding video "
+                "(image 2) and end at the actual FIRST frame of the following video (image 3). "
+                "Do not perform the following video's action.")
 
     async def stop(self, ident, batch_id):
         current = self.current()["batch"]

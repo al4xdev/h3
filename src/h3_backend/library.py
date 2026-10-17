@@ -287,12 +287,13 @@ class Library:
                     self.protect_edits(set(), documents, owner)
                     self.roteiro.check_revision(doc, revision)
                     selected = set()
-                    for attempt in doc.attempts:
-                        observed = self.roteiro.observed(attempt)
-                        if observed["state"] in {"uncertain", "queued", "running"}:
-                            raise Conflict("Uncertain native admission cannot be removed")
-                        if observed["admission"] == "admitted":
-                            selected.add(attempt.run_id)
+                    with self.roteiro.observing():
+                        for attempt in doc.attempts:
+                            observed = self.roteiro.observed(attempt)
+                            if observed["state"] in {"uncertain", "queued", "running"}:
+                                raise Conflict("Uncertain native admission cannot be removed")
+                            if observed["admission"] == "admitted":
+                                selected.add(attempt.run_id)
                 else:
                     selected = {ident}
                 directories, chosen = self.prepare(selected, documents, owner)
