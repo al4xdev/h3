@@ -58,4 +58,4 @@ def test_api_route_tree_completeness():
     assert "/notifications/register" in paths
     assert "/notifications/devices" in paths
     assert "/runs" in paths
-    assert "/roteiro" in paths
+    assert "/roteiros/summary" in paths

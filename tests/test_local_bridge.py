@@ -44,15 +44,13 @@ async def test_fixed_packaged_assets_config_and_read_only_requests(tmp_path, mon
     monkeypatch.setattr(service.media, "verify_image", forbidden)
     monkeypatch.setattr(service.media, "probe", forbidden)
     async with client(service) as http:
-        for path, mime in (("/", "text/html"), ("/index", "text/html"), ("/roteiro", "text/html"),
-                           ("/ui/app.css", "text/css"), ("/ui/app.js", "text/javascript")):
-            response = await http.get(path)
-            assert response.status_code == 200 and response.headers["content-type"].startswith(mime)
-            assert response.headers["x-content-type-options"] == "nosniff"
-            assert response.headers["referrer-policy"] == "no-referrer"
-            assert "script-src 'self'" in response.headers["content-security-policy"]
+        # The web frontend was removed; the Android app is the only client.
+        response = await http.get("/app/config")
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
         assert (await http.get("/favicon.ico")).status_code == 204
-        for path in ("/ui/models.py", "/ui/../api.py", "/.data/state/migration.json", "/assets/prompts/initial.md"):
+        for path in ("/", "/index", "/roteiro", "/ui/app.js", "/manifest.webmanifest", "/service-worker.js",
+                     "/ui/models.py", "/ui/../api.py", "/.data/state/migration.json", "/assets/prompts/initial.md"):
             assert (await http.get(path)).status_code == 404
         config = (await http.get("/app/config")).json()
         assert config == {"default_prompt": DEFAULT_PROMPT, "continuation_prompt": CONTINUATION_PROMPT,
