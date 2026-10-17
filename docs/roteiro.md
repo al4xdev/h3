@@ -1,279 +1,138 @@
-# Roteiro — planejar o conjunto e gerar em sequência
+# Roteiro — plan the whole sequence and generate in order
 
-**Implementado conforme o plano41.** Especificação aprovada: [telas v2](design/roteiro-telas.md), [fluxo e crítica](design/roteiro-fluxo.md) e [contrato JSON](design/roteiro-contrato.md). Validação fake/CPU e mobile emulado descrita abaixo; não foi feita nova inferência real.
+**Implemented in accordance with plan 41.** Approved specification: [screens v2](design/roteiro-telas.md), [flow and critique](design/roteiro-fluxo.md), and [JSON contract](design/roteiro-contrato.md). Fake/CPU validation and emulated mobile testing are described below; no new live inference was performed.
 
-## Usar
+## Usage
 
-1. Biblioteca →**Novo roteiro**, ou abrir diretamente `/roteiro` na ponte local.
-2. Selecionar referência própria e contar a ideia. Nome/quantidade/duração inicial ficam nas opções; duração atual padrão8s vem de capabilities.
-3. **Propor roteiro com Grok** ou **Escrever os blocos manualmente**. A proposta preenche ação, duração e instrução-base de todos os blocos; ainda não existem vídeos/pais/frames futuros.
-4. Conferir/editar no próprio cartão e **Usar este roteiro**. Salva plano no PC, não gera.
-5. **Preparar blocoN**: conferir identidade e, na continuação, o último frame REAL da tentativa aceita doN−1. Instrução-base já preenchida. **Detalhar** é opcional; candidato do Grok só entra no texto escolhido ao **Usar esta proposta**.
-6. **Gerar** salva o rascunho escolhido e envia exatamente aquela instrução/duração/seed/pai. Status e revisão são os mesmos do modo Freestyle.
-7. Aceitar/recusar explicitamente. Aceitar libera o próximo, mas não o prepara/gera sozinho. Recusado/interrompido tem retry com prompt FINAL literal e mesmo pai original; a tentativa antiga fica intacta.
-8. Todos aceitos →**Preparar montagem** →**Montar** explicitamente. Montagem usa a cadeia real, não os cartões planejados.
+1. Library → **New script**, or navigate directly to `/roteiro` on the local bridge.
+2. Select an owned reference and describe the idea. Name, block count, and initial duration are configured in options; the current 8s default duration is loaded from capabilities.
+3. **Propose script with Grok** or **Write blocks manually**. The proposal populates action, duration, and base instructions for all blocks; future videos, parents, and frames do not exist yet.
+4. Review/edit directly on the card and choose **Use this script**. This saves the plan on the PC without generating.
+5. **Prepare block N**: review identity and, for continuations, the REAL last frame of block N−1's accepted attempt. Base instructions are prefilled. **Detail** is optional; Grok candidates are applied to selected text only via **Use this proposal**.
+6. **Generate** saves the chosen draft and submits that exact instruction, duration, seed, and parent. Status tracking and review screens match Freestyle mode.
+7. Explicitly accept or reject. Acceptance unlocks the next block, but does not prepare or generate it automatically. Rejected or interrupted attempts offer retry using the literal FINAL prompt and the same original parent; previous attempts remain untouched.
+8. All blocks accepted → **Prepare assembly** → explicitly **Assemble**. Assembly stitches the actual accepted chain, not planned cards.
 
-**Novo freestyle** mantém o modo Freestyle, sem roteiro obrigatório. Não há um segundo motor de vídeo, dispatcher/fila ou outra implementação de revisão/montagem. Os mesmos painéis e handlers são compartilhados; apenas contexto e admissão de roteiro são acrescentados.
+**New freestyle** keeps Freestyle mode available without requiring a script. There is no secondary video engine, dispatcher, queue, or alternate review/assembly implementation. Panels and handlers are shared; only script context and admission logic are added.
 
-## Gerar os blocos restantes
+## Generate remaining blocks
 
-**Gerar os blocos restantes** gera todos os blocos nunca enviados, na ordem do
-roteiro, inclusive no meio. Cada trecho pendente continua da versão aceita
-selecionada do bloco anterior (o primeiro bloco do roteiro é I2V). Quando o bloco
-seguinte a um trecho já tem versão aceita, o último bloco do trecho é gerado como
-**bridge** até o primeiro frame dele, com o contexto Grok de edição (identidade +
-último frame do pai + primeiro frame do destino, configuração de `roteiro-edits`).
-Um bloco anterior recusado/sem versão aceita, revisões pendentes ou resultados
-incertos bloqueiam o lote com mensagem.
+**Generate remaining blocks** generates all blocks that have never been submitted, in script order, including blocks in the middle of a sequence. Each pending segment continues from the selected accepted version of the preceding block (the first script block runs via I2V). When the block following a segment already has an accepted version, the final block of that segment is generated as a **bridge** targeting its first frame, using Grok's edit context (identity + last frame of parent + first frame of target, configured under `roteiro-edits`). A rejected prior block, a block lacking an accepted version, pending reviews, or uncertain outcomes block batch execution with an informative message.
 
-A confirmação autoriza uma chamada ao Grok antes de cada bloco, o uso automático
-do texto melhorado e a aceitação técnica dos intermediários para encadear o próximo.
-Essa aceitação não certifica qualidade artística. O último fica pronto para revisão;
-a montagem continua sendo uma ação explícita separada.
+Confirmation authorizes one Grok call before each block, automatic application of refined text, and technical acceptance of intermediate blocks to chain the next one. Technical acceptance does not certify artistic quality. The final block remains ready for review; assembly remains a separate explicit action.
 
-O lote congela as instruções do editor sequencial e os blocos-base. Para cada etapa,
-registra a intenção do editor, envia identidade e, nas continuações, o último frame
-real do pai aceito; salva a resposta usada, atualiza apenas o prompt do bloco e gera
-com seed, duração e parâmetros registrados. Não envia texto cru como fallback.
-Intenções e respostas ficam em `.data/roteiro-batches/`, com IDs conhecidos antes
-das submissões. Erro, parada, desconexão incerta ou reinício não repetem provider/GPU.
+Batch execution freezes sequential editor instructions and base blocks. For each step, it records editor intent, passes identity and, for continuations, the real last frame of the accepted parent; it stores the response used, updates only the block prompt, and triggers generation with the recorded seed, duration, and parameters. It never falls back to raw text. Intents and responses are stored in `.data/roteiro-batches/` with IDs known prior to submission. Errors, halts, uncertain disconnections, or restarts do not repeat provider calls or GPU execution.
 
-`POST /roteiros/<id>/batches/<UUID>` exige `expected_revision`,
-`auto_accept_intermediate: true` e `enhance_with_grok: true`; responde 202.
-`GET` no mesmo endereço consulta o lote; `GET /roteiro-batches/current` descobre o
-estado global sem executar. SSE comunica mudanças de paths e a interface relê
-esses arquivos, sem polling de conclusão. Fechar a página não cancela o lote.
+`POST /roteiros/<id>/batches/<UUID>` requires `expected_revision`, `auto_accept_intermediate: true`, and `enhance_with_grok: true`; returns 202. `GET` on the same URL inspects batch progress; `GET /roteiro-batches/current` discovers global state without side effects. SSE broadcasts path updates and the client re-reads those files without polling for completion. Closing the browser does not abort the batch.
 
-## Continuar roteiro com Tail
+## Extend script with Tail
 
-Após concluir e aceitar todos os vídeos atuais, abra **Continuar roteiro · Tail**
-abaixo dos blocos. Escreva o que deve acontecer a seguir, escolha a quantidade,
-duração e seed, e peça a proposta ao Grok. O planejamento recebe a identidade
-original e o frame final real do último vídeo aceito, com saída JSON estruturada.
-O limite atual é de 1000 blocos no roteiro inteiro, incluindo os existentes.
+After finishing and accepting all current videos, click **Extend script · Tail** below the blocks. Describe what should happen next, choose block count, duration, and seed, and request a proposal from Grok. Planning receives original identity and the real final frame of the most recently accepted video, returning structured JSON. The current ceiling is 1,000 blocks across the entire script, including existing ones.
 
-Edite, reorganize ou remova os novos blocos e confirme a continuação. Essa ação
-acrescenta apenas o trecho novo: preserva os blocos, vídeos e tentativas anteriores
-e não inicia geração. Depois use **Gerar os blocos restantes**. Cada novo bloco
-passa novamente pelo editor com o frame real atualizado do anterior, usando o
-lote descrito acima. O último vídeo exige revisão; a montagem permanece explícita.
+Edit, reorder, or remove new blocks, then confirm continuation. This action appends only the new segment: existing blocks, videos, and attempts remain intact, and no generation is started. Next, use **Generate remaining blocks**. Each new block passes through the editor with the updated real frame of its predecessor using the batch workflow described above. The final video requires review; assembly remains explicit.
 
-A proposta e a adoção usam um UUID conhecido antes do envio e ficam registradas
-em `.data/roteiros/<id>/tail-<UUID>.json`. Consulte o mesmo pedido após perda de
-conexão; não reenvie uma intenção incerta. Mudanças no roteiro ou no vídeo de
-origem invalidam a adoção da proposta antiga. Planejamento mantém o limite de
-20000 tokens; melhoria de cada bloco mantém 12000. A interpolação entre duas
-âncoras continua no backlog.
+Proposal and adoption share a UUID established prior to submission, recorded at `.data/roteiros/<id>/tail-<UUID>.json`. Query the same request after connection loss; never re-submit an uncertain intent. Modifications to the script or source video invalidate adopting an older proposal. Planning enforces a 20,000-token ceiling; per-block prompt refinement maintains 12,000 tokens. Two-anchor interpolation remains in the backlog.
 
-`POST /roteiros/<id>/tail/<UUID>` planeja; `GET` consulta sem executar;
-`PUT` adota os novos blocos com a revisão de origem. Nenhuma dessas consultas
-gera vídeo. A validação usa clientes falsos e mídia CPU, sem inferência real.
+`POST /roteiros/<id>/tail/<UUID>` plans; `GET` inspects without executing; `PUT` adopts new blocks referencing the source revision. None of these read operations generate video. Validation uses fake clients and CPU media fixtures without live inference.
 
-## Roteiros longos (contrato do app)
+## Long scripts (application contract)
 
-- `GET /roteiros/summary` → `{items:[{id, name, idea, adopted, revision, block_count,
-  states:{accepted, ready_for_review, active, failed, planned}, strip:[estado por bloco],
-  updated_at}], total}`. Estado do bloco = versão selecionada (ou última tentativa):
-  `queued/running/uncertain` → `active`; `rejected/interrupted/failed/not_admitted` →
-  `failed`; sem tentativa → `planned`. `updated_at` = maior entre o mtime de `plan.json`
-  e o `updated_at` dos runs observados.
-- `POST /roteiros/<id>/blocks/<block_id>/remove` `{expected_revision}` → roteiro. O bloco
-  sai de `blocks`/`selected_runs`; com tentativas vai para `removed_blocks` (vídeos,
-  tentativas e decisões preservados). Bloqueado por tentativa ativa/incerta, vídeo do
-  próprio bloco aguardando revisão, lote ativo ou edição pendente. Depois, as versões
-  aceitas ficam fixadas em `selected_runs` (modo editorial).
-- `PUT /roteiros/<id>`: a subsequência de blocos com tentativas deve ficar idêntica e na
-  mesma ordem; blocos nunca enviados podem ser inseridos, editados, reordenados ou apagados.
-- `POST /roteiros/<id>/segments/<UUID>` `{expected_revision, after_block_id|null, idea,
-  count, duration_seconds, seed}` planeja blocos para inserir (sem gravar o roteiro);
-  `GET` no mesmo ID recupera. O app adota inserindo os blocos via `PUT`.
-- `Generate` aceita `target_run_id` opcional: bridge até a versão aceita selecionada do
-  bloco seguinte.
+- `GET /roteiros/summary` → `{items:[{id, name, idea, adopted, revision, block_count, states:{accepted, ready_for_review, active, failed, planned}, strip:[per-block state], updated_at}], total}`. Block state = selected version (or latest attempt): `queued/running/uncertain` → `active`; `rejected/interrupted/failed/not_admitted` → `failed`; no attempts → `planned`. `updated_at` = maximum between `plan.json` mtime and `updated_at` of observed runs.
+- `POST /roteiros/<id>/blocks/<block_id>/remove` `{expected_revision}` → updated script. The block is removed from `blocks` and `selected_runs`; if it has attempts, it moves to `removed_blocks` (videos, attempts, and decisions preserved). Blocked if any attempt is active/uncertain, if the block's video is awaiting review, if a batch is active, or if an edit is pending. Accepted versions subsequently lock into `selected_runs` (editorial mode).
+- `PUT /roteiros/<id>`: the subsequence of blocks with attempts must remain identical and in original order; never-submitted blocks can be inserted, edited, reordered, or deleted.
+- `POST /roteiros/<id>/segments/<UUID>` `{expected_revision, after_block_id|null, idea, count, duration_seconds, seed}` plans blocks for insertion (without saving the script); `GET` on the same ID retrieves the result. The app adopts by inserting blocks via `PUT`.
+- `Generate` accepts optional `target_run_id`: creates a bridge targeting the selected accepted version of the following block.
 
-### Planejamento (proposta, Tail e segmento)
+### Planning (initial proposal, Tail, and segments)
 
-Cadeia de chamadas estreitas, com o mesmo modelo fixo. A tarefa e o formato vão na
-mensagem e no schema. O narrador não reenvia o system prompt antigo que pedia um
-JSON único de todos os blocos:
+A pipeline of focused calls using the same pinned model. Task and format are specified in message content and JSON schema. The planner does not reuse the legacy system prompt that requested a single JSON object for all blocks:
 
-1. **Script** (`h3_roteiro_script`): uma chave, um fragmento. Eventos com intenção,
-   fala opcional, e listas distintas de corpo, expressão e delta. Sem segundos e sem
-   prompt de vídeo.
-2. **Paleta** (`h3_roteiro_palette`), só se alguma lista for mais curta que os slots
-   daquele evento: uma chave por evento curto. Não copia item por módulo.
-3. Relógio no código: piso e teto por evento; o que sobra vira approach/hold do mesmo
-   evento. Duração de todo bloco = a pedida. Uma fala, um slot, com o placeholder
-   hardcoded do sotaque sulista; os outros recebem `Sem fala.`
-4. **Cartões** (`h3_roteiro_card`): uma chave por slot, um fragmento string. Até 4 em
-   paralelo, uma tentativa. `run_pos_prompt` não entra. A instrução resultante é o
-   que o melhorador já expande; o melhorador não muda.
+1. **Script** (`h3_roteiro_script`): one key, one fragment. Events with intent, optional speech, and distinct lists for body movement, facial expression, and delta. No seconds and no video prompt.
+2. **Palette** (`h3_roteiro_palette`), only if any list is shorter than slots in that event: one key per short event. Does not copy items across modules.
+3. Code-driven timing: floor and ceiling per event; remaining duration becomes approach/hold for that event. Total block duration matches requested duration. One speech entry per slot, with hardcoded southern accent placeholder; other slots receive `Sem fala.` ("No speech.").
+4. **Cards** (`h3_roteiro_card`): one key per slot, one string fragment. Up to 4 in parallel, single attempt. `run_pos_prompt` is excluded. The resulting instruction feeds prompt enhancement; the enhancer remains unchanged.
 
-O resultado guarda `draft_scenes`, `scenes`, `slices` e os `raw_texts` das chamadas
-feitas. `vision` fica vazio: o melhorador não recebe ensaio de câmera nesta etapa.
-Falha da primeira chamada por rede ou cancelamento deixa o pedido incerto; falha
-posterior deixa `invalid`. Sem retry automático.
+The result stores `draft_scenes`, `scenes`, `slices`, and `raw_texts` from executed calls. `vision` remains empty: the prompt enhancer receives no camera blocking rehearsals in this step. If the initial call fails due to network or cancellation, the request remains uncertain; subsequent failures mark it `invalid`. No automatic retry.
 
-## Converter Freestyle para roteiro
+## Convert Freestyle to script
 
-Em **Operações → Converter para roteiro**, a origem é a sequência completa já aberta,
-incluindo seus blocos posteriores quando um ancestral está selecionado. A conversão
-usa os prompts efetivamente enviados como instruções/ações, copia seed e duração,
-herda a identidade original e registra a procedência dos runs existentes. Não copia
-nem reexecuta vídeos, não chama Grok e não altera decisões nativas.
+Under **Operations → Convert to script**, the source is the complete currently opened sequence, including downstream blocks when an ancestor is selected. Conversion uses prompts actually sent as instructions/actions, copies seeds and durations, inherits original identity, and records provenance for existing runs. It does not copy or re-execute videos, call Grok, or modify native decisions.
 
-`POST /roteiros/from-freestyle/<fim>` recebe um `roteiro_id` conhecido pelo cliente.
-Em resposta perdida, `GET /roteiros/<roteiro_id>` consulta esse mesmo resultado;
-não há nova conversão automática. Só fontes com pedido nativo imutável, cadeia e
-metadados comprovados podem ser adotadas. Legado sem essa prova, identidade alterada,
-mídia substituída, parâmetros incompatíveis ou propriedade de outro roteiro bloqueiam
-a conversão com erro. Evidência de mídia inclui hash e identidade do arquivo, sem
-decodificar pixels nem alterar a origem.
+`POST /roteiros/from-freestyle/<end>` accepts a `roteiro_id` established by the client. On dropped responses, `GET /roteiros/<roteiro_id>` queries that result; no automatic re-conversion occurs. Only sources backed by immutable native requests, verified chains, and confirmed metadata can be adopted. Legacy data lacking verification, altered identities, replaced media, incompatible parameters, or ownership by another script block conversion with an error. Media verification checks file hashes and filesystem identity without decoding pixels or modifying source files.
 
-## Parar uma geração
+## Stop a generation
 
-Os avisos da biblioteca e os cartões Freestyle ativos oferecem **Parar**. A confirmação
-acontece no próprio cartão: preenchimento curto da esquerda para a direita, **Cancelar**
-em verde e **Confirmar parada** em vermelho. Abrir/cancelar não envia pedidos; o
-segundo clique confirma a parada. Movimento reduzido e mudança dinâmica de preferência
-cancelam a animação sem alterar a confirmação ou o estado do pedido.
+Library notices and active Freestyle cards provide **Stop** controls. Confirmation occurs directly on the card: a short left-to-right fill animation, **Cancel** in green, and **Confirm stop** in red. Opening or cancelling sends no requests; the second click confirms stopping. Reduced motion preferences and dynamic preference switches cancel the animation without affecting confirmation or request state.
 
-`POST /runs/<UUID>/stop` e `POST /roteiros/<id>/batches/<UUID>/stop` aceitam `{}`.
-Somente o worker próprio pode ser interrompido; parar um filho do lote interrompe
-o lote inteiro. A operação acompanha o encerramento mesmo se o cliente desconectar.
-Sem ID ou resultado confirmado, a interface mantém a incerteza e consulta o mesmo
-endereço, sem repetir POST. Não limpa filas, modelos, caches ou processos globais.
+`POST /runs/<UUID>/stop` and `POST /roteiros/<id>/batches/<UUID>/stop` accept `{}`. Only owned worker processes can be interrupted; stopping a batch child terminates the entire batch. The operation tracks shutdown even if the client disconnects. Without a confirmed ID or outcome, the UI preserves uncertainty and queries the same endpoint without repeating POST. It does not flush global queues, models, caches, or external processes.
 
-## Estado e recuperação
+## State and recovery
 
-- `.data` fica no PC. Plano em `.data/roteiros/<UUID>/plan.json`, candidatos próprios no mesmo diretório, configuração do roteirista `.data/roteiros/editor.json`.
-- `GET` não grava configuração, chama provider ou admite geração. `PUT` de plano/configuração é explícito, com revisão esperada; conflito preserva a edição, não sobrescreve silenciosamente.
-- Nome/ação/duração/prompt do plano não são prova de obediência do vídeo. Aceitação/artístico e pose/roupa do frame real permanecem decisões/evidência concretas.
-- Chave planejada identifica uma posição, não um Run futuro. No clique Gerar, a intenção ganha UUID conhecido; servidor salva snapshot e reserva marcador `.data/roteiros/.locks/<UUID>.json` antes de admitir.
-- O **mesmo UUID** é admitido pelo pipe nativo. Falha/perda da resposta não deixa o app sem endereço de consulta: `GET /roteiros/<id>/blocks/<key>/attempts/<intentUUID>`.
-- Leitura reconcilia marcador+pedido nativo imutável+manifest atual+snapshot+provas de identidade/pai/cadeia. Corrupto/ausente após intenção persistida é **incerto**, nunca autorização de novoPOST. POST duplicado409 não reenvia.
-- Toda falha de admissão do roteiro, inclusive400/404/409/422, conserva o bloqueio até consultar a intenção própria. HTTP4xx sozinho não prova ausência de execução. **Consultar envio** só lê quando roteiro/bloco/intenção correspondem exatamente ao contexto atual; não consulta um UUID antigo de outro bloco.
-- Rejeição confirmada pelo GET e histórico (`admission: rejected`, `state: not_admitted`, `run: null`) oferece **Preparar novo envio**. Copia o snapshot literal para rascunho isolado, incluindo referência/SHA, seed, duração e pai original aceito. Consultar, recarregar e preparar não fazem POST/PUT nem criam UUID; só Gerar cria a nova intenção. O registro recusado permanece intacto.
-- Prefixo enviado e decisões antigas ficam congelados. Ajuste de retry é snapshot novo, não edição do passado. Futuro não enviado pode ser editado/organizado sem gerar; não atravessar posições enviadas.
-- URL `/roteiro?roteiro=<UUID>` conserva endereço do plano; block/intent e pending_roteiro/pending_block/pending_intent conservam proprietário da intenção em navegação/reload. Não usar browserstorage como outra autoridade. Rascunho local ainda não salvo continua transitório.
+- `.data` lives on the PC. Plans reside at `.data/roteiros/<UUID>/plan.json`, candidate proposals in the same directory, and writer configuration at `.data/roteiros/editor.json`.
+- `GET` requests never write configuration, call providers, or admit generation jobs. `PUT` for plans or configuration is explicit with expected revisions; conflicts preserve local edits rather than overwriting silently.
+- Names, actions, durations, and prompts in plans do not prove visual adherence in video. Acceptance, artistic approval, and pose/attire in actual frames remain concrete decisions and evidence.
+- A planned key identifies a slot, not a future Run. Upon clicking Generate, the intent receives a known UUID; the server saves a snapshot and reserves `.data/roteiros/.locks/<UUID>.json` before admission.
+- The **same UUID** is admitted by the native pipeline. Connection drops or missed responses retain queryable endpoints: `GET /roteiros/<id>/blocks/<key>/attempts/<intentUUID>`.
+- Read operations reconcile lock marker, immutable native request, current manifest, snapshot, and identity/parent/chain proofs. Corrupted or missing data following a persisted intent is treated as **uncertain**, never authorizing a new POST. Duplicate 409 POSTs do not resubmit.
+- Any script admission failure, including 400, 404, 409, or 422, maintains the lock until the intent endpoint is queried. HTTP 4xx alone does not prove the absence of execution. **Check submission** queries only when script, block, and intent match current context exactly; it never queries an older UUID from a different block.
+- Rejection confirmed via GET and history (`admission: rejected`, `state: not_admitted`, `run: null`) displays **Prepare new submission**. This copies the literal snapshot into an isolated draft, including reference/SHA, seed, duration, and original accepted parent. Querying, reloading, and preparing issue no POST/PUT requests and allocate no UUIDs; only Generate creates a new intent. The rejected record remains intact.
+- Submitted prefixes and prior decisions remain frozen. Retry adjustments produce new snapshots rather than rewriting past records. Unsubmitted future blocks can be edited or reorganized without generating; never bypass submitted positions.
+- URL `/roteiro?roteiro=<UUID>` retains plan location; block/intent and pending parameters retain intent ownership across navigation and reloads. Do not use browser storage as a secondary authority. Unsaved local drafts remain transient.
 
-## Editor e identidade
+## Editor and identity
 
-Roteirista tem configuração própria. O enhancer de bloco continua usando seu sistema custom atual, modelo fixo e endpoint `/grok`, com intenção geral/past-intents/current/next e duração. Texto de passado é **intenção**, não alegação de fato visual. Continuação envia identidade original + frame do pai aceito pelo adaptador existente, sem PNG inventado, override de path ou fallback silencioso para uma imagem.
+The script writer has its own configuration. The per-block enhancer continues using its current custom system, pinned model, and `/grok` endpoint, passing overall intent, past intents, current, next, and duration. Historical text represents **intent**, not claims of visual ground truth. Continuation sends original identity + accepted parent frame through the existing adapter, without synthetic PNGs, path overrides, or silent fallback to a single image.
 
-Nos ajustes, **Vídeos sequenciais** e **Roteiro completo** são seções recolhíveis,
-com campos e ações de salvar independentes. Vídeos sequenciais usa
-`.data/grok/editor.json` e devolve a instrução textual de um bloco. Roteiro completo
-usa `.data/roteiros/editor.json` e recebe a ideia, nome, quantidade e duração inicial,
-além da referência original. Os prompts padrão e contextos acrescentados pelo
-aplicativo são escritos em inglês; ideias, instruções já enviadas e falas literais
-do usuário são preservadas. O transporte Responses pede `text.format` com
-`type: json_schema`, `strict: true` e o schema do roteiro, incluindo o número exato
-de blocos. A validação local continua obrigatória; erro ou resposta incompleta não
-provoca nova chamada ou fallback para texto livre.
+In settings, **Sequential videos** and **Full script** are collapsible sections with independent inputs and save triggers. Sequential videos uses `.data/grok/editor.json` and returns text instructions for a single block. Full script uses `.data/roteiros/editor.json` and accepts idea, name, count, initial duration, and original reference. Default prompts and contextual additions generated by the app are written in English; user ideas, previously submitted instructions, and literal user dialogue are preserved. Responses transport requests `text.format` with `type: json_schema`, `strict: true`, and the script schema, including exact block counts. Local validation remains mandatory; errors or truncated responses do not trigger retries or freeform text fallbacks.
 
-A migração explícita `tools/migrate_grok_prompts.py` preserva exatamente a
-configuração de vídeos sequenciais, exige os hashes esperados dos dois arquivos e
-salva cópias privadas antes de trocar apenas o prompt de roteiro completo. Não
-acessa OAuth, altera modelo ou chama o provider. Nova edição do usuário impede
-substituição pela migração; uma configuração já migrada não é regravada.
+The explicit migration script `tools/migrate_grok_prompts.py` preserves sequential video settings verbatim, verifies expected hashes for both files, and saves private backups before updating only the full script prompt. It does not touch OAuth files, alter models, or call providers. Subsequent user edits prevent migration overwrites; an already migrated configuration is not rewritten.
 
-Configuração/transportador reutilizados não autorizam acessar OAuth, refresh ou inferência em startup/SSE/tests. Modelo permanece `grok-4.20-0309-non-reasoning`. A autorização real37 de uma chamada já foi consumida; esta implementação usa somente fakes.
+Reused configurations and transports do not authorize OAuth access, token refreshes, or live inference during startup, SSE, or tests. Model remains pinned to `grok-4.20-0309-non-reasoning`. The live authorization from plan 37 was fully consumed; this implementation relies strictly on fakes.
 
-Antes de materializar, o pipe compara a projeção original source_root/path/SHA do roteiro com a prova nativa recém calculada. Troca de bytes entre preflight e admissão rejeita antes de Store.create/worker. Setters fluentes de UUID/prova são puros, opcionais e não alteram schema público/parâmetros dos blocos Freestyle.
+Prior to materialization, the pipeline verifies the script's projected source_root/path/SHA against newly computed native proof. Byte mismatches between preflight and admission reject execution prior to Store creation or worker dispatch. Fluent setters for UUIDs and proofs are pure, optional, and do not mutate public schemas or parameters of Freestyle blocks.
 
-## Apagar itens da biblioteca
+## Deleting items from the library
 
-Os cartões de **Roteiros** e **Freestyle**, e suas telas de detalhe, oferecem
-**Apagar**. A confirmação solicita uma remoção real de mídia própria: arquivos são
-transferidos para um diretório privado novo `/tmp/h3-trash-*`, com registro da
-operação. Referências compartilhadas, assets versionados, dados legados e arquivos
-do ComfyUI permanecem intactos. Pequenos manifests, pedidos, decisões e marcadores
-de remoção ficam em `.data` para preservar procedência e impedir replay de UUID.
+Cards for **Scripts** and **Freestyle**, as well as their detail views, provide **Delete** actions. Confirmation initiates real removal of owned media: files are relocated to a new private directory `/tmp/h3-trash-*`, with operation logging. Shared references, versioned assets, legacy data, and ComfyUI files remain untouched. Compact manifests, requests, decisions, and tombstone markers remain in `.data` to preserve provenance and prevent UUID reuse.
 
-`DELETE /runs/<UUID>` não aceita body; `DELETE /roteiros/<UUID>` exige
-`{"expected_revision": <revisão atual>}`. Apagar roteiro inclui mídias das suas
-tentativas confirmadas e montagens próprias. Uso por outro roteiro, continuação
-externa ou montagem compartilhada bloqueia a remoção. Geração/montagem ativa ou
-admissão incerta também bloqueiam. A operação usa o slot local existente, sem
-controlar o ComfyUI, e guarda evidência de falha/rollback sem repetição automática.
-Itens removidos deixam os catálogos e leituras públicas; uma abertura antiga não
-recria vídeos nem libera IDs já utilizados.
+`DELETE /runs/<UUID>` accepts no request body; `DELETE /roteiros/<UUID>` requires `{"expected_revision": <current revision>}`. Deleting a script removes media from its confirmed attempts and owned assemblies. Active references by another script, external continuations, or shared assemblies block deletion. Active generation, ongoing assembly, or uncertain admission also block removal. The operation acquires the existing local slot without controlling ComfyUI, logging failure/rollback evidence without auto-retrying. Deleted items disappear from catalogs and public GET endpoints; accessing an older view will not regenerate videos or recycle used IDs.
 
-## Navegação e sequência aberta
+## Navigation and active sequence
 
-**Estúdio local**, no topo, abre a biblioteca. A revisão de uma tentativa de roteiro
-retorna à tela de todos os blocos pelo **Voltar**. Rascunhos e pedidos em andamento
-ou incertos mantêm seus registros e bloqueios ao navegar.
+**Local Studio** at the top returns to the library. Reviewing a script attempt returns to the all-blocks view via **Back**. Drafts, active jobs, and uncertain submissions maintain their state records and UI locks across navigation.
 
-O gesto de voltar começa na borda esquerda e segue para a direita, usando a mesma
-navegação do botão. Rolagem vertical, múltiplos toques, gesto cancelado e interação
-com campos, vídeos, controles ou a linha de continuidade não acionam essa navegação.
+The back swipe gesture initiates at the left edge and travels rightward, triggering the same navigation as the button. Vertical scrolling, multi-touch inputs, cancelled gestures, and interactions with input fields, video players, controls, or the continuity line do not trigger navigation.
 
-Ao selecionar um ancestral na linha de continuidade, a sequência já aberta mantém
-seu último bloco explícito: abrir o bloco 12 e selecionar o 7 mantém os doze cartões
-visíveis. Esse contexto visual não substitui a cadeia real da seleção: continuar e
-montar seguem usando o bloco selecionado e seus próprios ancestrais. Outra
-ramificação precisa ser aberta explicitamente; não há escolha automática de filho
-ou resultado mais recente.
+Selecting an ancestor on the continuity line keeps the active sequence view pinned to its explicit last block: opening block 12 and selecting block 7 keeps all twelve cards visible. This visual context does not override the active selection chain: continuing or assembling uses the selected block and its direct ancestors. Alternate branches must be opened explicitly; there is no automatic selection of downstream children or newer results.
 
-## Limites operacionais, não qualidade/performance
+## Operational limits, not quality/performance metrics
 
-- Até1000blocos por documento (lote, Tail, segmento, edição e montagem editorial); cadeia da montagem freestyle continua100; listagem até1000roteiros; metadata porarquivo≤16MiB inclusive histórico. Rejeitar excesso, não descartar história.
-- Cada texto bruto do planejamento≤512KiB. JSON estrito, número de blocos exato; sem interpretar Markdown/HTML, clamp ou seed/ID arbitrário do provider.
-- Ação/instrução até12000caracteres; contexto manual até12000 e contexto integral do lote até100000. Erro preserva texto, sem truncamento silencioso.
-- Original de roteiro usa o contexto compatível com editor: JPEG/PNG próprio até20MiB/16MP. WebP nativo Freestyle permanece conforme contrato anterior.
-- Duração porbloco requested(0,10], até2casas,24fps/5+17k/Pythonhalf-even. Default8s→192frames/8s; benchmark2.3→56frames/2.333s permanece congelado. Tail3/audioTrue independentes. Não certifica qualidade, VRAM/RAM ou geração longa real.
-- RAM continua apenas telemetria. Nenhuma admissão/cancelamento por RAM livre, nenhum controle de cache/processo/lifecycle do ComfyUI/script do dono.
+- Up to 1,000 blocks per document (batch, Tail, segment, editing, and editorial assembly); Freestyle assembly chain remains capped at 100; catalog listings up to 1,000 scripts; metadata files ≤ 16 MiB including history. Reject excess rather than truncating history.
+- Raw planning text capped at ≤ 512 KiB per call. Strict JSON, exact block counts; no parsing Markdown/HTML, clamping values, or accepting arbitrary seeds/IDs from providers.
+- Action and instruction fields up to 12,000 characters; manual context up to 12,000 characters, and full batch context up to 100,000 characters. Errors preserve existing text without silent truncation.
+- Script original media uses editor-compatible context: owned JPEG/PNG up to 20 MiB / 16 MP. Native Freestyle WebP support continues under prior contracts.
+- Per-block duration requested in `(0, 10]`, up to 2 decimal places, 24 fps, `5 + 17k`, `Python half-even`. Default 8s → 192 frames / 8s; frozen benchmark 2.3s → 56 frames / 2.333s remains fixed. Parent tail 3s and audio true remain independent. Does not certify visual quality, VRAM/RAM safety, or long-form generation stability.
+- RAM tracking remains observational telemetry. No admissions or cancellations based on free RAM; no intervention into ComfyUI memory, caches, processes, lifecycle, or the user's external script.
 
-## Validação e evidência
+## Validation and evidence
 
-Atualização de avisos, favoritos e PWA em 2026-10-13: **933 testes Python**
-fake/CPU e **236 testes Node** passaram; Ruff e whitespace check aprovados.
-Inclui reconciliação do mesmo pedido após desconexão, decisão ainda incerta
-preservada, dispensa sem apagar/repetir, favoritos atômicos compartilhados,
-resumos limitados, paginação lazy de12 sem perder atualização SSE, PWA sem cache
-de API/mídia/operações e reconexão preservando os IDs da URL. Os textos das listas
-ficam em três linhas e os ícones de favorito/apagar têm área de toque44px.
-O ícone próprio foi gerado pela ferramenta nativa image_gen; original e exportações
-estão em `src/h3_backend/web/`, com prompt em `icon-provenance.json`.
-Logs em `.dumps/tasks/notices-pwa-library-pytest.txt` e
-`notices-pwa-library-node-tests.txt`. Sem nova chamada ao Grok/GPU, reinício de
-servidor de produção ou nova captura visual automatizada. Instalação PWA no
-celular requer HTTPS confiável; fullscreen e fechamento animado do dropdown
-dependem do suporte do navegador.
+Notices, favorites, and PWA updates on 2026-10-13: **933 Python tests** (fake/CPU) and **236 Node tests** passed; Ruff and whitespace checks passed. Validated features include reconnect reconciliation on the same request, preservation of uncertain decisions, dismissal without deletion or replay, shared atomic favorites, bounded summaries, lazy pagination (12 items) without dropping SSE updates, PWA service worker with zero caching of API/media/operations, and reconnection preserving URL IDs. List entries display across three lines, and favorite/delete icons have 44px tap targets. The custom icon was generated via native image_gen; original and exported assets reside in `src/h3_backend/web/`, with prompt documented in `icon-provenance.json`. Test outputs recorded in `.dumps/tasks/notices-pwa-library-pytest.txt` and `notices-pwa-library-node-tests.txt`. No live Grok/GPU calls, production server restarts, or automated browser captures were executed. Mobile PWA installation requires trusted HTTPS; fullscreen mode and animated dropdown collapses depend on browser platform support.
 
-Atualização de lote, Freestyle e parada em 2026-10-13: **924 testes Python**
-fake/CPU e **209 testes Node** passaram; Ruff e whitespace check aprovados.
-Inclui melhoria Grok obrigatória por bloco, ausência de fallback/replay, descoberta
-passiva do lote, conversão com provas de mídia, navegação e gesto de retorno,
-confirmação inline e cancelamento com publicação em disco concluída antes de liberar
-o slot. Logs locais em `.dumps/tasks/freestyle-batch-pytest.txt` e
-`freestyle-batch-node-tests.txt`. Não houve chamada real ao provider/GPU,
-início/reinício do servidor de produção ou nova captura visual no navegador.
+Batch, Freestyle, and stop updates on 2026-10-13: **924 Python tests** (fake/CPU) and **209 Node tests** passed; Ruff and whitespace checks passed. Includes mandatory per-block Grok prompt refinement, absence of fallback/replay, passive batch discovery, media proof-checked conversion, back swipe navigation, inline stop confirmations, and clean cancellation with disk publishing completed prior to releasing execution slots. Logs stored in `.dumps/tasks/freestyle-batch-pytest.txt` and `freestyle-batch-node-tests.txt`. No live provider/GPU calls, production server restarts, or new browser visual captures were made.
 
-Atualização de biblioteca, prompts e navegação em 2026-10-13: **889 testes Python**
-fake/CPU e **185 testes Node** passaram; Ruff e whitespace check aprovados. Inclui
-exclusão de roteiro com tentativa nativa e montagem falsas, preservação dos arquivos
-de origem, restart sem replay, dependências compartilhadas, rollback, migração
-privada/atômica, payload de JSON Schema, navegação 12→7 sem truncamento, falha de
-leitura do fim da sequência, respostas atrasadas e histórico de itens apagados.
-A configuração local do roteiro completo foi migrada para inglês com snapshot;
-o hash da configuração sequencial permaneceu exatamente igual. Logs locais em
-`.dumps/tasks/library-grok-pytest.txt` e `library-grok-node-tests.txt`. Não houve
-provider/GPU ou início/reinício de servidor de produção. Esta atualização não
-inclui nova captura visual em navegador; a evidência mobile abaixo é histórica.
+Library, prompts, and navigation updates on 2026-10-13: **889 Python tests** (fake/CPU) and **185 Node tests** passed; Ruff and whitespace checks passed. Validated script deletion with mock native attempts and assemblies, preservation of source files, restart without replay, shared dependencies, rollbacks, atomic private migrations, JSON Schema payloads, non-truncating 12→7 navigation, sequence tail read failures, delayed responses, and tombstones for deleted items. Local full-script configuration was migrated to English with backup snapshots; sequential configuration hash remained byte-identical. Logs saved in `.dumps/tasks/library-grok-pytest.txt` and `library-grok-node-tests.txt`. Zero provider, GPU, or production server activity. This update did not include new browser visual captures; mobile evidence below is historical.
 
-Validação concluída sem iniciar APIreal H3, provider ou GPU:
+Prior test suite completed without starting live H3 APIs, external providers, or GPUs:
 
-- **859 testes pytest** fake/CPU, cache-free; Ruff aprovado. Inclui persistência, ownership, prefixo congelado, admissão com UUID/prova de identidade e contratos da ponte. Uma advertência de depreciação existente do Starlette permanece.
-- **171 testes Node puros**:43 do front nativo,84 de retry e44 de roteiro. Incluem todos os4xx de roteiro bloqueados até GET próprio e preservação do comportamento Freestyle.
-- **Browser nativo**, Chromium headless,393×852/DPR2/mobile/touch, pt-BR, tema escuro. Navegação normal e reduced-motion, rolagem touch e viewport320px; bancada sem overflow horizontal, CTA de geração48px. Isso é emulação, não teste de aparelho físico ou de teclado/picker do sistema.
-- Fixture HTTP loopback independente, com buffers web congelados porSHA e mídia existente em allowlist; nenhuma importação/inicialização do produto. A rodada final usou `app.js` SHA`b688d3bc2f5efb24ce40cfc9375aa6b4d196d0d1a6d1e116577b882d90f94da2`.
-- Rodada final: macro preenchido/adotado → raiz aceita →409 de continuação bloqueado →GET/reload/preparação sem reenviar →novoUUID com snapshot idêntico e mesmo pai, semPUT do prefixo →aceitação →terceiro bloco com8.1s/seed0 →montagem explícita da cadeia aceita. Foram4 intenções/3 esperas próprias; uma intenção foi recusada semRun. Salvar sistema do roteirista enviou somente`system_prompt`, semPUT do enhancer.
-- Uma rodada anterior também verificou detalhamento opcional com dois contextos, adoção explícita e retry de tentativa rejeitada: preservou espaços/newline do prompt final, novoUUID e mesmo pai original, sem nova chamada ao Grok ao preparar/copiar. Essa rodada antecede os dois guards finais de consulta/4xx; não é apresentada como navegador da versão final desses guards.
+- **859 pytest cases** (fake/CPU, cache-free); clean Ruff linting. Covered persistence, ownership validation, frozen prefix handling, UUID/proof-based admissions, and bridge contracts. One existing Starlette deprecation warning remains.
+- **171 pure Node tests**: 43 frontend unit tests, 84 retry tests, and 44 script tests. Validated that all 4xx script errors remain blocked until queried via intent endpoint, preserving Freestyle behavior.
+- **Native browser suite**, headless Chromium, 393×852 (DPR 2, mobile touch emulation), pt-BR locale, dark theme. Normal and reduced motion, touch scrolling, and 320px viewport tests; workbench showed zero horizontal overflow, generation CTA met 48px hit target. This represents emulation, not physical hardware testing of system keyboards or native pickers.
+- Independent loopback HTTP fixture with SHA-locked web buffers and allowlisted test media; no live product imports or startup. Final test run evaluated `app.js` SHA `b688d3bc2f5efb24ce40cfc9375aa6b4d196d0d1a6d1e116577b882d90f94da2`.
+- End-to-end simulated run: macro populated and adopted → root accepted → continuation 409 blocked → GET/reload/preparation without resubmission → fresh UUID with identical snapshot and parent, without modifying prefix via PUT → accepted → third block with 8.1s / seed 0 → explicit assembly of accepted chain. Covered 4 intents across 3 monitored waits; one intent was rejected without Run creation. Saving writer settings transmitted only `system_prompt`, without issuing PUT to the enhancer.
+- A preceding test run verified optional refinement across two contexts, explicit adoption, and retry of rejected attempts: preserved whitespace/newlines in final prompt, generated a new UUID with original parent, and avoided repeated Grok calls during preparation. This preceded the final two query/4xx guards and is not presented as verifying them.
 
-Capturas finais inspecionadas: [bancada de continuação](design/roteiro-workbench-mobile.png) e [ajustes do rascunho](design/roteiro-settings-mobile.png), ambas em reduced-motion. A foto preta é a identidade original; o frame vermelho é um frame real existente usado pela fixture, não a saída de uma nova geração nem prova de que o bloco planejado terminou de costas.
+Final inspected visual artifacts: [continuation workbench](design/roteiro-workbench-mobile.png) and [draft settings](design/roteiro-settings-mobile.png), both captured under reduced motion. The black photo represents the original identity; the red frame is an existing real video frame used by the fixture, not output from a new generation run or proof that the planned block completed facing backwards.
 
-**Limites da evidência:** a fixture entrega um clip histórico de56frames e um filme histórico de168frames/7s. Seus metadados simulados não são probes desses arquivos; montagem usa um valor fixo576 mesmo na rodada com8.1s. Não certificam8s reais,593frames montados, obediência artística, identidade facial, memória, qualidade ou performance. O recorder nativo devolveu vídeo parcial com`BACKEND_UNAVAILABLE`; não foi promovido a demonstração/GIF concluído nem contornado por outro harness. Erros de página no documento final: nenhum. Logs/JSONs de requests ficaram localmente em `.dumps/tests/ui-roteiro/`.
+**Evidence limits:** the test fixture serves a historical 56-frame clip and a historical 168-frame (7s) video. Simulated metadata entries are not live probes of those files; assembly metrics use a fixed 576 value even during 8.1s test runs. These do not prove live 8s generation, 593 assembled frames, artistic continuity, facial identity, memory bounds, visual quality, or performance. The native screen recorder returned a truncated video marked with `BACKEND_UNAVAILABLE`; it was not promoted as a completed demo/GIF or bypassed via alternate harnesses. Page console errors in the final document: zero. Request logs and JSON dumps are stored locally under `.dumps/tests/ui-roteiro/`.
 
-O catálogo atual não oferece `advanced.routes` de interceptação. O harness Playwright preparado em `tests/frontend_roteiro_browser_mock.mjs` **não foi executado** após essa mudança de protocolo; sintaxe/preparação de fixtures não valem PASS de navegador. Capturas/interações devem usar somente tool nativa e fixture dedicada readonly dos assets/media selecionados. Logs da fixture e diagnostics suportados registram requests; não alegar interceptação externa da sessão ou device físico.
+The current catalog does not expose `advanced.routes` for network interception. The Playwright harness in `tests/frontend_roteiro_browser_mock.mjs` **was not executed** following this protocol update; syntax checks and fixture setups do not constitute browser test passes. Screen captures and interaction tests must rely solely on native tools and read-only fixtures serving selected media assets. Fixture logs and diagnostic files record network traffic; do not claim external session interception or physical device execution.

@@ -1,214 +1,214 @@
-# H3 · Roteiro — fluxo, ações e limites da proposta
+# H3 · Roteiro — Flow, Actions, and Proposal Limits
 
-**Revisão crítica v2 — aprovada e implementada pelo plano41.** Telas e palavras em [roteiro-telas.md](roteiro-telas.md); [uso e evidência com limites](../roteiro.md). Esta crítica registra as decisões anteriores à implementação, não substitui os testes nem certifica performance por desenho.
+**Critical Review v2 — approved and implemented by Plan 41.** Screens and copy in [roteiro-telas.md](roteiro-telas.md); [usage and evidence with limits](../roteiro.md). This critical review records the decisions prior to implementation; it does not replace testing nor does it certify performance by design.
 
-## Revisão crítica: o que encontrei e corrigi
+## Critical Review: What Was Found and Corrected
 
-| Problema no primeiro desenho | Consequência no uso | Correção na v2 |
+| Problem in initial design | Consequence in usage | Correction in v2 |
 | --- | --- | --- |
-| Proposta e roteiro repetiam os mesmos cartões em páginas distintas | Adotar parecia trocar de produto sem mudar a tarefa | Uma tela central com estados proposta/adotado. |
-| Editar ação/duração exigia abrir outra tela | Navegação demais para corrigir cada trecho | Edição no cartão; organização em disclosure. |
-| Preparação, proposta do enhancer e conferência final eram três páginas | Muitas etapas só para gerar um bloco já planejado | Uma bancada com contexto, editor e adoção explícita da proposta. |
-| Botão Usar instrução do roteiro copiava texto já adotado | Clique redundante sem decisão nova | Campo já preenchido; Grok opcional. |
-| Nome/contagem/duração dominavam a entrada | Usuário precisava montar formulário antes de contar a ideia | Referência + intenção primeiro, divisão/nome em opções. |
-| Dois contextos grandes empilhados distanciavam o prompt | Muitas dobras no mobile antes da ação principal | Cards compactos, contain, lado a lado quando legíveis; ampliar no documento. |
-| Três editores de ajustes abertos de uma vez | Mistura tarefa atual com sistemas globais | Seção local clara e dois sistemas em disclosures separados. |
-| Repetir avisos técnicos em todo cartão | Plano difícil de ler, foco em implementação e não ação | Avisos nos pontos de adoção/Gerar e mensagens só quando pertinentes. |
-| Texto de passado podia soar como prova de obediência | Modelo/usuário confundiria intenção com resultado real | Rotular intenção dos blocos aceitos; frame real continua contexto visual autoritativo. |
-| Default2,3s ficou desatualizado após correção40 | Proposta começaria com orçamento diferente do app atual | Default8s vindo de capabilities; benchmark2,3 permanece intocado. |
+| Proposal and roteiro repeated the same cards across distinct pages | Adopting felt like switching products without changing the task | A single central screen with proposal/adopted states. |
+| Editing action/duration required opening another screen | Too much navigation just to adjust each chunk | In-card editing; organization within disclosure. |
+| Preparation, enhancer proposal, and final verification were three pages | Too many steps just to generate an already planned block | A single workbench with context, editor, and explicit adoption of proposal. |
+| "Use roteiro instruction" button copied text that was already adopted | Redundant click without a new decision | Field pre-filled; Grok optional. |
+| Name/count/duration dominated the entry flow | User had to build a form before sharing the idea | Reference + intent first, division/name under options. |
+| Two large stacked contexts pushed the prompt off-screen | Too many folds on mobile before reaching the primary action | Compact contain cards, side by side when legible; expand within document. |
+| Three settings editors open at once | Mixed current task with global systems | Clear local section and two systems in separate disclosures. |
+| Repeating technical warnings on every card | Plan became hard to read, focused on implementation rather than action | Warnings at points of adoption/Generate and messages only when pertinent. |
+| Text describing the past could sound like proof of compliance | Model/user would confuse intent with actual visual output | Label intent of accepted blocks; real frame remains the authoritative visual context. |
+| Default 2.3s became outdated after correction 40 | Proposal would start with a different budget than current app | Default 8s sourced from capabilities; benchmark 2.3s remains untouched. |
 
-**O que mantive de propósito:** separação plano/tentativas, pai aceito concreto, adoção de proposta distinta de Gerar, revisão artística por bloco e montagem explícita. Esses limites não exigem páginas redundantes.
+**What was intentionally kept:** separation of plan/attempts, concrete accepted parent, proposal adoption distinct from Generate, artistic review per block, and explicit assembly. These boundaries do not require redundant pages.
 
-**Riscos tratados na implementação:** correlação durável antes de202, salvamento do contexto escolhido antes do pedido e conflitos por revisão têm regressões fake/CPU. Cards/CTA foram medidos no browser mobile emulado a393px e320px, sem overflow horizontal. Capturas não certificam aparelho físico, qualidade do modelo ou performance; veja os limites da evidência.
+**Risks addressed in implementation:** durable correlation before 202, saving chosen context prior to request, and revision conflicts covered by fake/CPU regressions. Cards/CTAs measured in mobile browser emulated at 393px and 320px, without horizontal overflow. Captures do not certify physical devices, model quality, or performance; see evidence limits.
 
-## 1. O que esta evolução muda
+## 1. What This Evolution Changes
 
-Hoje: pensar num bloco →detalhar opcionalmente →gerar →revisar →pensar na continuação.
+Currently: conceive a block → optionally detail → generate → review → conceive continuation.
 
-Proposto: **pensar no vídeo inteiro →preencher todos os blocos →trabalhar em um bloco por vez com o fluxo existente**.
+Proposed: **conceive the entire video → populate all blocks → work on one block at a time using the existing flow**.
 
-O roteiro é o plano. O Run continua sendo uma tentativa real. Não gerar todos os prompts finais supondo futuros frames; não gerar todos os vídeos só porque o macro foi adotado.
+The roteiro is the plan. The Run remains a real attempt. Do not generate all final prompts assuming future frames; do not generate all videos simply because the macro was adopted.
 
-### Fluxo principal por tela
+### Primary Flow by Screen
 
 ```text
-T00 Biblioteca
- ├─ Novo freestyle → fluxo Freestyle existente
- └─ Novo roteiro → T01 referência + intenção
-                      ↓ propor explicitamente ou escrever manualmente
+T00 Library
+ ├─ New freestyle → existing Freestyle flow
+ └─ New roteiro → T01 reference + intent
+                       ↓ explicitly propose or write manually
 T02 Roteiro
- ├─ Estado proposta: lista preenchida/editável → Usar este roteiro
- ├─ Estado adotado: lista + próximo bloco/histórico
- ├─ Editar: expande o cartão, não muda de página
- └─ Preparar bloco N
-                      ↓
-T03 Bancada do bloco
- ├─ Instrução-base já preenchida; contexto real + duração/seed
- ├─ Detalhar opcional → candidato no mesmo editor
- │    └─ Usar esta proposta OU Manter minha instrução
- └─ Gerar bloco explicitamente
-                      ↓
-T04 Pedido no PC → T05 revisão após publicação confirmada
-                      ├─ Recusar/interrompido → retry → T03
-                      └─ Aceitar → Preparar próximo → T03
-                                   ou último aceito → T06 montagem
+ ├─ Proposal state: populated/editable list → Use this roteiro
+ ├─ Adopted state: list + next block/history
+ ├─ Edit: expands card, does not navigate away
+ └─ Prepare block N
+                       ↓
+T03 Block Workbench
+ ├─ Base instruction pre-filled; real context + duration/seed
+ ├─ Optional detailing → candidate in the same editor
+ │    └─ Use this proposal OR Keep my instruction
+ └─ Explicitly generate block
+                       ↓
+T04 Order on PC → T05 review after confirmed publication
+                       ├─ Reject/interrupted → retry → T03
+                       └─ Accept → Prepare next → T03
+                                    or last accepted → T06 assembly
 
-T07 Ajustes retorna à origem. T02 é a casa do roteiro.
-Back/abrir/reler/adotar proposta não geram.
+T07 Settings returns to origin. T02 is the home of the roteiro.
+Back/open/reread/adopt proposal do not generate.
 ```
 
-## 2. Exemplo completo: o roteiro já preenche os blocos
+## 2. Complete Example: The Roteiro Pre-populates Blocks
 
-Referência: mulher de vestido preto na imagem original. Ideia: dançar, pequeno salto com mudança para vermelho, terminar de costas e depois virar de frente.
+Reference: woman in black dress from original image. Idea: dance, small jump with color change to red, finish facing away, then turn to face forward.
 
-| Posição | Ação preenchida | Duração preenchida | O que ainda NÃO existe |
+| Position | Pre-populated action | Pre-populated duration | What does NOT exist yet |
 | --- | --- | --- | --- |
-| 1 | Dança mantendo o vestido preto. | 8s | Vídeo, Run ID, frame final, decisão. |
-| 2 | Pequeno salto; vestido fica vermelho; termina de costas. | 8s | Pai Run confirmado, vídeo, pose real de partida. |
-| 3 | Vira de frente; mantém vermelho. | 8s | Pai Run confirmado e frame real de costas. |
+| 1 | Dances maintaining black dress. | 8s | Video, Run ID, final frame, decision. |
+| 2 | Small jump; dress turns red; finishes facing away. | 8s | Confirmed parent Run, video, real starting pose. |
+| 3 | Turns facing forward; keeps red. | 8s | Confirmed parent Run and real frame facing away. |
 
-Adotar esse roteiro prepara três itens e seus rascunhos. A primeira instrução-base pode ser usada diretamente ou detalhada. Depois de o bloco1 ser aceito, o2 pode ser detalhado com **identidade original + final REAL do1**. O plano do3 ajuda a contextualizar o2, mas não é uma imagem conhecida nem deve ser executado antecipadamente.
+Adopting this roteiro prepares three items and their drafts. The first base instruction can be used directly or detailed. After block 1 is accepted, block 2 can be detailed with **original identity + REAL final frame of 1**. The plan for 3 helps contextualize 2, but it is not a known image and must not be executed ahead of time.
 
-Se o2 não termina de costas, a revisão precisa mostrar o vídeo real. Aceitar esse resultado não prova que seguiu o roteiro. O usuário pode recusá-lo ou ajustar a ação futura; não reescrever o passado para aparentar continuidade.
+If 2 does not end facing away, review must show the real video. Accepting that result does not prove it followed the roteiro. The user can reject it or adjust the future action; do not rewrite history to feign continuity.
 
-## 3. Estado e autoridade: três coisas distintas
+## 3. State and Authority: Three Distinct Concepts
 
-### A. Plano do roteiro — editável
+### A. Roteiro Plan — Editable
 
-- ID próprio do roteiro, nome, ideia geral e referência original OWNED.
-- Revisão do documento, ordem dos itens e chave estável de cada bloco.
-- Por bloco: ação planejada, duração solicitada, seed de rascunho, instrução-base, proposta opcional e instrução escolhida.
-- Contexto/versão usados no detalhamento, para detectar resposta antiga ou prompt desatualizado.
-- Salvo explicitamente no PC sob `.data/roteiros/`; não em localStorage, banco ou memória do telefone como autoridade.
-- Chave estável do bloco não vira um Run UUID nem muda só porque a ordem mudou.
+- Dedicated roteiro ID, name, general idea, and OWNED original reference.
+- Document revision, item ordering, and stable key for each block.
+- Per block: planned action, requested duration, draft seed, base instruction, optional proposal, and chosen instruction.
+- Context/version used in detailing, to detect stale response or outdated prompt.
+- Saved explicitly on PC under `.data/roteiros/`; not in localStorage, database, or phone memory as authority.
+- Stable block key does not become a Run UUID nor change simply because order changed.
 
-### B. Tentativa real — histórico separado
+### B. Real Attempt — Separate History
 
-- Intenção de envio própria, vínculo com roteiro/bloco/revisão e o UUID real do Run quando admitido.
-- Snapshot enviado: prompt literal, seed, duração, identidade e pai concreto, sem substituir por ideia antiga.
-- Estado real, mídia publicada e decisão pelo fluxo nativo existente.
-- Rejeição/interrupção preservam a tentativa. Retry é outro pedido e outra revisão.
-- Uma tentativa não é considerada aceita porque o roteiro diz “bloco concluído”. A decisão nativa é autoridade.
+- Dedicated submission intent, link with roteiro/block/revision, and the actual Run UUID when admitted.
+- Submitted snapshot: literal prompt, seed, duration, identity, and concrete parent, without replacing with old idea.
+- Actual state, published media, and decision driven by existing native flow.
+- Rejection/interruption preserves the attempt. Retry is another request and another review.
+- An attempt is not considered accepted because the roteiro says "block completed". The native decision is authoritative.
 
-### C. Prefixo aceito — base da continuação
+### C. Accepted Prefix — Continuation Base
 
-- Para gerar posiçãoN, a tentativa escolhida da posiçãoN−1 deve estar realmente aceita e publicada.
-- Cada filho deve apontar para essa tentativa exata; não basta ela aparecer imediatamente acima num cartão.
-- Mudança de ordem entre futuros itens não modifica parent de um filho já enviado.
-- Aceitos e snapshots admitidos ficam congelados. Revisar o sufixo planejado não muda a cadeia já materializada.
-- Montagem usa a ancestralidade concreta do fim escolhido, nunca concatena quaisquer runs com o mesmo número de bloco.
+- To generate position N, the chosen attempt of position N−1 must be genuinely accepted and published.
+- Each child must point to that exact attempt; it is not enough for it to appear immediately above in a card.
+- Reordering future items does not modify the parent of an already submitted child.
+- Accepted items and admitted snapshots remain frozen. Revising the planned suffix does not change the already materialized chain.
+- Assembly uses the concrete ancestry of the chosen tail, never concatenating arbitrary runs just because they share a block index.
 
-## 4. Matriz de ações — nenhum efeito escondido
+## 4. Action Matrix — No Hidden Side-Effects
 
-| Ação na UI | Salva plano/config? | Chama Grok? | Gera vídeo? | Muda decisão? |
+| UI Action | Saves plan/config? | Calls Grok? | Generates video? | Changes decision? |
 | --- | --- | --- | --- | --- |
-| Novo roteiro / abrir / Voltar | Não | Não | Não | Não |
-| Enviar referência | Salva input próprio | Não | Não | Não |
-| Propor roteiro com Grok | Registra intenção/proposta própria | Sim, uma ação explícita | Não | Não |
-| Editar proposta | Rascunho até salvar/adotar | Não | Não | Não |
-| Usar este roteiro | Sim, plano validado | Não | Não | Não |
-| Salvar alterações do bloco | Sim, bloco/revisão | Não | Não | Não |
-| Preparar bloco | Prepara rascunho/contexto próprio | Não | Não | Não |
-| Detalhar este bloco | Registra proposta/contexto | Sim, somente aquele trecho | Não | Não |
-| Usar esta proposta | Copia candidato para instrução escolhida, na mesma bancada | Não | Não | Não |
-| Gerar bloco | Registra intenção e snapshot/vínculo | Não | Sim, uma tentativa | Não |
-| Consultar pedido / montagem | Somente leitura/reconciliação legítima | Não | Não | Não |
-| Aceitar / recusar tentativa | Mantém decisão nativa | Não | Não | Sim, explicitamente |
-| Preparar outra tentativa | Novo rascunho baseado no snapshot | Não | Não | Não |
-| Montar vídeo | Intenção/montagem própria | Não | Não | Não |
-| Salvar instruções do roteirista | Só configuração separada | Não | Não | Não |
-| Salvar instruções do detalhamento | Só configuração atual do enhancer | Não | Não | Não |
+| New roteiro / open / Back | No | No | No | No |
+| Send reference | Saves dedicated input | No | No | No |
+| Propose roteiro with Grok | Records dedicated intent/proposal | Yes, one explicit action | No | No |
+| Edit proposal | Draft until save/adopt | No | No | No |
+| Use this roteiro | Yes, validated plan | No | No | No |
+| Save block changes | Yes, block/revision | No | No | No |
+| Prepare block | Prepares dedicated draft/context | No | No | No |
+| Detail this block | Records proposal/context | Yes, only that chunk | No | No |
+| Use this proposal | Copies candidate to chosen instruction, on same workbench | No | No | No |
+| Generate block | Records intent and snapshot/link | No | Yes, one attempt | No |
+| Query order / assembly | Read-only / legitimate reconciliation | No | No | No |
+| Accept / reject attempt | Maintains native decision | No | No | Yes, explicitly |
+| Prepare another attempt | New draft based on snapshot | No | No | No |
+| Assemble video | Dedicated intent/assembly | No | No | No |
+| Save scriptwriter instructions | Dedicated configuration only | No | No | No |
+| Save detailing instructions | Current enhancer configuration only | No | No | No |
 
-Não confundir upload/salvar plano/criar UUID local com autorização de inferência.
+Do not confuse upload / save plan / create local UUID with authorization for inference.
 
-## 5. Detalhamento por bloco: reaproveitar o enhancer existente
+## 5. Block Detailing: Reusing the Existing Enhancer
 
-A nova proposta é dar contexto ao enhancer, não substituir seu sistema custom:
+The new proposal provides context to the enhancer without replacing its custom system prompt:
 
 ```text
-Roteiro: Dança: do preto ao vermelho
-Ideia geral: [intenção original do usuário]
+Roteiro: Dance: from black to red
+General idea: [user's original intent]
 
-Intenção dos blocos aceitos:
-[ações planejadas e prompts realmente enviados dos trechos anteriores]
-Esses textos descrevem a intenção; o resultado visual pode diferir.
+Intent of accepted blocks:
+[planned actions and prompts actually submitted from previous chunks]
+These texts describe the intent; visual results may differ.
 
-Este bloco:
-[ação planejada da posiçãoN]
-Duração solicitada: [valor do rascunho]
-Frames alinhados / tempo: [capabilities atuais]
+This block:
+[planned action for position N]
+Requested duration: [draft value]
+Aligned frames / time: [current capabilities]
 
-Próximo bloco planejado:
-[ação da posiçãoN+1, ou “Este é o último bloco.”]
-Não repetir o anterior nem antecipar a ação do próximo.
+Next planned block:
+[action of position N+1, or "This is the last block."]
+Do not repeat the previous one or anticipate the action of the next.
 
-Contexto visual:
-1. Identidade original.
-2. Último frame REAL do pai aceito, quando houver.
+Visual context:
+1. Original identity.
+2. REAL last frame of accepted parent, if available.
 ```
 
-Somente o usuário clicando **Detalhar este bloco** dispara a consulta. Reutilizar cliente/provider/auth/modelo fixo e o preview CPU existente. Não ler/exibir OAuth, reautenticar, renovar grant ou alterar o pin para implementar roteiro.
+Only the user clicking **Detail this block** triggers the query. Reuses client/provider/auth/fixed model and the existing CPU preview. Do not read/display OAuth, re-authenticate, renew grant, or modify pin to implement roteiro.
 
-O **roteirista do macro** tem um sistema separado, voltado a dividir a ideia em blocos. Não salvar esse sistema sobre `.data/grok/editor.json`. Resposta estruturada inválida não vira execução; mostrar erro e preservar texto/ideia. Não prometer que o provider obedece perfeitamente duração, idioma ou aparência.
+The **macro scriptwriter** has a separate system prompt focused on splitting the idea into blocks. Do not save this system prompt over `.data/grok/editor.json`. Invalid structured response does not result in execution; display error and preserve text/idea. Do not promise that the provider perfectly complies with duration, language, or appearance.
 
-Não propor nova chamada real durante desenho/implementação/testes: a autorização única37 já foi consumida. Testes futuros serão fake/CPU; uso real só por ação explícita do dono.
+Do not propose new real calls during design/implementation/testing: the single authorization 37 has already been consumed. Future tests will be fake/CPU; real usage only upon explicit action by the owner.
 
-## 6. Rota isolada, reaproveitamento e superfície proposta
+## 6. Isolated Route, Reuse, and Proposed Surface
 
-**Proposta técnica a validar depois da revisão das telas:** uma operação vertical `roteiro.py` para plano, propostas e correlação de tentativas; mesma ponte local, sem novo servidor/framework/banco/fila.
+**Technical proposal to validate after screen review:** a vertical operation `roteiro.py` for plan, proposals, and attempt correlation; same local bridge, without new server/framework/database/queue.
 
-- Página/contexto próprio `/roteiros` e `/roteiros/{id}` para a experiência de roteiro. Pode usar a mesma shell/estilos e telas atuais de preparação/revisão; não duplicar todo o frontend só para ter URL separada.
-- API local de planos: listar/criar/ler/salvar roteiro e sua revisão, com locks/escrita atômica bounded e conflito explícito. Paths são owned; navegador não escolhe paths arbitrários.
-- Ação explícita de proposta do roteiro separada da ação de detalhar bloco. Ambas retornam propostas editáveis, nunca callbacks de geração.
-- Salvar sistemas de roteirista e enhancer tem contratos/escopos separados. Um não muda o outro.
-- Geração/revisão/continuação/montagem reutilizam os pipes, Store, dispatcher, media e contratos nativos existentes. Não copiar validador de vídeo, frames, revisão ou código de geração para o roteirista.
-- Registro/recuperação da intenção de um bloco precisa ser durável antes do envio. Um vínculo só no JS após202 não é suficiente: se a resposta se perde, “sem Run ID no plano” não significa “não gerou”.
-- A composição que delega ao pipe nativo deve registrar o vínculo concreto no mesmo caminho de admissão, com prova/reconciliação de sua intenção. **Não** criar um segundo dispatcher, novo worker ou endpoint de gerar todos os blocos. O detalhe do contrato de correlação será definido na implementação aprovada, não fingido como já existente.
-- GET/SSE/reload reconstituem o estado e consultam o mesmo ID. Não geram nem repetem pedido automaticamente.
+- Dedicated page/context `/roteiros` and `/roteiros/{id}` for the roteiro experience. Can share same shell/styles and current preparation/review screens; do not duplicate entire frontend just to have a separate URL.
+- Local plan API: list/create/read/save roteiro and its revision, with bounded locks/atomic writes and explicit conflict handling. Paths are owned; browser cannot pick arbitrary paths.
+- Explicit roteiro proposal action separated from block detailing action. Both return editable proposals, never generation callbacks.
+- Saving scriptwriter and enhancer systems has separate contracts/scopes. One does not mutate the other.
+- Generation/review/continuation/assembly reuse existing pipes, Store, dispatcher, media, and native contracts. Do not copy video validator, frames, review, or generation logic to the scriptwriter.
+- Registering/recovering a block's intent must be durable before submission. A link existing only in JS after 202 is insufficient: if the response is lost, "no Run ID in plan" does not mean "did not generate".
+- The composition delegating to the native pipe must record the concrete link in the same admission path, with proof/reconciliation of its intent. **Do not** create a second dispatcher, new worker, or "generate all blocks" endpoint. Correlation contract details will be defined in the approved implementation, not faked as already existing.
+- GET/SSE/reload reconstitute state and query the same ID. They do not generate or automatically repeat requests.
 
-“Rota isolada” significa separar a operação de roteiro. Não significa criar outro motor de vídeo, autenticação, fonte de estado ou ciclo de vida do ComfyUI.
+"Isolated route" means separating the roteiro operation. It does not mean creating another video engine, authentication, state source, or ComfyUI lifecycle.
 
-## 7. Bordas de UX que precisam estar visíveis
+## 7. UX Edge Cases That Must Be Visible
 
-| Problema | O que o usuário vê | O que não pode acontecer |
+| Problem | What user sees | What must NOT happen |
 | --- | --- | --- |
-| Plano não salvo | Alterações não salvas; salvar/descartar/continuar | Perder texto por Back sem escolha. |
-| Outro navegador salvou versão nova | O roteiro mudou no PC; conferir versão/guardar rascunho | Sobrescrever revisão automaticamente. |
-| Macro voltou inválido | Resposta não convertível; ver texto/manual | Inventar duração, clamp ou gerar. |
-| Resposta antiga | Contexto anterior; adoção explícita | Trocar pai ou edição atual. |
-| Pai sem aceitação/prova | Abrir predecessor; preparar bloqueado | Continuar de rejeitado ou frame errado. |
-| Preview ausente | Reler frame/manual existente | Enviar silenciosamente só identidade ao Grok. |
-| Envio incerto sem Run ID | Consultar intenção de envio | Repetir POST porque não há link. |
-| Tentativa recusada/interrompida | Prompt final + preparar outra | Mutar terminal ou consultar Grok sozinho. |
-| Frame real diverge da ação | Vídeo/revisão e contexto real | Fingir que a intenção foi obedecida. |
-| Montagem incompleta/404/5xx | Reler o mesmo ID | Novo UUID ou sucesso presumido. |
-| Script externo encerra ComfyUI | Erro/incerteza honesta da tentativa | Controlar script, RAM ou caches; replay. |
+| Unsaved plan | Unsaved changes; save/discard/continue | Losing text due to Back without choice. |
+| Another browser saved new version | Roteiro changed on PC; check version / keep draft | Silently overwriting revision. |
+| Macro returned invalid response | Unconvertible response; view text/manual | Inventing duration, clamping, or generating. |
+| Stale response | Previous context; explicit adoption | Swapping parent or current edit. |
+| Parent lacking acceptance/proof | Open predecessor; prepare blocked | Continuing from rejected run or wrong frame. |
+| Missing preview | Reread frame / existing manual flow | Silently sending only identity to Grok. |
+| Uncertain submission without Run ID | Query submission intent | Repeating POST because link is absent. |
+| Rejected/interrupted attempt | Final prompt + prepare another | Mutating terminal state or querying Grok on its own. |
+| Real frame diverges from action | Video/review and real context | Pretending intent was fulfilled. |
+| Incomplete assembly / 404 / 5xx | Reread the same ID | New UUID or presumed success. |
+| External script terminates ComfyUI | Honest error/uncertainty of attempt | Controlling script, RAM, or caches; replay. |
 
-## 8. Parâmetros e limites não negociados por este desenho
+## 8. Parameters and Limits Not Negotiated by This Design
 
-Preservar os valores configurados: modelo nativo, sampler, scheduler, passos, resolução, referência, VAE/decode/export. Duração por bloco continua requested(0,10], máximo duas casas, default8s conforme correção40,24fps e arredondamento Python half-even5+17k.8s→192frames/8s; três desses blocos somam576frames/24s, sem certificar desempenho ou obediência visual.2,3s permanece explícito no benchmark congelado e registros históricos. Tail3/audioTrue independentes da duração. Totais alinhados são soma dos frames, não promessa de duração solicitada exata para outros valores.
+Preserve configured values: native model, sampler, scheduler, steps, resolution, reference, VAE/decode/export. Duration per block remains requested (0,10], maximum two decimal places, default 8s per correction 40, 24fps, and Python half-even rounding 5+17k. 8s → 192 frames / 8s; three such blocks total 576 frames / 24s, without certifying performance or visual compliance. 2.3s remains explicit in frozen benchmark and historical records. Tail3/audioTrue independent of duration. Aligned totals are the sum of frames, not a promise of exact requested duration for other values.
 
-Nenhuma política de RAM: não rejeitar/cancelar porque memória livre caiu. Telemetria continua observacional; lifecycle do ComfyUI pertence ao script do dono. Slot único e incerteza/no-replay continuam.
+No RAM policy: do not reject/cancel because free memory dropped. Telemetry remains observational; ComfyUI lifecycle belongs to the owner's script. Single slot and uncertainty/no-replay remain in place.
 
-## 9. Propostas para decidir juntos, não dúvidas bloqueantes
+## 9. Proposals to Decide Together, Not Blocking Doubts
 
-| Decisão | Minha recomendação | Alternativa |
+| Decision | My recommendation | Alternative |
 | --- | --- | --- |
-| Entrada inicial | Referência + ideia, nome/quantidade/duração inicial em opções | Duração total desejada + divisão proposta, deixando alinhamento explícito. |
-| Adotar o macro | Preenche/salva todos os blocos, sem gerar | Nenhuma alternativa automática presumida. |
-| Avançar | Aceitar →Preparar próximo explicitamente | Automação depois, com escopo/autorização próprios. |
-| Planejamento futuro | Editável mesmo antes de o predecessor existir | Bloquear tudo até gerar, menos útil. |
-| Seed | Copiar preset atual ao rascunho e conservar | Política explícita por bloco; não escolher pelo Grok nem incrementar escondido. |
-| Edição do meio | Fora desta primeira evolução | Rota separada com âncoras anterior/following, ainda precisa design/workflow próprios. |
-| Frontend | Shell familiar + tela central de roteiro + reutilização das demais | Página completamente separada; exige cuidado extra com rascunhos e incertezas ao navegar. |
-| Resultado failed | Exibir evidência; política atual de retry preservada | Incluir retry de failed num escopo explícito posterior. |
+| Initial input | Reference + idea, initial name/count/duration in options | Desired total duration + proposed division, making alignment explicit. |
+| Adopt macro | Pre-populates/saves all blocks, without generating | No presumed automatic alternative. |
+| Proceed | Accept → Prepare next explicitly | Automation later, with dedicated scope/authorization. |
+| Future planning | Editable even before predecessor exists | Locking everything until generated, less useful. |
+| Seed | Copy current preset to draft and preserve | Explicit policy per block; do not select via Grok or increment secretly. |
+| Middle-chunk editing | Outside this first evolution | Separate route with preceding/following anchors, still requires dedicated design/workflow. |
+| Frontend | Familiar shell + central roteiro screen + reuse of others | Completely separate page; requires extra care with drafts and uncertainties when navigating. |
+| Failed result | Display evidence; preserve current retry policy | Include failed retry in a subsequent explicit scope. |
 
-## 10. Critério para começar a implementar
+## 10. Criteria to Begin Implementation
 
-1. Eu reviso criticamente os desenhos e corrijo o percurso — esta v2 já registra essa primeira revisão crítica.
-2. Dono revisa as telas T00–T07 e as palavras/botões desta v2.
-3. Incorporar comentários em nova revisão dos Markdown.
-4. Depois da aprovação humana, fechar plano técnico com arquivos exclusivos, contrato durável de intenção/vínculo, testes fake/CPU e integração do frontend.
-5. Só então implementar. Não interpretar autoApprove do gerenciador como sua revisão destas telas.
+1. I critically review the designs and correct course — this v2 already records that first critical review.
+2. Owner reviews screens T00–T07 and copy/buttons of this v2.
+3. Incorporate feedback into a new Markdown revision.
+4. After human approval, finalize technical plan with exclusive files, durable intent/link contract, fake/CPU tests, and frontend integration.
+5. Only then implement. Do not interpret manager autoApprove as your review of these screens.
 
-**Te chamar para revisar estes Markdown é a próxima ação; não implementar em seguida sem sua resposta.**
+**Prompting you to review these Markdown files is the next action; do not proceed with implementation without your response.**

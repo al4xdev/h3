@@ -1,49 +1,49 @@
-# Estado durável em `.data`
+# Durable state in `.data`
 
-O Store usa **somente `.data/runs/<UUID>/`** para manifests, inputs, prompts, workflow executado, telemetria e vídeos. `project_root` continua sendo a raiz de `workflows/`, `prompts/` e `assets/`; não configure `H3_PROJECT_ROOT=.data`. Os URLs continuam `/runs/<UUID>` e `/runs/<UUID>/video`.
+The Store uses **only `.data/runs/<UUID>/`** for manifests, inputs, prompts, executed workflows, telemetry, and videos. `project_root` remains the root for `workflows/`, `prompts/`, and `assets/`; do not configure `H3_PROJECT_ROOT=.data`. URLs remain `/runs/<UUID>` and `/runs/<UUID>/video`.
 
-`runs/` é a âncora legada preservada, não um segundo Store gravável. A migração copia todos os arquivos e diretórios (incluindo ocultos e diagnósticos aninhados), sem editar JSON, estados, decisões ou procedência. Um failed sem vídeo é válido. Caminhos históricos de Comfy/probes e telemetria de importação continuam sendo histórico, não entradas para execução.
+`runs/` is the preserved legacy anchor, not a second writable Store. The migration copies all files and directories (including hidden and nested diagnostics), without altering JSON, states, decisions, or provenance. A failed run without video is valid. Historical Comfy/probe paths and import telemetry remain historical records, not execution inputs.
 
-## Migração offline explícita (fish)
+## Explicit offline migration (fish)
 
-Pare primeiro **só a API própria deste projeto** e confirme ausência de outros escritores. Não pare/reinicie o ComfyUI. A ferramenta não faz rede nem inferência, e não acredita apenas no flag `--offline`: toma um lock exclusivo do produto. Um runtime ativo mantém lock compartilhado até shutdown; um lease separado permite somente um backend por projeto. Stores de leitura do mesmo processo continuam compatíveis.
+First stop **only this project's own API** and confirm the absence of other writers. Do not stop or restart ComfyUI. The tool does not perform networking or inference, and does not rely solely on the `--offline` flag: it acquires an exclusive product lock. An active runtime holds a shared lock until shutdown; a separate lease permits only one backend per project. Read-only Stores in the same process remain compatible.
 
 ```fish
-# Preflight: não copia nem publica mídia.
+# Preflight: does not copy or publish media.
 env PYTHONDONTWRITEBYTECODE=1 uv run python tools/migrate_state.py
 
-# Uma intenção, cópia verificada, publicação sem overwrite e recibo final.
+# One intent, verified copy, publication without overwrite, and final receipt.
 env PYTHONDONTWRITEBYTECODE=1 uv run python tools/migrate_state.py --execute --offline
 ```
 
-O preflight lê todo `runs/`, verifica UUIDs/manifests, rejeita queued/running, symlinks, arquivos especiais, colisão de destino e falta de espaço. A execução cria uma intenção imutável em `.data/migrations/<UUID>/intent.json`, copia para `staging/runs`, compara inventário/SHA256 da fonte e cópia e publica **só** o subtree `.data/runs` com Linux `renameat2(RENAME_NOREPLACE)`. Não substitui nem um destino vazio criado concorrentemente. Cada arquivo e a publicação de diretórios são fsynced.
+Preflight reads all of `runs/`, verifies UUIDs/manifests, and rejects queued/running runs, symlinks, special files, destination collisions, and insufficient disk space. Execution creates an immutable intent at `.data/migrations/<UUID>/intent.json`, copies to `staging/runs`, compares source and destination inventory and SHA256 checksums, and publishes **only** the `.data/runs` subtree using Linux `renameat2(RENAME_NOREPLACE)`. It will not overwrite even an empty concurrently created destination. Each file and directory publication is fsynced.
 
-Após a publicação, `.data/migrations/<UUID>/verified.json` e `.data/state/migration.json` registram UUID de intenção, raiz, destino, inventário, IDs e checksum. O startup falha fechado se existir legado/intenção sem recibo válido, ou se prova/recibo divergirem. Importação dos módulos não migra nem reenvia jobs. Projetos novos sem legado podem criar `.data/runs` diretamente.
+After publication, `.data/migrations/<UUID>/verified.json` and `.data/state/migration.json` record the intent UUID, root, destination, inventory, IDs, and checksum. Startup fails closed if legacy data or an intent exists without a valid receipt, or if proof and receipt diverge. Importing modules does not migrate or resubmit jobs. New projects without legacy data can create `.data/runs` directly.
 
-`.data/benchmark-mcp/` pertence ao adapter MCP e é intocado. `.dumps/benchmarks/` continua como scratch/evidência da CLI, não estado durável do aplicativo.
+`.data/benchmark-mcp/` belongs to the MCP adapter and remains untouched. `.dumps/benchmarks/` continues as CLI scratch/evidence, not durable application state.
 
-## Crash e reconciliação
+## Crash and reconciliation
 
-Não apague staging/recibos nem tente outra intenção para esconder um erro. Os originais ficam intactos e podem ser inspecionados como âncora; o runtime novo não usa fallback gravável para eles. Uma staging parcial/fonte divergente exige investigação, não cópia/replay automático.
+Do not delete staging or receipts, and do not attempt another intent to hide an error. Originals remain untouched and can be inspected as an anchor; the new runtime does not fall back to them as writable targets. Partial staging or a diverging source requires investigation, not automated copying or replay.
 
-Com o UUID **já registrado** em uma intenção própria, uma cópia completa e ainda idêntica à fonte pode ser finalizada explicitamente:
+With the UUID **already recorded** in an intent file, a complete copy that remains identical to the source can be finalized explicitly:
 
 ```fish
-env PYTHONDONTWRITEBYTECODE=1 uv run python tools/migrate_state.py --execute --offline --reconcile UUID-DA-INTENCAO
+env PYTHONDONTWRITEBYTECODE=1 uv run python tools/migrate_state.py --execute --offline --reconcile INTENT-UUID
 ```
 
-A reconciliação não recopia nada: verifica todos os bytes/IDs/raiz antes de publicar uma staging completa ou finalizar um publish já feito. Fonte divergente, stage parcial, outro destino ou symlink são recusados. Depois do recibo, reexecutar a ferramenta é idempotente: reconhece a migração e **não** compara/restaura manifests mutáveis canônicos a partir do legado. Decisões novas e novos chunks permanecem em `.data`.
+Reconciliation does not recopy anything: it verifies all bytes, IDs, and root paths before publishing complete staging or finalizing an already-published step. Divergent sources, partial stages, alternate destinations, or symlinks are rejected. Once a receipt exists, rerunning the tool is idempotent: it recognizes the migration and **does not** compare or restore mutable canonical manifests from legacy data. New decisions and new chunks remain in `.data`.
 
-Não volte cegamente para o código antigo após novas decisões. Preserve/snapshot `.data` e use código compatível com esta autoridade. Nenhuma pasta é apagada pela migração.
+Do not blindly revert to older code after new decisions are made. Snapshot and preserve `.data`, and use code compatible with this authoritative store. No directory is deleted by the migration.
 
-## Contrato técnico para consumidores
+## Technical contract for consumers
 
-- `Store.root`: raiz de recursos do projeto, inalterada.
-- `Store.runs` / `Store.directory(UUID)`: raiz/diretório físico canônico em `.data`.
-- `Store.relative_artifact(UUID, filename)`: string persistível `.data/runs/<UUID>/<filename>`.
-- `Store.own_artifact(UUID, persisted_path, filename)`: valida propriedade e retorna o caminho físico canônico. Permite `runs/<MESMO_UUID>/<filename>` **somente** para IDs da prova/recibo da cópia; não cria symlinks nem reescreve manifests.
-- Allowlist: `chunk.mp4`, `initial_frame.png`, `last_frame.png`, `reference_tail.mp4`, `workflow_api.json`, `prompt.md`, `telemetry.jsonl`, `telemetry_error.json`. Não é um resolvedor arbitrário de arquivos. Rejeita outro UUID, prefixos não canônicos, caminho absoluto/traversal e ancestrais symlink.
-- `source_root: runs` continua categoria lógica para referências próprias; as strings de novas referências/slot_map usam `.data/runs/...`. `source_root: assets` e a identidade original são preservados.
-- `Store.sequence` continua metadata-only e só lê a cadeia de ancestrais escolhida. `restore` observa só a autoridade canônica, interrompe queued/running sem replay e preserva terminais.
+- `Store.root`: project resource root, unchanged.
+- `Store.runs` / `Store.directory(UUID)`: canonical physical root/directory in `.data`.
+- `Store.relative_artifact(UUID, filename)`: persistable string `.data/runs/<UUID>/<filename>`.
+- `Store.own_artifact(UUID, persisted_path, filename)`: validates ownership and returns the canonical physical path. Allows `runs/<SAME_UUID>/<filename>` **only** for IDs present in the copy proof/receipt; does not create symlinks or rewrite manifests.
+- Allowlist: `chunk.mp4`, `initial_frame.png`, `last_frame.png`, `reference_tail.mp4`, `workflow_api.json`, `prompt.md`, `telemetry.jsonl`, `telemetry_error.json`. Not an arbitrary file resolver. Rejects mismatched UUIDs, non-canonical prefixes, absolute paths, traversal, and symlink ancestors.
+- `source_root: runs` remains a logical category for own references; strings for new references and `slot_map` use `.data/runs/...`. `source_root: assets` and original identity references are preserved.
+- `Store.sequence` remains metadata-only and reads solely the selected ancestral chain. `restore` observes only the canonical authority, interrupts queued/running jobs without replay, and preserves terminal states.
 
-A CLI de benchmark reutiliza o resolvedor de ownership; cenário/STAGES/Markdown/seeds/modelos/parâmetros são os mesmos. Nenhuma geração adicional é necessária para testar a migração: CPU/fakes e GET de vídeos existentes bastam.
+The benchmark CLI reuses the ownership resolver; scenario, STAGES, Markdown, seeds, models, and parameters remain identical. No additional generation is required to test the migration: CPU fakes and GET requests for existing videos suffice.

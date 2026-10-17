@@ -1,381 +1,382 @@
-# H3 · Roteiro — telas revisadas, v2
+# H3 · Roteiro — Revised Screens, v2
 
-**Desenho aprovado e implementado pelo plano41.** Esta revisão substitui o primeiro desenho de12 telas. Os diagramas abaixo são especificação, não screenshots ou prova de geração. [Fluxo e motivos das mudanças](roteiro-fluxo.md); [uso, capturas e limites de validação](../roteiro.md).
+**Design approved and implemented by Plan 41.** This revision replaces the initial 12-screen design. The diagrams below are specifications, not screenshots or generation proof. [Flow and rationale for changes](roteiro-fluxo.md); [usage, captures, and validation limits](../roteiro.md).
 
-## O que mudou depois de desenhar
+## What Changed After Designing
 
-1. **Conferir proposta e acompanhar roteiro são a mesma tela**, em estados diferentes. Não repetir a lista inteira ao clicar Usar.
-2. **Editar um item acontece no seu próprio cartão**, sem uma tela adicional para pequenas alterações.
-3. **Contexto, instrução, proposta Grok e Gerar ficam na tela do bloco.** Preservar adoção explícita sem obrigar três páginas consecutivas.
-4. **Status, revisão e montagem reutilizam o fluxo atual**, com origem no roteiro; não construir outra versão de cada operação.
-5. **Salvar plano não é gerar.** Tornar essa distinção clara em dois pontos importantes, não repetir avisos técnicos em todo cartão.
-6. Default atual do app: **8s por bloco**, conforme correção40. Benchmark2,3s e registros anteriores permanecem históricos, não defaults do roteiro.
+1. **Reviewing proposal and monitoring roteiro are the same screen**, in different states. Do not repeat the entire list upon clicking Use.
+2. **Editing an item happens in its own card**, without an additional screen for small changes.
+3. **Context, instruction, Grok proposal, and Generate stay on the block screen.** Preserve explicit adoption without forcing three consecutive pages.
+4. **Status, review, and assembly reuse the existing flow**, originating from the roteiro; do not build another version of each operation.
+5. **Saving a plan is not generating.** Make this distinction clear at two key points, rather than repeating technical warnings on every card.
+6. Current app default: **8s per block**, per correction 40. Benchmark 2.3s and earlier records remain historical, not roteiro defaults.
 
-### Caminho curto
+### Short Path
 
 ```text
-Biblioteca → Novo roteiro → Roteiro preenchido
-                              ↓ escolher próximo
-                         Preparar bloco
-                              ↓ gerar explicitamente
-                         Pedido → Revisão
-                              ↓ aceitar
-                         Preparar próximo
-                              ↓ último aceito
-                           Montagem
+Library → New roteiro → Populated roteiro
+                             ↓ pick next
+                        Prepare block
+                             ↓ generate explicitly
+                        Order → Review
+                             ↓ accept
+                        Prepare next
+                             ↓ last accepted
+                          Assembly
 ```
 
-São **oito telas**, contando Biblioteca e Ajustes. Proposta/edição são estados dentro delas, não novas páginas. Não empilhar todas as telas numa página.
+There are **eight screens**, including Library and Settings. Proposal/editing are states within them, not new pages. Do not stack all screens onto one page.
 
-## Padrão visual e de interação
+## Visual and Interaction Standards
 
-- Mobile393×852, uma rolagem do documento. Topo sticky **Voltar · título · engrenagem**, hit targets44px; campos/botões principais48px. Sem abas globais ou dock fixo.
-- Grafite `#242725`, superfícies `#151816`, papel `#eeeae2`, cobre `#c38b62`, secundário `#a7ada7`, bordas `#454b46`.
-- Display atual: Arial Narrow/Liberation Sans Narrow/Impact; corpo system-ui; dados ui-monospace. Sem novas fontes/deps.
-- Título26px, seção22px, corpo/campos16px, legenda14px, dados12px. Margens16px; espaçamento8/16/24px; cards padding16px/borda1px/raio3px.
-- Ação principal: cobre preenchido, texto escuro, largura total. Secundárias neutras. Desabilitado tem motivo textual. Foco visível.
-- Sequência vertical é ordem real do plano. Aceito tem decisão real; Planejado não tem thumbnail de vídeo inexistente.
-- Dois contextos visuais em cards lado a lado quando couberem sem overflow, inclusive no telefone; imagens com contain, sem crop. A320px, empilhar se os rótulos ficarem ilegíveis. Cada `Ampliar imagem` expande sua figura no documento, sem novo fluxo/modal obrigatório.
-- Desktop: leitura central até960px. Não transformar o plano numa timeline horizontal rolante.
-- Voltar conserva rascunho/origem/scroll/foco. Não salva configuração, chama Grok, gera, aceita ou monta. Nenhum Enter implícito gera.
-- Movimento atual/reduced-motion, sem autoplay, progresso inventado ou gestos globais.
+- Mobile 393×852, single document scroll. Sticky top **Back · title · gear**, hit targets 44px; primary fields/buttons 48px. No global tabs or fixed dock.
+- Graphite `#242725`, surfaces `#151816`, paper `#eeeae2`, copper `#c38b62`, secondary `#a7ada7`, borders `#454b46`.
+- Current display typography: Arial Narrow/Liberation Sans Narrow/Impact; body system-ui; data ui-monospace. No new fonts/dependencies.
+- Title 26px, section 22px, body/fields 16px, captions 14px, data 12px. Margins 16px; spacing 8/16/24px; cards padding 16px / border 1px / radius 3px.
+- Primary action: filled copper, dark text, full width. Secondary neutral. Disabled state includes textual reason. Visible focus.
+- Vertical sequence is the real plan order. Accepted items show real decisions; Planned items do not show thumbnails for non-existent videos.
+- Two visual contexts in side-by-side cards when fitting without overflow, including on mobile; images contain, no cropping. At 320px, stack if labels become illegible. Each `Expand image` expands its figure within document flow, without mandatory modal or new flow.
+- Desktop: central reading layout up to 960px. Do not turn the plan into a scrolling horizontal timeline.
+- Back preserves draft/origin/scroll/focus. Does not save configuration, call Grok, generate, accept, or assemble. No implicit Enter generates.
+- Existing motion / reduced-motion, no autoplay, invented progress, or global gestures.
 
 ---
 
-## T00 · Biblioteca
+## T00 · Library
 
-**Uma escolha real:** roteiro inteiro ou bloco avulso.
+**A real choice:** whole roteiro or standalone block.
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Biblioteca                ⚙ │
+│ ←      Library                   ⚙ │
 ├─────────────────────────────────────┤
-│ Seus vídeos                         │
+│ Your videos                         │
 │                                     │
-│ [ Novo roteiro ]                    │
-│ [ Novo freestyle ]                      │
+│ [ New roteiro ]                     │
+│ [ New freestyle ]                   │
 │                                     │
 │ Roteiros                            │
 │ ┌─────────────────────────────────┐ │
-│ │ Dança: do preto ao vermelho     │ │
-│ │ 3 blocos · 1 aceito             │ │
-│ │ Próximo: bloco 2                │ │
-│ │ [ Abrir roteiro ]              │ │
+│ │ Dance: from black to red        │ │
+│ │ 3 blocks · 1 accepted           │ │
+│ │ Next: block 2                   │ │
+│ │ [ Open roteiro ]                │ │
 │ └─────────────────────────────────┘ │
 │                                     │
-│ Freestyle                      │
+│ Freestyle                           │
 │ ┌─────────────────────────────────┐ │
-│ │ Ela gira e olha para a câmera.  │ │
-│ │ Pronto para revisão            │ │
-│ │ [ Abrir bloco ]                │ │
+│ │ She turns and looks at camera.  │ │
+│ │ Ready for review                │ │
+│ │ [ Open block ]                  │ │
 │ └─────────────────────────────────┘ │
 └─────────────────────────────────────┘
 ```
 
-- Novo roteiro →T01. Novo freestyle →fluxo atual, sem roteiro obrigatório.
-- Abrir roteiro →T02. Abrir bloco →revisão atual.
-- Vazio: **“Seu primeiro roteiro começa com uma ideia.”** / **“Nenhum bloco avulso ainda.”**
-- Loading: **“Lendo seus vídeos no PC…”** Erro: **“Não foi possível ler a biblioteca.”** +`Reler biblioteca`.
-- Um run do roteiro continua no histórico, mas não duplicar cada tentativa como um novo projeto principal. O cartão resume posições aceitas, não quantidade de runs.
+- New roteiro → T01. New freestyle → existing flow, without mandatory roteiro.
+- Open roteiro → T02. Open block → existing review.
+- Empty: **"Your first roteiro begins with an idea."** / **"No standalone blocks yet."**
+- Loading: **"Reading your videos on PC…"** Error: **"Could not read library."** + `Reread library`.
+- A roteiro run remains in history, but do not duplicate each attempt as a new main project. The card summarizes accepted positions, not run count.
 
-## T01 · Novo roteiro
+## T01 · New Roteiro
 
-**Primeiro a intenção.** Nome e divisão são controles secundários, não um formulário técnico obrigatório antes de contar a cena.
+**Intent first.** Name and chunk count are secondary controls, not a mandatory technical form before telling the scene.
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Novo roteiro              ⚙ │
+│ ←      New roteiro               ⚙ │
 ├─────────────────────────────────────┤
-│ Referência original                 │
-│ [ Escolher imagem no PC       ▾ ]   │
-│ [ Enviar imagem do celular ]        │
+│ Original reference                  │
+│ [ Choose image on PC          ▾ ]   │
+│ [ Upload image from phone ]         │
 │ ┌─────────────────────────────────┐ │
-│ │       imagem selecionada        │ │
+│ │         selected image          │ │
 │ └─────────────────────────────────┘ │
 │                                     │
-│ O que acontece no vídeo?            │
+│ What happens in the video?          │
 │ ┌─────────────────────────────────┐ │
-│ │ Começa dançando de preto.        │ │
-│ │ Dá um salto e muda para         │ │
-│ │ vermelho, termina de costas     │ │
-│ │ e depois vira de frente.        │ │
+│ │ Starts dancing in black.        │ │
+│ │ Takes a jump and changes to     │ │
+│ │ red, finishes facing away,      │ │
+│ │ then turns to face forward.     │ │
 │ └─────────────────────────────────┘ │
 │                                     │
-│ [ Ajustar divisão e nome ▾ ]        │
+│ [ Adjust count and name ▾ ]         │
 │                                     │
-│ [ Propor roteiro com Grok ]         │
-│ [ Escrever os blocos manualmente ]  │
-│ Cria uma proposta. Não gera vídeo.  │
+│ [ Propose roteiro with Grok ]       │
+│ [ Write blocks manually ]           │
+│ Creates a proposal. Does not        │
+│ generate video.                     │
 └─────────────────────────────────────┘
 ```
 
-O disclosure **Ajustar divisão e nome** contém exatamente:
+The disclosure **Adjust count and name** contains exactly:
 
 ```text
-Nome [ Dança: do preto ao vermelho ]
-Quantidade inicial [ 3 ] blocos
-Duração inicial [ 8 ] segundos por bloco
-3 × 8 s = 24 s planejados
-Você pode alterar cada trecho depois.
+Name [ Dance: from black to red ]
+Initial count [ 3 ] blocks
+Initial duration [ 8 ] seconds per block
+3 × 8 s = 24 s planned
+You can edit each chunk later.
 ```
 
-- Quantidade3 é exemplo de planejamento, não parâmetro nativo. Não usar número escolhido pelo Grok como seed/frames.
-- Nome é opcional na entrada; proposta pode sugerir título editável. Quantidade/duração ficam disponíveis sem poluir a primeira tarefa.
-- Default da duração vem de capabilities atuais:8s. Campos não ficam hardcoded em8 para sempre. Requested(0,10], duas casas; validar, não clamp.
-- Upload usa o fluxo existente, salva input no PC, não chama Grok.
-- Propor é uma chamada explícita →T02 em estado proposta. Manual cria itens editáveis →mesma T02. Nada gera em nenhuma dessas ações.
+- Count 3 is a planning example, not a native parameter. Do not use number chosen by Grok as seed/frames.
+- Name is optional on entry; proposal can suggest an editable title. Count/duration remain accessible without cluttering the first task.
+- Default duration comes from current capabilities: 8s. Fields are not hardcoded to 8 forever. Requested (0,10], two decimal places; validate, do not clamp.
+- Upload uses existing flow, saves input on PC, does not call Grok.
+- Propose is an explicit call → T02 in proposal state. Manual creates editable items → same T02. Nothing generates during any of these actions.
 
-## T02 · Roteiro — proposta, edição e acompanhamento
+## T02 · Roteiro — Proposal, Editing, and Tracking
 
-**Esta é a casa do projeto.** A mesma lista funciona antes e depois de adotar o roteiro.
+**This is the home of the project.** The same list works before and after adopting the roteiro.
 
-### Estado A — proposta recebida, não adotada
+### State A — Proposal Received, Not Adopted
 
 ```text
 ┌─────────────────────────────────────┐
 │ ←      Roteiro                   ⚙ │
 ├─────────────────────────────────────┤
-│ Dança: do preto ao vermelho          │
-│ Proposta · nenhum vídeo gerado       │
-│ 3 blocos · 24 s planejados           │
+│ Dance: from black to red            │
+│ Proposal · no video generated       │
+│ 3 blocks · 24 s planned             │
 │                                     │
-│ ┌─ 1 · Planejado ─────────────────┐ │
-│ │ Dança mantendo o vestido preto. │ │
-│ │ 8 s · [ Editar ]                │ │
+│ ┌─ 1 · Planned ───────────────────┐ │
+│ │ Dances maintaining black dress. │ │
+│ │ 8 s · [ Edit ]                  │ │
 │ └─────────────────────────────────┘ │
-│ ┌─ 2 · Planejado ─────────────────┐ │
-│ │ Salto; muda para vermelho;      │ │
-│ │ termina de costas.              │ │
-│ │ 8 s · [ Editar ]                │ │
+│ ┌─ 2 · Planned ───────────────────┐ │
+│ │ Jump; changes to red;           │ │
+│ │ finishes facing away.           │ │
+│ │ 8 s · [ Edit ]                  │ │
 │ └─────────────────────────────────┘ │
-│ ┌─ 3 · Planejado ─────────────────┐ │
-│ │ Vira de frente; mantém vermelho.│ │
-│ │ 8 s · [ Editar ]                │ │
+│ ┌─ 3 · Planned ───────────────────┐ │
+│ │ Turns facing front; keeps red.  │ │
+│ │ 8 s · [ Edit ]                  │ │
 │ └─────────────────────────────────┘ │
 │                                     │
-│ [ Adicionar bloco ]                 │
-│ [ Usar este roteiro ]               │
-│ Salva todos os blocos. Não gera.     │
+│ [ Add block ]                       │
+│ [ Use this roteiro ]                │
+│ Saves all blocks. Does not generate.│
 └─────────────────────────────────────┘
 ```
 
-- **Todos os itens já têm ação, duração e instrução-base.** Vídeos, frames futuros e Run IDs ainda não existem.
-- Usar este roteiro valida/salva. Permanece nesta tela, mudando para estadoB. Não reproduzir a lista em outra página.
-- Propondo: **“Dividindo sua ideia em blocos…”** Erro: **“Não foi possível obter a proposta. Sua ideia continua aqui.”** +`Voltar à ideia` / `Escrever manualmente`.
-- Inválido: **“A resposta não pôde ser convertida em blocos válidos.”** +`Ver resposta` / `Voltar à ideia`. Sem JSON/HTML executável, adivinhação ou preenchimento silencioso.
-- Outra proposta só por ação explícita `Propor outra versão` em opções. A nova é candidata separada: não substituir edição ou sequência já adotada.
+- **All items already have action, duration, and base instruction.** Videos, future frames, and Run IDs do not exist yet.
+- Use this roteiro validates/saves. Remains on this screen, transitioning to State B. Do not reproduce list on another page.
+- Proposing: **"Dividing your idea into blocks…"** Error: **"Could not get proposal. Your idea remains here."** + `Back to idea` / `Write manually`.
+- Invalid: **"Response could not be converted into valid blocks."** + `View response` / `Back to idea`. No executable JSON/HTML, guessing, or silent filler.
+- Another proposal only via explicit action `Propose another version` in options. The new one is a separate candidate: do not overwrite existing edit or already adopted sequence.
 
-### Estado B — plano adotado
+### State B — Adopted Plan
 
 ```text
-│ Salvo no PC · 1 de 3 blocos aceito   │
-│ [ Preparar bloco 2 ]                │
-│                                     │
-│ 1 · Aceito                          │
-│ Dança mantendo o vestido preto.     │
-│ [ Assistir bloco ]                  │
-│                                     │
-│ 2 · Próximo                         │
-│ Salto; vermelho; termina de costas. │
-│ 8 s · [ Editar ]                    │
-│                                     │
-│ 3 · Planejado                       │
-│ Vira de frente; mantém vermelho.    │
-│ Aguarda o bloco 2 ser aceito.        │
-│ 8 s · [ Editar ]                    │
-│                                     │
-│ [ Ver ideia e referência ▾ ]        │
-│ [ Adicionar bloco ]                 │
+│ Saved on PC · 1 of 3 blocks accepted │
+│ [ Prepare block 2 ]                  │
+│                                      │
+│ 1 · Accepted                         │
+│ Dances maintaining black dress.      │
+│ [ Watch block ]                      │
+│                                      │
+│ 2 · Next                             │
+│ Jump; red; finishes facing away.     │
+│ 8 s · [ Edit ]                       │
+│                                      │
+│ 3 · Planned                          │
+│ Turns facing front; keeps red.       │
+│ Awaits block 2 acceptance.           │
+│ 8 s · [ Edit ]                       │
+│                                      │
+│ [ View idea and reference ▾ ]        │
+│ [ Add block ]                        │
 ```
 
-Ação principal do estadoB:
+Primary action for State B:
 
-| Estado real | Texto/ação |
+| Real state | Text/action |
 | --- | --- |
-| Nenhum gerado | Preparar bloco 1 |
-| Prefixo aceito | Preparar bloco N |
-| Enviado/running | Ver pedido do bloco N |
-| Pronto | Revisar bloco N |
-| Recusado/interrompido confirmado | Preparar outra tentativa |
-| Falha confirmada | Ver tentativa |
-| Incerto | Consultar envio do bloco N |
-| Todos aceitos | Preparar montagem |
+| None generated | Prepare block 1 |
+| Accepted prefix | Prepare block N |
+| Submitted/running | View order for block N |
+| Ready | Review block N |
+| Rejected/interrupted confirmed | Prepare another attempt |
+| Confirmed failure | View attempt |
+| Uncertain | Query submission of block N |
+| All accepted | Prepare assembly |
 
-Sem Gerar tudo. Um cartão aceito abre o resultado, não editor retroativo. Para cada posição, `Ver tentativas` fica disponível ao expandir detalhes, separado do plano.
+No Generate All. An accepted card opens the result, not a retroactive editor. For each position, `View attempts` is available by expanding details, separated from the plan.
 
-### Estado C — editar no cartão
+### State C — Editing in Card
 
 ```text
-│ 2 · Editando plano                  │
-│ O que acontece                      │
-│ [ Texto da ação, editável.        ] │
-│ Duração [ 8 ] s                     │
-│ 192 frames → 8,000 s alinhados       │
-│ [ Salvar alterações ] [ Cancelar ]  │
-│ [ Organizar bloco ▾ ]               │
+│ 2 · Editing plan                     │
+│ What happens                         │
+│ [ Action text, editable.           ] │
+│ Duration [ 8 ] s                     │
+│ 192 frames → 8.000 s aligned         │
+│ [ Save changes ] [ Cancel ]          │
+│ [ Organize block ▾ ]                 │
 ```
 
-- Apenas um cartão em edição por vez; trocar com alterações não salvas oferece `Salvar e continuar` / `Descartar alterações` / `Continuar editando`.
-- Organizar: `Mover para cima`, `Mover para baixo`, `Remover bloco`. São ações de planejamento, sem exclusão de runs/mídia. Remover exige confirmar.
-- Só o sufixo não enviado pode mudar de ordem; não atravessa uma posição já enviada. Não fazer renumeração visual que mude a identidade das tentativas.
-- Modificar ação/duração/vizinho marca instrução detalhada anterior como desatualizada. Não chamar Grok nem sobrescrever o prompt escolhido.
-- Unsaved: **“Alterações não salvas.”** Erro de save conserva o cartão editado. Conflito: **“O roteiro mudou no PC. Confira a outra versão antes de salvar.”**
-- Adicionar um bloco depois de todos aceitos torna o projeto novamente incompleto; não invalida/exclui montagem anterior.
+- Only one card in edit mode at a time; switching with unsaved changes prompts `Save and continue` / `Discard changes` / `Continue editing`.
+- Organize: `Move up`, `Move down`, `Remove block`. These are planning actions, without deleting runs/media. Removal requires confirmation.
+- Only unsubmitted suffix can change order; does not bypass an already submitted position. No visual renumbering that alters identity of attempts.
+- Modifying action/duration/neighbor marks previous detailed instruction as outdated. Do not call Grok or overwrite chosen prompt.
+- Unsaved: **"Unsaved changes."** Save error keeps card in edit mode. Conflict: **"Roteiro changed on PC. Check other version before saving."**
+- Adding a block after all are accepted marks project incomplete again; does not invalidate/delete previous assembly.
 
-## T03 · Preparar bloco — uma bancada, não três páginas
+## T03 · Prepare Block — A Workbench, Not Three Pages
 
-**Uma tarefa:** conferir o contexto e a instrução, detalhar se quiser, gerar quando decidir.
+**A single task:** review context and instruction, detail if desired, generate when decided.
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Preparar bloco 2          ⚙ │
+│ ←      Prepare block 2           ⚙ │
 ├─────────────────────────────────────┤
-│ Bloco 2 de 3 · continuação           │
+│ Block 2 of 3 · continuation          │
 │ ┌──────────────┐ ┌────────────────┐ │
-│ │   imagem     │ │  frame REAL    │ │
-│ │   original   │ │  do bloco 1    │ │
+│ │   original   │ │   REAL frame   │ │
+│ │    image     │ │   of block 1   │ │
 │ └──────────────┘ └────────────────┘ │
-│ Identidade       Onde terminou      │
-│ [ Ampliar ]      [ Ampliar ]         │
+│ Identity         Where it ended     │
+│ [ Expand ]       [ Expand ]         │
 │                                     │
-│ Salto; vestido vermelho; de costas.  │
-│ [ Ver antes e depois ▾ ]            │
+│ Jump; red dress; facing away.       │
+│ [ View before and after ▾ ]         │
 │                                     │
-│ Instrução que será enviada           │
-│ Origem: roteiro                      │
+│ Instruction to be sent              │
+│ Origin: roteiro                     │
 │ ┌─────────────────────────────────┐ │
-│ │ Texto já preenchido e editável. │ │
+│ │ Pre-filled editable text.       │ │
 │ └─────────────────────────────────┘ │
-│ [ Detalhar este bloco com Grok ]     │
+│ [ Detail this block with Grok ]     │
 │                                     │
-│ 8 s solicitados · 192 frames · 8 s   │
-│ Seed: 2026101205                     │
-│ [ Ajustar este bloco ]              │
+│ 8 s requested · 192 frames · 8 s    │
+│ Seed: 2026101205                    │
+│ [ Adjust this block ]               │
 │                                     │
-│ [ Gerar bloco ]                     │
-│ Envia uma nova tentativa para o PC. │
+│ [ Generate block ]                  │
+│ Sends a new attempt to PC.          │
 └─────────────────────────────────────┘
 ```
 
-- A primeira entrada já preenche a instrução-base: não exigir `Usar instrução do roteiro` para copiar algo que já foi adotado.
-- Bloco1 tem só identidade e **“Primeiro bloco · sem vídeo anterior.”** N>1 usa tentativa aceita e publicada doN−1. As duas figuras continuam visíveis no modo proposta também.
-- Antes/depois expandido: **Intenção dos blocos aceitos / Este bloco / Próximo bloco planejado**. Não chamar texto de “o que realmente aconteceu”; o frame é a prova visual atual.
-- Botão de detalhar consulta só este trecho com referência+frame/contexto/duração; não altera seu sistema custom. Abrir a bancada não chama Grok.
-- Gerar usa exatamente o campo indicado como instrução escolhida; manual/Grok/edição são opções, não exigência de outra navegação.
+- Initial entry pre-fills base instruction: do not require `Use roteiro instruction` to copy something already adopted.
+- Block 1 has only identity and **"First block · no prior video."** N>1 uses accepted and published attempt of N−1. Both figures remain visible in proposal mode too.
+- Expanded before/after: **Intent of accepted blocks / This block / Next planned block**. Do not label text as "what actually happened"; frame is current visual proof.
+- Detail button queries only this chunk with reference+frame/context/duration; does not mutate its custom system prompt. Opening workbench does not call Grok.
+- Generate uses exactly the field indicated as chosen instruction; manual/Grok/editing are choices, not requiring further navigation.
 
-### Estado de proposta Grok dentro da mesma bancada
+### Grok Proposal State Within Same Workbench
 
 ```text
-│ Proposta do Grok · ainda não usada   │
-│ [ Texto recebido, editável.       ] │
-│ [ Usar esta proposta ]              │
-│ [ Manter minha instrução ]          │
-│ Confira antes de gerar.              │
+│ Grok proposal · not yet used         │
+│ [ Received text, editable.         ] │
+│ [ Use this proposal ]                │
+│ [ Keep my instruction ]              │
+│ Check before generating.             │
 ```
 
-- Editor mostra o candidato sem sobrescrever o texto escolhido anterior. `Usar esta proposta` copia/adota e retorna ao editor **Instrução que será enviada**, origemGrok. `Manter minha instrução` retorna ao texto anterior.
-- Enquanto o candidato está aberto, não mostrar Gerar como se fosse gerar o texto recebido: **primeiro escolher um dos dois caminhos**. Adotar proposta não gera.
-- Se o usuário mudou o rascunho durante a chamada, a resposta é marcada anterior; adoção explícita e contexto visível. Submissão posterior não pode ter seu snapshot reescrito pela resposta.
-- Pending: **“Detalhando este bloco…”** Erro: **“Não foi possível detalhar. Sua instrução foi mantida.”** Não bloquear o caminho manual por erro isolado do editor.
-- Se o plano/vizinho mudou: **“O plano mudou depois deste detalhamento. Confira a instrução.”** +`Usar esta instrução mesmo assim` / `Voltar ao texto do roteiro`. Confirmação explicita intenção, não limpa incerteza de pedido.
-- Frame indisponível: **“Não foi possível mostrar o último frame.”** +`Reler frame`; Grok com duas imagens indisponível, manual nativo continua conforme contrato existente, sem fallback silencioso.
-- Antecessor inválido: **“Aceite o bloco anterior antes de preparar esta continuação.”** +`Abrir bloco anterior`. Não trocar o pai.
-- Retry entra aqui já preenchido com **prompt FINAL enviado**, referência/seed/duração/pai original e aviso **“Nova tentativa; a anterior continua no histórico.”** Não recomputar do macro.
+- Editor shows candidate without overwriting previously chosen text. `Use this proposal` copies/adopts and returns to editor **Instruction to be sent**, origin Grok. `Keep my instruction` returns to previous text.
+- While candidate is open, do not show Generate as if generating received text: **first choose one of the two paths**. Adopting proposal does not generate.
+- If user modified draft during the call, response is marked stale; explicit adoption and visible context. Later submission cannot have its snapshot rewritten by response.
+- Pending: **"Detailing this block…"** Error: **"Could not detail. Your instruction was kept."** Do not block manual path due to isolated editor error.
+- If plan/neighbor changed: **"Plan changed after this detailing. Check instruction."** + `Use this instruction anyway` / `Return to roteiro text`. Confirmation clarifies intent, does not clear submission uncertainty.
+- Frame unavailable: **"Could not display last frame."** + `Reread frame`; Grok with two images unavailable, native manual path continues per existing contract, without silent fallback.
+- Invalid predecessor: **"Accept previous block before preparing this continuation."** + `Open previous block`. Do not swap parent.
+- Retry arrives here pre-filled with **literal FINAL submitted prompt**, reference/seed/duration/original parent, and notice **"New attempt; previous one remains in history."** Do not recompute from macro.
 
-## T04 · Pedido no PC — tela atual contextualizada
+## T04 · Order on PC — Contextualized Current Screen
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Bloco 2 no PC              ⚙ │
+│ ←      Block 2 on PC             ⚙ │
 ├─────────────────────────────────────┤
-│ Dança: do preto ao vermelho          │
-│ Gerando bloco 2                      │
-│ Aguardando o resultado do PC.        │
+│ Dance: from black to red            │
+│ Generating block 2                  │
+│ Awaiting result from PC.            │
 │                                     │
-│ [ Ver instrução enviada ▾ ]         │
-│ [ Dados desta tentativa ▾ ]         │
-│ [ Voltar ao roteiro ]               │
-│ Voltar não cancela nem reenvia.      │
+│ [ View submitted instruction ▾ ]    │
+│ [ Data of this attempt ▾ ]          │
+│ [ Back to roteiro ]                 │
+│ Back does not cancel or resubmit.   │
 └─────────────────────────────────────┘
 ```
 
-- Enviando: **“Enviando pedido ao PC…”**;202: **“Pedido recebido. Aguardando execução.”**; running: **“Gerando bloco N.”** Sem falso percentual.
-- Ready: `Revisar bloco`. Incerto com Run ID: **“Resultado ainda não confirmado.”** +`Consultar pedido`. Sem ID: **“Não foi possível confirmar se o pedido entrou.”** +`Consultar envio`.
-- Consultar reconcilia a intenção durável/vínculo, não envia outroPOST. Um link faltando no browser não prova que o job não existiu.
-- Nenhuma geração concorrente/retry enquanto sua intenção permanece incerta. Consultar/editar planos futuros não limpa flags.
+- Submitting: **"Sending order to PC…"**; 202: **"Order received. Awaiting execution."**; running: **"Generating block N."** No false percentages.
+- Ready: `Review block`. Uncertain with Run ID: **"Result not yet confirmed."** + `Query order`. Without ID: **"Could not confirm if order was admitted."** + `Query submission`.
+- Query reconciles durable intent/link, does not POST again. A missing link in browser does not prove job never existed.
+- No concurrent generation/retry while intent remains uncertain. Querying/editing future plans does not clear flags.
 
-## T05 · Revisar bloco — operação existente
+## T05 · Review Block — Existing Operation
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Revisar bloco 2            ⚙ │
+│ ←      Review block 2             ⚙ │
 ├─────────────────────────────────────┤
-│ Bloco 2 de 3 · pronto para revisão   │
+│ Block 2 of 3 · ready for review     │
 │ ┌─────────────────────────────────┐ │
-│ │ Vídeo real · controles nativos  │ │
+│ │ Real video · native controls    │ │
 │ └─────────────────────────────────┘ │
-│ Solicitado 8 s · verificado 8,000 s  │
-│ [ Ver instrução enviada ▾ ]         │
-│ [ Ver tentativas deste bloco ▾ ]    │
+│ Requested 8 s · verified 8.000 s    │
+│ [ View submitted instruction ▾ ]    │
+│ [ View attempts of this block ▾ ]   │
 │                                     │
-│ [ Aceitar bloco ]                   │
-│ [ Recusar tentativa ]               │
-│ Aceitar não gera o próximo.         │
+│ [ Accept block ]                    │
+│ [ Reject attempt ]                  │
+│ Accept does not generate next.      │
 └─────────────────────────────────────┘
 ```
 
-Depois de aceitar: **“Bloco 2 aceito.”** +`Preparar bloco 3` / `Voltar ao roteiro`. Permanecer nesta tela; não trocar automaticamente para outro editor.
+After accepting: **"Block 2 accepted."** + `Prepare block 3` / `Back to roteiro`. Remain on this screen; do not automatically navigate to another editor.
 
-Depois de recusar/interrupção confirmada: **“O bloco 2 ainda precisa de uma tentativa aceita.”** +`Preparar outra tentativa` / `Voltar ao roteiro`. Retry →T03 diretamente, sem novo roteiro/Grok.
+After rejecting / confirmed interruption: **"Block 2 still needs an accepted attempt."** + `Prepare another attempt` / `Back to roteiro`. Retry → T03 directly, without new roteiro/Grok.
 
-Sem vídeo: mostrar erro/estado/prompt, não player fictício. Failed conserva política atual, sem inventar retry novo. Resultados aceitos não editam o meio: operação de duas âncoras é outra evolução.
+Without video: display error/state/prompt, not fictitious player. Failed preserves current policy, without inventing new retry. Accepted results do not edit middle chunks: two-anchor operation is a separate evolution.
 
-## T06 · Montagem — operação existente
+## T06 · Assembly — Existing Operation
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Montagem                  ⚙ │
+│ ←      Assembly                  ⚙ │
 ├─────────────────────────────────────┤
-│ Dança: do preto ao vermelho          │
-│ 3 blocos aceitos · 24 s verificados  │
-│ 1 · Dança de preto                  │
-│ 2 · Salto; vermelho; de costas      │
-│ 3 · Vira de frente                  │
+│ Dance: from black to red            │
+│ 3 accepted blocks · 24 s verified   │
+│ 1 · Dance in black                  │
+│ 2 · Jump; red; facing away          │
+│ 3 · Turns facing front              │
 │                                     │
-│ [ Montar vídeo ]                    │
-│ Não gera novos blocos.              │
+│ [ Assemble video ]                  │
+│ Does not generate new blocks.       │
 └─────────────────────────────────────┘
 ```
 
-Cadeia concreta das tentativas aceitas, não quaisquer trêsruns. Ao concluir, player/`Abrir vídeo`/`Baixar vídeo`. Parcial: **“Prévia: 2 de 3 blocos”**. Incerto/erro: `Reler montagem` do mesmo UUID; Voltar ao roteiro disponível. Não remonta ao aceitar/reload/SSE.
+Concrete chain of accepted attempts, not any arbitrary three runs. Upon completion, player / `Open video` / `Download video`. Partial: **"Preview: 2 of 3 blocks"**. Uncertain/error: `Reread assembly` for same UUID; Back to roteiro available. Does not re-assemble on accept/reload/SSE.
 
-## T07 · Ajustes — escopo explícito, sem três editores abertos
+## T07 · Settings — Explicit Scope, No Three Editors Open
 
 ```text
 ┌─────────────────────────────────────┐
-│ ←      Ajustes                   ⚙ │
+│ ←      Settings                  ⚙ │
 ├─────────────────────────────────────┤
-│ Este bloco · rascunho                │
-│ Duração [ 8 ] s                      │
-│ Seed [ 2026101205 ]                  │
-│ Não altera tentativas enviadas.      │
+│ This block · draft                  │
+│ Duration [ 8 ] s                    │
+│ Seed [ 2026101205 ]                 │
+│ Does not alter submitted attempts.  │
 │                                     │
-│ [ Instruções do roteirista ▾ ]       │
-│ [ Instruções do detalhamento ▾ ]     │
+│ [ Scriptwriter instructions ▾ ]     │
+│ [ Detailing instructions ▾ ]        │
 │                                     │
-│ [ Concluir ajustes ]                │
+│ [ Done with settings ]              │
 └─────────────────────────────────────┘
 ```
 
-- Seção local só para rascunho não enviado. Nas outras origens: **“Abra um bloco ainda não enviado para ajustar duração e seed.”**
-- Abrir roteirista revela textarea/modelo fixo/`Salvar instruções do roteirista`; abrir detalhamento revela seu sistema atual/modelo/`Salvar instruções do detalhamento`. Não sobrescrever um pelo outro.
-- Concluir/Back não salva sistemas implicitamente nem chama provider. Campos locais seguem o rascunho; seu salvamento deve ser confirmado antes de enviar a intenção do bloco.
-- Sem controles de RAM/lifecycle/modelo nativo/sampler. Preservar scroll/foco e não abrir teclado sozinho.
+- Local section only for unsubmitted draft. For other origins: **"Open an unsubmitted block to adjust duration and seed."**
+- Opening scriptwriter reveals textarea / fixed model / `Save scriptwriter instructions`; opening detailing reveals current system / model / `Save detailing instructions`. Do not overwrite one with the other.
+- Done/Back does not implicitly save systems or call provider. Local fields track draft; saving must be confirmed before submitting block intent.
+- No controls for RAM / lifecycle / native model / sampler. Preserve scroll/focus and do not open keyboard automatically.
 
-## Revisão rápida
+## Quick Review
 
-A proposta é: **ideia →lista preenchida/editável →bancada do próximo bloco →pedido/revisão →próximo**. Mudanças técnicas de segurança não precisam virar etapas extras para o usuário.
+The proposal is: **idea → populated/editable list → next block workbench → order/review → next**. Technical safety changes do not need to become extra steps for the user.
 
-Mapeamento do desenho anterior: T02+T03+T04 viraram T02; T05+T06+T07 viraram T03; status/revisão/montagem/ajustes viraram T04–T07. Biblioteca/criação preservadas. Os IDs atuais são os desta v2.
+Mapping from previous design: T02+T03+T04 became T02; T05+T06+T07 became T03; status/review/assembly/settings became T04–T07. Library/creation preserved. Current IDs are those of this v2.
 
-**Aguardar revisão humana antes de implementar.** O desenho foi criticado e simplificado; não significa que a proposta já esteja validada em browser.
+**Await human review before implementing.** The design has been critically reviewed and simplified; this does not mean the proposal has already been validated in a browser.
