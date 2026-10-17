@@ -155,3 +155,17 @@ A fotografia original nunca é recolorida. O relatório congela Markdown complet
 O diretório precisa ser novo e ficar sob `.dumps/benchmarks/`; arquivos existentes não são sobrescritos. Antes de cada POST o ledger grava a intenção. Se falhar/timeout, **não repetir o comando nesse diretório nem submeter às cegas**: consultar `report.json` e os IDs conhecidos para recuperação explícita. Não há resume automático ou cancelamento global.
 
 O relatório registra tempos wall-clock por chunk/total/montagem, timings do backend, probes/hashes, proveniência e contagem real dos grafos, estado dos parents e métricas disponíveis da telemetria. RAM/VRAM/swap são amostras de 5 s, não picos exatos; IO indisponível é registrado como tal. Modelos/cache não são liberados/reiniciados pelo teste, warm/cold é desconhecido, e uso de memória não é prova de offload para SSD. Mesmas seeds não garantem pixels idênticos. Para comparar uma poda futura, repita **o mesmo cenário** em outro diretório novo e revise o vídeo montado antes de declarar ausência de perda.
+
+## Backlog do app Android
+
+Anotações para depois do teste real (detalhes em `.plan/backlog/`, local e fora do git):
+
+- **Primeiro bloco e visão cinematográfica**: o primeiro bloco só recebe a foto de identidade na
+  melhoria do Grok, e nenhum bloco recebe a `vision`/`scenes` do planejamento na hora de gerar.
+  Avaliar guardar a visão adotada no roteiro e enviá-la ao melhorador, com destaque para a abertura.
+- **Status do registro de notificações**: em Ajustes, checar `GET /notifications/devices` e mostrar
+  "Registrado neste PC ✓" em vez do botão sempre disponível; trocar `device_id = Build.ID` por um
+  UUID próprio do app.
+- **Pontos da revisão do backend**: fala pode ficar sem bloco se o crítico criar mais beats que
+  blocos; montagem com centenas de clipes pode estourar o timeout de 120 s do FFmpeg; planejar
+  centenas de blocos numa só chamada pode passar do limite de 100k caracteres do Grok.
