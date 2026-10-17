@@ -1,171 +1,119 @@
-# H3 — app local de vídeo
+# H3 — Local Video Generation Studio
 
-Geração por blocos e revisão humana sobre os grafos nativos validados do ComfyUI. `.data` no PC é a autoridade; Python serve o front JS, catálogos, upload e mídia própria, observa paths por inotify/SSE e coordena ferramentas externas, sem carregar modelos ou pixels. Ponte/worker, editor Grok isolado e montagem FFmpeg estão integrados e verificados no navegador real. A revisão continua explícita; a montagem de um fim ainda pronto para revisão é uma prévia. Consulte [arquitetura local](docs/local_architecture.md).
+> **Note:** This project was originally built for my personal workflow and video generation setup, but the codebase is open for anyone who wants to use, explore, or build upon it. If you run it locally with your own ComfyUI installation, **we recommend running the project and workflow files through an LLM or coding agent (such as Claude / Claude Code)** to review and pinpoint any custom nodes that your ComfyUI setup might still be missing.
 
-As decisões permanentes de autonomia, arquitetura vertical, benchmark, MCP, dados e frontend estão em [`AGENTS.md`](AGENTS.md). A meta é um aplicativo local leve de vídeos encadeados, não apenas um teste de geração.
+Block-by-block sequential video generation and human review built on top of validated native ComfyUI graphs. `.data` on the host PC is the single source of truth; Python serves the lightweight API/UI bridge, catalogs, uploads, and media, observing paths via inotify/SSE and orchestrating external tools without loading models or raw pixel data in memory. The bridge/worker, isolated Grok prompt enhancer/scripting, and FFmpeg assembly are integrated and verified. Human review remains explicit. See [local architecture](docs/local_architecture.md).
 
-O Store grava estados/JSONs/mídia persistente em `.data/runs/<UUID>/`. `runs/` permanece como âncora legada intacta: projetos com esse legado exigem [migração offline verificada](docs/data_storage.md), sem reescrever manifests ou apagar vídeos. O runtime só usa a autoridade canônica após recibo válido. `.dumps/` continua como scratch/evidência; recursos `workflows/`, `prompts/` e `assets/` permanecem na raiz do projeto.
+Standing decisions on autonomy, vertical architecture, benchmarks, MCP, data storage, and the Android interface are documented in [`AGENTS.md`](AGENTS.md). The goal is a responsive, local chained video creation app, not merely a generation script.
 
-## Abrir o estúdio local
+The Store persists state, JSON metadata, and media under `.data/runs/<UUID>/`. `runs/` is preserved as a legacy anchor; projects with existing data require [verified offline migration](docs/data_storage.md) without rewriting manifests or deleting videos. `.dumps/` remains scratch/ephemeral evidence, while `workflows/`, `prompts/`, and `assets/` reside at the repository root.
 
-Na raiz do projeto, com FFmpeg/ffprobe e o ComfyUI já disponíveis:
+## Launching the Local Studio
+
+From the repository root, with FFmpeg, ffprobe, and a working ComfyUI instance available:
 
 ```fish
 uv sync
 env PYTHONDONTWRITEBYTECODE=1 uv run --no-sync uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010 --timeout-graceful-shutdown 5
 ```
 
-Abra `http://127.0.0.1:8010`. Para usar pelo celular na mesma **rede confiável**, na porta8888:
+Open `http://127.0.0.1:8010`. To connect from mobile over the same **trusted local network** on port 8888:
 
 ```fish
 ./start.sh
 ```
 
-O script inicia a ponte em `0.0.0.0:8888`, sem instalar dependências automaticamente; execute `uv sync` na preparação inicial. Também funciona quando chamado pelo caminho absoluto fora da raiz do projeto. No PC, abra `http://127.0.0.1:8888`. Ao encerrar, aguarda até 5 segundos pelas conexões HTTP abertas; depois cancela as conexões restantes, inclusive SSE, e executa a limpeza do aplicativo. A limpeza de uma geração própria pode exigir tempo adicional para registrar a interrupção e solicitar o cancelamento daquele pedido; o limite não mata o processo nem cancela jobs globais do ComfyUI.
+The script starts the server on `0.0.0.0:8888`. On the host PC, open `http://127.0.0.1:8888`. On mobile, open `http://<PC-LOCAL-IP>:8888` (check with `hostname -I`). **Do not expose this server to the public internet**: it directly manages local filesystem operations and execution permissions on your host PC. Shutting down the bridge waits up to 5 seconds for open HTTP/SSE connections before teardown; closing the bridge does not unload ComfyUI models (they run as separate processes).
 
-No celular, abra `http://IP-DO-PC:8888`; `hostname -I` mostra os IPs do PC. Não publique esse servidor na internet: ele opera os arquivos e autorizações locais do PC. Fechar a ponte não libera os modelos do ComfyUI; são processos distintos.
+- **Roteiro (Story / Script mode)**: plans consecutive chunks in `/roteiro`: idea + visual reference → structured block proposal → explicit review/adoption → step-by-step block preparation. See [roteiro documentation](docs/roteiro.md).
+- **Generate Remaining Blocks**: runs the confirmed script sequentially, refining each block with Grok, technically accepting intermediates to proceed, and halting at the final block for human review. Errors or stops cleanly halt the batch without unverified retries.
+- **Tail Continuation**: appends new blocks after the last accepted video. A single user prompt produces an editable structured proposal preserving existing history.
+- **Bridge / In-between Editing**: allows inserting blocks or re-doing intermediate chunks between two accepted anchors (previous block's last frame and following block's first frame). Grok receives identity reference, the two anchor frames, and historical prompts as context.
+- **FFmpeg Sequence Assembly**: stitches accepted chains into a single video without re-encoding quality degradation, ensuring continuous audio coverage across chunk boundaries.
+- **Android Mobile App**: a dedicated native Android client (`mobile_app/`) featuring gesture navigation, live status updates, and push notifications via FCM for completed blocks. Pre-built APKs are available under GitHub Releases.
 
-- **Novo roteiro** planeja o conjunto em `/roteiro`: ideia + referência →proposta de blocos preenchidos →edição/adoção explícita →preparar um bloco por vez. **Novo freestyle** mantém o modo Freestyle; geração, status, revisão, retry e montagem são compartilhados, não outro motor. Plano/intenções vivem no PC; adotar não gera e aceitar não gera o próximo. Veja [roteiro e recuperação](docs/roteiro.md).
-- **Gerar os blocos restantes** executa o roteiro salvo em ordem após confirmação: detalha cada bloco com Grok, usa a proposta e aceita tecnicamente os intermediários para continuar. O último exige revisão. Erro, resultado incerto ou **Parar** interrompem o lote sem replay.
-- **Continuar roteiro · Tail** acrescenta blocos após o último vídeo aceito: uma frase vira proposta estruturada editável, a adoção preserva o trecho existente e o lote melhora cada novo bloco com o frame real atualizado. Todos os blocos atuais precisam estar concluídos e aceitos; o limite total permanece 50. Consulte o mesmo UUID após resultado incerto, sem reenviar.
-- **Editar vídeo** abre uma tela própria para **Refazer bloco**, **Inserir antes** ou **Inserir depois**. Cada edição cria um vídeo entre duas âncoras aceitas: último frame do anterior e primeiro frame do seguinte. O Grok recebe essas imagens, a identidade e os prompts efetivamente enviados nos dois vizinhos, identificados em inglês como histórico. Seu system prompt fica separado em Ajustes. Revise o novo vídeo e aplique a edição explicitamente; refazer acrescenta uma versão e inserir acrescenta um bloco. Versões aceitas anteriores continuam selecionáveis. Uma edição sem vizinho anterior ou seguinte é bloqueada com explicação; para estender o fim, use Tail.
-- A edição usa a operação nativa `bridge`, derivada do V2V com guia final no frame `-1`, preservando os parâmetros existentes. O vídeo anterior alimenta o motor nativo; o Grok recebe três imagens, sem upload de vídeo. A conexão das âncoras foi validada com fixtures CPU e clientes falsos; a continuidade artística exige revisão do vídeo gerado.
-- **Montar roteiro** usa a ordem e as versões selecionadas, preservando os pais originais de cada vídeo. **Preparar outra tentativa** de uma edição falha/interrompida/recusada copia o prompt enviado e as mesmas âncoras, sem nova chamada Grok; gerar exige outro clique. **Descartar edição** abandona uma proposta ou resultado conhecido sem apagar vídeos. Resultados incertos exigem consulta do mesmo ID.
-- Ações bloqueadas explicam o motivo ao toque/clique, preservando o bloqueio. Na tela do roteiro, Tail fica após os blocos e ações principais; apagar e consultar a ideia/referência ficam em **Outras opções**.
-- Enquanto o Grok responde, um indicador discreto alterna 20 mensagens de espera. Não representa progresso; pausa em telas ocultas e respeita redução de movimento, sem reenviar pedidos.
-- Microanimações acompanham estrelas de favorito após confirmação, ícones de navegação, seções recolhíveis e mudanças de estado do roteiro. Mídia e controles nativos permanecem estáveis; redução de movimento desativa os efeitos.
-- No Freestyle, **Operações → Converter para roteiro** adota a sequência completa aberta, preservando mídia, prompts, parâmetros e decisões. Não gera nem chama Grok.
-- Os avisos de geração na biblioteca oferecem **Parar**: o cartão abre confirmação verde/vermelha, e somente **Confirmar parada** cancela o pedido próprio.
-- A biblioteca organiza **Favoritos**, **Roteiros** e **Freestyle** em seções recolhíveis. Estrela e lixeira ficam no próprio cartão; os textos das listas mostram até três linhas, preservando o prompt completo ao abrir. Freestyle carrega12 itens por página e lê as seguintes só em **Carregar mais**. Favoritos ficam em `.data/library/favorites.json`, compartilhados pelos navegadores conectados ao mesmo PC.
-- Ao reconectar, o app consulta o ID original e troca o aviso incerto pelo estado confirmado. **Dispensar aviso** aparece somente para pedidos resolvidos; não apaga arquivos, libera um pedido ativo nem repete geração. Os ponteiros de recuperação permanecem na URL. Uma decisão de revisão sem resultado confirmado continua bloqueada.
-- O PWA inclui ícone H3 próprio, manifesto e opção **Instalar H3** nos Ajustes quando o navegador permitir. No celular, instalação exige **HTTPS confiável**; HTTP pelo IP da rede continua como site. Tela cheia depende do suporte da plataforma. A tela offline preserva a URL para reconectar; API, mídia, operações e rascunhos não são cacheados nem repetidos. JavaScript do estúdio é sempre lido da rede para evitar versões antigas. Veja o [requisito de instalação](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable).
-- Animações de navegação/feedback têm o dobro da duração anterior; os dropdowns abrem e fecham suavemente nos navegadores com suporte. **Reduzir movimento** remove as transições, sem atrasar as ações.
-- Um carregamento genérico bloqueia a vista atual congelada ao iniciar o estúdio e abrir roteiros, blocos ou montagens, com entrada/saída por opacidade. O gesto de voltar fica bloqueado durante a leitura; **Voltar** na camada de loading abandona a consulta da tela. Uma resposta atrasada não força navegação nem cancela geração no PC. Atualizações de metadados em segundo plano continuam discretas.
-- O visual usa azul-petróleo/turquesa, cartões arredondados e movimentos inspirados em **Coisas de Casa**, com paleta própria do estúdio. O gesto de voltar acompanha o dedo sobre vistas congeladas: soltar cedo devolve a tela ao lugar; completar restaura rolagem, rascunho, seleção, seções abertas e posição do vídeo, sem autoplay ou nova geração. Vídeos e controles reais não são transformados durante o arrasto.
-- Os cards do roteiro montam suas opções perto da área visível e mantêm o conteúdo já aberto ao navegar; versões e tentativas só são montadas ao abrir o histórico. A entrada acompanha a rolagem com retorno elástico discreto no texto, respeitando redução de movimento. Os metadados continuam sendo lidos como um documento; este carregamento progressivo reduz o trabalho da interface, sem mudar a geração ou paginar a API.
-- Selecione uma referência da biblioteca ou **Envie imagem ao PC**; upload não gera vídeo. Imagens próprias ficam em `.data/inputs/`, com bytes originais preservados.
-- Descreva a cena e clique **Gerar** explicitamente. Assista ao bloco antes de aceitar/rejeitar; apenas um pai aceito permite continuar.
-- **Detalhar ideia e imagem** envia explicitamente sua ideia e a referência selecionada ao Grok. Na continuação, você vê e envia **identidade original + último frame do pai aceito**, para distinguir identidade de pose/roupa atual. O preview do frame é CPU, não geração. **Usar esta proposta** e **Gerar** são ações separadas. System prompt é editável nos Ajustes, mas o modelo continua fixo: `grok-4.20-0309-non-reasoning`. Credenciais ficam separadas; uma chamada real autorizada com duas imagens respondeu200, mas limites/cota e obediência integral da proposta não estão certificados. Veja [Grok](docs/grok.md); abrir/reconectar não chama o provider.
-- A engrenagem abre **Ajustes**: seed/duração pertencem ao rascunho do bloco ainda não enviado, não alteram resultados nem viram preset global. Duração solicitada até10s, default8s para novos blocos; alinhamento nativo24fps/5+17k:8s→192frames/8s,3s→73frames/3.042s,5s→124frames/5.167s,10s→243frames/10.125s. Benchmark2.3s e durações históricas de retry permanecem explícitos.10s é orçamento operacional, não garantia de memória/desempenho/qualidade; não foi feita geraçãoGPUlonga.
-- Blocos **recusados/interrompidos** conservam seu **prompt final enviado**, inclusive o melhorado pelo Grok se usado. **Preparar nova tentativa** abre geração já preenchida, sem voltar ao começo ou chamar Grok de novo. Só Gerar cria outro pedido; a tentativa antiga não é reaberta e a nova exige revisão. Continuação usa o mesmo pai original aceito. Sem metadados seguros, a cópia é bloqueada com motivo, não substituída por defaults.
-- Atualização de arquivos chega por SSE; reconectar ou atualizar a biblioteca só relê metadados, nunca repete geração. Resultado incerto exige consulta do ID conhecido, não novo POST cego.
-
-**Montar sequência** concatena a cadeia selecionada, sem gerar novos blocos: todos os pais devem estar aceitos e o fim pode estar aceito ou pronto para revisão. Assista/baixe o resultado no painel próprio. Montar não aceita o fim: a prévia mantém a revisão pendente. Após aceitar o fim, um novo clique explícito pode publicar uma montagem da sequência aceita. Se a resposta for perdida, use **Reler montagem** no ID conhecido; não reenvie às cegas.
-
-No celular, uma tela principal por vez e um topo compacto **Voltar · título · engrenagem**. Biblioteca/Nova cena não ficam como abas permanentes; listas, ancestrais e ações acompanham a única rolagem da página, sem rodapé/docks fixos. Grok é opcional no fluxo manual e obrigatório antes de cada bloco no lote. Voltar/Ajustes preservam o rascunho, referência, seed e duração durante a sessão. Recarregar relê os arquivos do PC sem repetir operações; rascunhos ainda não enviados não são persistidos no navegador.
-
-O fluxo tem microanimações curtas de entrada, toque, seleção e confirmação, principalmente no mobile. Elas não atrasam cliques nem movem os vídeos/controles fixos; respeitam a preferência **reduzir movimento** do aparelho. Loading é feedback do estado real, sem progresso inventado ou operações disparadas pela animação.
-
-## Organização
+## Project Structure
 
 ```text
 src/h3_backend/
 ├── __init__.py
-├── api.py                 # HTTP, consulta e revisão
-├── roteiro.py             # planos, propostas, configuração e correlação de intenções
-├── generation/            # fatia vertical de geração
+├── api.py                 # HTTP endpoints, query, review, and notifications
+├── roteiro/               # Structured script narrator, timeline, palette & cards
+├── generation/            # Vertical generation slice
 │   ├── __init__.py
-│   ├── i2v.py             # I2VPipe: fluxo completo de imagem → chunk
-│   ├── v2v.py             # V2VPipe: fluxo completo de continuação → chunk
-│   ├── dispatcher.py      # slot único, worker e lifecycle dos pedidos; RAM só telemetria
-│   ├── workflow.py        # builder único + WorkflowConfig imutável
-│   └── models.py          # requests, settings e Run da geração
-└── infrastructure/        # adaptadores compartilhados existentes
+│   ├── i2v.py             # I2VPipe: image-to-video root chunk flow
+│   ├── v2v.py             # V2VPipe: video-to-video continuation flow
+│   ├── dispatcher.py      # Single-slot worker, job admission and lifecycle
+│   ├── workflow.py        # WorkflowConfig builder and ComfyUI graph compiler
+│   └── models.py          # Generation requests, settings, and Run data
+├── notifications/         # FCM push notifications for Android clients
+└── infrastructure/        # Shared adapters
     ├── __init__.py
     ├── comfy.py
     ├── media.py
     ├── store.py
     └── telemetry.py
-workflows/                 # grafos nativos, exports golden e manifests necessários
-prompts/                   # templates Markdown de geração/continuação
-assets/                    # referência de identidade normalizada e sua procedência
-tests/                     # suíte pytest versionada (regressões, não dumps)
+mobile_app/                # Native Android application (Jetpack Compose / Gradle)
+workflows/                 # Native ComfyUI graphs, golden exports, and manifests
+prompts/                   # Generation & continuation prompt templates
+assets/                    # Normalized reference assets and provenance metadata
+tests/                     # Comprehensive pytest regression suite
 tools/
-├── export_workflow.mjs     # exportador nativo
-└── benchmark_h3.py         # benchmark externo: três chunks + montagem
-pyproject.toml, uv.lock    # dependências e configuração reproduzíveis
-.data/runs/<id>/           # local: manifest, inputs e chunk.mp4 persistentes
-.data/roteiros/<id>/       # local: plano, candidatos e histórico de intenções
-runs/<id>/                 # legado preservado, nunca fallback gravável
-.dumps/                    # local: scratch e evidências temporárias
-├── tests/requests/        # requests experimentais
-├── tests/reports/         # relatórios históricos e checks de integridade
-└── references/            # cópia privada original apontada pelo manifest de referência
+├── export_workflow.mjs    # Native workflow exporter
+└── benchmark_h3.py        # 3-chunk end-to-end benchmark CLI
+pyproject.toml, uv.lock    # Python dependencies and locked resolution
+.data/runs/<id>/           # Local runtime: manifest, inputs, and chunk.mp4
+.data/roteiros/<id>/       # Local runtime: script plans, candidates, and history
+runs/<id>/                 # Preserved legacy anchor
+.dumps/                    # Local temporary scratch and evidence
 ```
 
-Cada operação concentra sua composição, estado, router e etapas no próprio arquivo vertical: os pipes em `generation/` e os planos em `roteiro.py`. Setters fluentes não fazem I/O; `generation/dispatcher.py` admite um único job e seu worker executa o pipe nativo. `generation/workflow.py` usa `continuation_api.json` como template canônico e configura i2v/v2v sem modificar os exports validados. `infrastructure/` reúne somente adaptadores existentes, não novos serviços de negócio. O entrypoint continua `h3_backend.api:app`.
+## What to Preserve
 
-`POST /runs/i2v` e `POST /runs/{parent_id}/v2v` retornam **202**. A continuação exige parent aceito e usa seu último frame, a identidade original e a cauda recente. Os aliases `/runs` e `/runs/{parent_id}/continue` continuam válidos. Aceitar um run não gera automaticamente o próximo.
+- **Versioned:** Codebase, `tests/` suite, prompts, normalized assets, `workflows/` graphs/manifests, exporter, and lockfiles.
+- **Local Persistent:** `runs/` contains real chunks and inputs required for continuation. Being gitignored does not make them disposable.
+- **Local Ephemeral:** Ad-hoc requests, reports, and scratch belong in `.dumps/`, never in Git.
+- **Private Provenance:** Keep `.dumps/references/` as long as `assets/reference_manifest.json` points to it.
+- **Workspace:** `.plan/` is managed locally and `.agents/config.json` is local config; neither is committed.
 
-`GET /runs/{id}/sequence` lista somente a cadeia de manifests até esse run; não lê vídeos nem concatena. `POST /assemblies/{UUID}` com `{end_run_id}` aguarda a montagem CPU e devolve200; ela vive em `.data/assemblies/<UUID>/` separada dos runs. GET do mesmo ID e vídeo próprio/Range permitem redescobrir o resultado sem executar novamente. A reserva CPU compartilha slot/leases com geração; não altera decisões dos runs. RAM é só telemetria: o app não rejeita/cancela por memória livre nem gerencia o ComfyUI, cujo ciclo de vida pertence ao script externo do dono. O helper FFmpeg mantém ordem/contagem e áudio preenchido, sem trim/crossfade; CRF18 não promete pixels RGB ou MP4 byte-exact. A extração do último frame e da cauda do parent pertence ao `V2VPipe`; geração continua restrita ao pedido explícito.
+## Validation & Testing
 
-## O que preservar
+Requires `uv`, Python ≥ 3.12, and FFmpeg/ffprobe in your `PATH`. Pillow is a **dev-only dependency** used for test fixtures and historical tooling; the runtime relies exclusively on FFmpeg/ffprobe and bounded buffers.
 
-- **Versionado:** código, suíte `tests/`, prompts, assets normalizados, grafos/manifests de `workflows/`, exporter e configuração de dependências.
-- **Persistente local:** `runs/` contém chunks reais e seus inputs/manifests, necessários à continuação. Ser gitignored **não** os torna descartáveis.
-- **Temporário local:** requests avulsos, replays, relatórios e snapshots experimentais ficam em `.dumps/`, nunca no Git. Os relatórios antigos são registros do momento de cada teste, não o estado atual dos runs.
-- **Procedência privada:** preservar `.dumps/references/` enquanto `assets/reference_manifest.json` apontar para ela. `.dumps` não é backup; não limpar indiscriminadamente.
-- **Workspace:** `.plan/` é gerenciado pelo harness e `.agents/config.json` é configuração local; não fazem parte da aplicação.
-
-## Validar sem recriar caches
-
-Requer `uv`, Python ≥3.12 e FFmpeg/ffprobe no PATH. Pillow é dependência **somente de desenvolvimento** para testes/tooling histórico; o runtime usa FFmpeg/ffprobe externos e hashes/streaming com buffers limitados. Não há imagens ou frames decodificados no Python da aplicação.
-
-Para validar o projeto, na raiz:
+Run test suite and linters from the root directory:
 
 ```fish
 uv sync
 env PYTHONDONTWRITEBYTECODE=1 uv run pytest -q -p no:cacheprovider
 uv run ruff check --no-cache src tests
-node --test tests/frontend_ui.test.mjs tests/frontend_retry.test.mjs tests/frontend_roteiro.test.mjs
 ```
 
-A suíte usa transporte Comfy simulado e fixtures sintéticas de mídia: não submete jobs GPU nem precisa gerar novos chunks reais. A integração de roteiro passou859 testes Python e171 Node; [evidência mobile e limites](docs/roteiro.md#validação-e-evidência) distinguem dados mockados de geração real.
+Tests use mock ComfyUI transport and synthetic CPU media fixtures: no GPU or model execution is triggered during testing.
 
-## Perfil de saída (opt-in)
+## Output Profiles (Opt-in)
 
-O default continua `baseline`: 75 nós i2v/78 v2v, com a prévia nativa. `H3_WORKFLOW_OUTPUT_PROFILE=final_only` remove **apenas** `18`, `176`, `177` (prévia/decode vídeo/decode áudio exclusivos), deixando 72/75 nós. Todos os nós e links restantes são iguais; o output final `34` continua usando os decodes originais do denoised output1. Modelos, sampler, guias, condicionamento e parâmetros não são reajustados. Perfis desconhecidos falham antes de admitir jobs.
+The default output profile is `baseline`: 75 nodes (I2V) / 78 nodes (V2V), including native video/audio preview decodes. Setting `H3_WORKFLOW_OUTPUT_PROFILE=final_only` prunes only preview nodes (`18`, `176`, `177`), reducing graph complexity to 72/75 nodes while leaving final output node `34` unchanged.
 
-Para selecionar o perfil na API (comando fish; **inicia a API**, não inferência por si):
+To select the profile:
 
 ```fish
 env PYTHONDONTWRITEBYTECODE=1 H3_WORKFLOW_OUTPUT_PROFILE=final_only uv run uvicorn h3_backend.api:app --host 127.0.0.1 --port 8010 --timeout-graceful-shutdown 5
 ```
 
-Para restaurar o default, omita a variável ou use `H3_WORKFLOW_OUTPUT_PROFILE=baseline`. A proveniência registra `output_profile`, `removed_preview_nodes` e `effective_baseline_hash`; `workflow_hash` continua identificando o export golden original, enquanto o SHA do payload persistido identifica o JSON realmente submetido. `.data`/armazenamento e o cenário da CLI não mudam nesta fase. Remover a prévia não implica ganho proporcional de RAM/VRAM: modelos e cache continuam residentes. A comparação real já foi concluída: baseline410.259s e final_only451.258s, com 168 frames/7s, cenário/presets preservados e inspeção visual amostrada. O processo/cache externo mudou entre execuções; esses tempos não permitem atribuir desempenho à poda. Evidência local: `.dumps/benchmarks/final-only-three-chunks/report.json` e `.dumps/tests/reports/output_profile_comparison.json`.
+## Android App & Releases
 
-## Benchmark real congelado (opt-in)
+The native Android application is located in `mobile_app/`. Built debug APKs can be found in `mobile_app/release/` and are published as GitHub Release assets.
 
-Com a API atual já rodando e a fila ComfyUI livre, execute uma vez, na raiz:
+To build the APK locally using the containerized Android toolchain:
 
-```fish
-env PYTHONDONTWRITEBYTECODE=1 uv run python tools/benchmark_h3.py --api-url http://127.0.0.1:8010 --output-dir .dumps/benchmarks/baseline --technical-acceptance
+```bash
+./mobile_app/build_apk.sh
 ```
 
-O comando **gera três vídeos reais/GPU** em sequência, com seeds `2026101205/6/7`, duração solicitada `2.3`, 56 frames a 24 fps e 480×864 por chunk:
+## Android App Backlog
 
-1. Dança suave com o vestido **preto original**.
-2. Continua da pose anterior, pequeno salto; o vestido muda **de preto para vermelho durante o chunk**, terminando **de costas/vermelho**.
-3. Começa **de costas/vermelho**, vira **de frente** e revela o rosto da fotografia original, mantendo o vestido **vermelho**.
+Items noted for upcoming improvements:
 
-A fotografia original nunca é recolorida. O relatório congela Markdown completo, seeds, parâmetros e SHA da referência/cenário. Os dois primeiros parents são aceitos **tecnicamente apenas neste benchmark**, depois dos checks, por autorização explícita da flag; isso não equivale à aprovação visual do dono. O terceiro permanece `ready_for_review`. Sem a flag, nenhuma submissão ocorre. O benchmark não muda a política de revisão da API.
-
-`benchmark.mp4` e `report.json` ficam no diretório local/ignorado informado. A montagem externa preserva os 168 frames (~7 s), sem trim, crossfade ou compensação escondida; áudio é preenchido até cada boundary. As junções são nos frames 56/112 (2,333333/4,666667 s). A cor, pose e recuperação facial precisam de **revisão visual humana**; checks técnicos não provam identidade ou continuidade perceptual.
-
-O diretório precisa ser novo e ficar sob `.dumps/benchmarks/`; arquivos existentes não são sobrescritos. Antes de cada POST o ledger grava a intenção. Se falhar/timeout, **não repetir o comando nesse diretório nem submeter às cegas**: consultar `report.json` e os IDs conhecidos para recuperação explícita. Não há resume automático ou cancelamento global.
-
-O relatório registra tempos wall-clock por chunk/total/montagem, timings do backend, probes/hashes, proveniência e contagem real dos grafos, estado dos parents e métricas disponíveis da telemetria. RAM/VRAM/swap são amostras de 5 s, não picos exatos; IO indisponível é registrado como tal. Modelos/cache não são liberados/reiniciados pelo teste, warm/cold é desconhecido, e uso de memória não é prova de offload para SSD. Mesmas seeds não garantem pixels idênticos. Para comparar uma poda futura, repita **o mesmo cenário** em outro diretório novo e revise o vídeo montado antes de declarar ausência de perda.
-
-## Backlog do app Android
-
-Anotações para depois do teste real (detalhes em `.plan/backlog/`, local e fora do git):
-
-- **Primeiro bloco e visão cinematográfica**: o primeiro bloco só recebe a foto de identidade na
-  melhoria do Grok, e nenhum bloco recebe a `vision`/`scenes` do planejamento na hora de gerar.
-  Avaliar guardar a visão adotada no roteiro e enviá-la ao melhorador, com destaque para a abertura.
-- **Status do registro de notificações**: em Ajustes, checar `GET /notifications/devices` e mostrar
-  "Registrado neste PC ✓" em vez do botão sempre disponível; trocar `device_id = Build.ID` por um
-  UUID próprio do app.
-- **Pontos da revisão do backend**: fala pode ficar sem bloco se o crítico criar mais beats que
-  blocos; montagem com centenas de clipes pode estourar o timeout de 120 s do FFmpeg; planejar
-  centenas de blocos numa só chamada pode passar do limite de 100k caracteres do Grok.
+- **Opening chunk and cinematic vision**: ensure the script's visual context is passed cleanly to the opener prompt refinement.
+- **Notification registration status**: reflect device registration state in Settings via `GET /notifications/devices`.
+- **Backend safeguards**: edge-case handling for large multi-beat plans and long FFmpeg assemblies.

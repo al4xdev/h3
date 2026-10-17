@@ -59,14 +59,10 @@ CONTEXT_PROMPTS = 3  # ...and submitted prompts only for the latest blocks.
 BLOCK_STATES = {"accepted": "accepted", "ready_for_review": "ready_for_review",
                 "queued": "active", "running": "active", "uncertain": "active"}
 DEFAULT_SCRIPT_SYSTEM = (
-    'Divide the user idea into consecutive video blocks without generating videos. '
-    'Preserve identity, actions and the order of changes. Do not invent facts about future frames. '
-    'Return only strict JSON: {"name":"title", "blocks":['
-    '{"action":"action", "duration_seconds":8, "prompt":"editable base instruction"}]}. '
-    'Use exactly the requested block count and positive durations up to 10 seconds with at most '
-    'two decimal places. Action and prompt must be nonempty and at most 12000 characters. '
-    'Write each video prompt in English, preserving any explicitly requested dialogue verbatim. '
-    'Do not include IDs, seeds, explanations, markdown or model parameters.'
+    "You fill the structured fields for one planning step of a sequential video. "
+    "Do not write a video-generation prompt, timestamps, seeds or model parameters. "
+    "Do not invent places, people or acts the idea did not ask for. "
+    "Future frames are unknown. Respond only through the required schema."
 )
 
 
@@ -761,142 +757,14 @@ class Roteiro:
 
     async def plan(self, grok, base: dict, context: dict, count: int, seconds: float, seed: int,
                    save=None) -> dict:
-        """Director timeline, critic revision, deterministic slicing, parallel prompt writers.
+        """Script, local clock and one card per block.
 
-        The director call raises like the former single call: its provider result is uncertain.
-        Any later failure leaves an invalid outcome with every raw text. Nothing is retried.
+        The first provider failure still raises: its result is uncertain. A later failure
+        leaves an invalid outcome with the raw text. Nothing is retried.
         """
-        def text(result):
-            raw = result.get("text") if isinstance(result, dict) else None
-            if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_RAW_TEXT_BYTES:
-                raise ValueError("Planning response is missing text or exceeds 512 KiB; not truncated")
-            return raw
+        from .narrator import narrate
 
-        def bounded(model):
-            schema = model.model_json_schema()
-            schema["properties"]["scenes"]["maxItems"] = count
-            schema["$defs"]["Scene"]["properties"]["beats"]["maxItems"] = count
-            return schema
-
-        total = round(count * seconds, 3)
-        outcome = {"name": None, "blocks": [], "draft_scenes": [], "scenes": [], "vision": None,
-                   "slices": [], "raw_texts": [], "error": None, "detail": None}
-
-        def invalid(detail, code="invalid_proposal"):
-            # Raw invalid text is bounded data, not an instruction or permission to guess fields.
-            return {**outcome, "error": code, "detail": detail}
-
-        raw = text(await grok.complete(self.timeline_request(base, context, count, seconds),
-                                       output_schema=bounded(Timeline),
-                                       schema_name="h3_roteiro_timeline"))
-        outcome["raw_texts"].append(raw)
-        try:
-            timeline = Timeline.model_validate(strict_json(raw))
-        except ValueError:
-            return invalid("Timeline cannot be converted into strict scenes and beats")
-        outcome.update(name=timeline.name, draft_scenes=slice_timeline(timeline.scenes, count, seconds)[0])
-        if save is not None:
-            save(outcome)
-        try:
-            raw = text(await grok.complete(PromptRequest(**base, prompt=json.dumps({
-                "task": CRITIC_TASK, **context, "block_seconds": seconds, "count": count,
-                "total_seconds": total, "draft_scenes": [scene.model_dump() for scene in timeline.scenes],
-            }, ensure_ascii=False)), output_schema=bounded(Critique), schema_name="h3_roteiro_critic"))
-        except Exception as exc:  # noqa: BLE001 - a failed later step is terminal evidence, not a retry.
-            outcome["raw_texts"].append("")
-            code = getattr(exc, "code", None)
-            return invalid(f"{type(exc).__name__}: {exc}"[:256],
-                           code if isinstance(code, str) else "critic_failed")
-        outcome["raw_texts"].append(raw)
-        try:
-            critique = Critique.model_validate(strict_json(raw))
-        except ValueError:
-            return invalid("Critic response cannot be converted into a strict revised plan")
-        scenes, slices = slice_timeline(critique.scenes, count, seconds)
-        outcome.update(scenes=scenes, slices=slices, vision=critique.vision.model_dump())
-        if save is not None:
-            save(outcome)
-        flat = [(i, j) for i, scene in enumerate(scenes) for j in range(len(scene["beats"]))]
-
-        def beat(position):
-            if not 0 <= position < len(flat):
-                return None
-            value = scenes[flat[position][0]]["beats"][flat[position][1]]
-            return {"kind": value["kind"], "action": value["action"]}
-
-        def describe(index):
-            piece = slices[index]
-            scene = scenes[piece["scene"]]
-            current = scene["beats"][piece["beat"]]
-            offset = scene["start_seconds"]
-            # A requested line is spoken once: only on the first slice of its beat.
-            line = current["dialogue"] if piece["part"] == 1 else None
-            return {"index": index + 1, "scene_title": scene["title"], "beat_kind": current["kind"],
-                    "beat_action": current["action"], "slice": f"{piece['part']}/{piece['parts']}",
-                    "film_seconds": [piece["start_seconds"], piece["end_seconds"]],
-                    "scene_seconds": [round(piece["start_seconds"] - offset, 3),
-                                      round(piece["end_seconds"] - offset, 3)],
-                    "previous_beat": beat(piece["position"] - 1),
-                    "next_beat": beat(piece["position"] + 1),
-                    "dialogue": line,
-                    "spoken_lines": (f"The character says, verbatim: {line}" if line else
-                                     "No spoken lines in this block; only natural non-speaking "
-                                     "mouth movement.")}
-
-        # Writers get the scene structure without dialogue text, so only flagged blocks see a line.
-        silent = [{**scene, "beats": [{k: v for k, v in item.items() if k != "dialogue"}
-                                      for item in scene["beats"]]} for scene in scenes]
-        semaphore = asyncio.Semaphore(PLAN_PARALLEL)
-        chunks = [range(start, min(start + PLAN_CHUNK, count)) for start in range(0, count, PLAN_CHUNK)]
-
-        async def expand(chunk):
-            async with semaphore:
-                request = PromptRequest(**base, prompt=json.dumps({
-                    "task": PROMPT_TASK, "background": context,
-                    "background_note": "Story background only. Do not speak any dialogue that "
-                                       "appears in it; follow each block's spoken_lines.",
-                    "block_seconds": seconds,
-                    "total_seconds": total, "vision": outcome["vision"], "scenes": silent,
-                    # Parallel chunks cannot see each other's text; the preceding slice's known
-                    # beat context still lets this chunk vary micro-motions across the boundary.
-                    "previous_block": describe(chunk[0] - 1) if chunk[0] else None,
-                    "blocks": [describe(index) for index in chunk]}, ensure_ascii=False))
-                chunk_schema = PromptChunk.model_json_schema()
-                chunk_schema["properties"]["blocks"].update(minItems=len(chunk), maxItems=len(chunk))
-                return text(await grok.complete(request, output_schema=chunk_schema,
-                                                schema_name="h3_roteiro_prompts"))
-
-        results = await asyncio.gather(*(expand(chunk) for chunk in chunks), return_exceptions=True)
-        prompts, failure = [], None
-        for chunk, result in zip(chunks, results, strict=True):
-            if isinstance(result, BaseException):
-                outcome["raw_texts"].append("")  # Keeps raw_texts[2 + k] aligned with chunk k.
-                code = getattr(result, "code", None)
-                failure = failure or (code if isinstance(code, str) else "prompt_failed",
-                                      f"{type(result).__name__}: {result}"[:256])
-                continue
-            outcome["raw_texts"].append(result)
-            try:
-                parsed = PromptChunk.model_validate(strict_json(result))
-                if len(parsed.blocks) != len(chunk):
-                    raise ValueError("Prompt count differs from its chunk")
-            except ValueError:
-                failure = failure or ("invalid_proposal",
-                                      "Prompt response cannot be converted into strict block prompts")
-                continue
-            prompts.extend(item.prompt for item in parsed.blocks)
-        if failure is not None:
-            return invalid(failure[1], failure[0])
-        try:
-            blocks = [Block(id=str(uuid4()), action=slice_action(scenes, piece),
-                            duration_seconds=seconds, seed=seed, prompt=prompt)
-                      for piece, prompt in zip(slices, prompts, strict=True)]
-        except ValueError:
-            return invalid("Sliced beat actions cannot form strict planned blocks")
-        for piece, block in zip(slices, blocks, strict=True):
-            piece["block_id"] = block.id
-        outcome["blocks"] = [block.model_dump() for block in blocks]
-        return outcome
+        return await narrate(grok, base, context, count, seconds, seed, save)
 
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
         from .batch import assert_batch_available

@@ -58,10 +58,15 @@ SCENES = [{"title": "Sala", "beats": [
 ]}]
 
 
-class FakeGrok:
-    """Answers the director, critic and prompt-writer steps; `text` fixes every response."""
+def payload_of(prompt: str) -> dict:
+    marker = "Payload:\n"
+    return json.loads(prompt[prompt.index(marker) + len(marker):])
 
-    def __init__(self, *, text=None, gate=None, scenes=None, critic=None):
+
+class FakeGrok:
+    """Answers script, palette and card steps; `text` fixes every response."""
+
+    def __init__(self, *, text=None, gate=None, scenes=None, critic=None, dialogue=None):
         self.calls = []
         self.schemas = []
         self.gate = gate
@@ -69,17 +74,53 @@ class FakeGrok:
         self.fixed = text
         self.scenes = scenes or SCENES
         self.critic = critic
-        self.text = text or json.dumps({"name": "Proposta", "scenes": self.scenes})
+        self.dialogue = dialogue
+        self.text = text or ""
+
+    def script_text(self, request):
+        body = payload_of(request.prompt)
+        count = body["block_count"]
+        titles = [scene["title"] for scene in (self.critic or self.scenes)] or ["Cena"]
+        width = max(1, count // len(titles))
+        events = []
+        for index, title in enumerate(titles):
+            size = count - width * (len(titles) - 1) if index == len(titles) - 1 else width
+            line = self.dialogue if index == 0 else None
+            events.append({
+                "title": title, "kind": "speech" if line else "action",
+                "intent": f"momento {index + 1}", "dialogue": line,
+                "anatomy": [f"{title} corpo {n}" for n in range(1, size + 1)],
+                "expressions": [f"{title} expressão {n}" for n in range(1, size + 1)],
+                "deltas": [f"{title} delta {n}" for n in range(1, size + 1)],
+                "camera_focus": None, "keeps": [title],
+            })
+        return json.dumps({"name": "Proposta", "summary": "Dois momentos, sem ato extra.",
+                           "events": events}, ensure_ascii=False)
 
     def answer(self, request, schema_name, output_schema):
-        if schema_name == "h3_roteiro_timeline":
-            return self.text
-        if schema_name == "h3_roteiro_critic":
-            return json.dumps({"vision": VISION, "scenes": self.critic or self.scenes})
-        blocks = json.loads(request.prompt)["blocks"]
-        assert output_schema["properties"]["blocks"]["minItems"] == len(blocks)
-        return json.dumps({"blocks": [{"prompt": f"Prompt {b['index']}: {b['beat_action']}"}
-                                      for b in blocks]})
+        if schema_name == "h3_roteiro_script":
+            return self.script_text(request)
+        if schema_name == "h3_roteiro_palette":
+            body = payload_of(request.prompt)
+            size = body["count"]
+            return json.dumps({
+                "title": body["title"],
+                "anatomy": [f"{body['title']} corpo {n}" for n in range(1, size + 1)],
+                "expressions": [f"{body['title']} expressão {n}" for n in range(1, size + 1)],
+                "deltas": [f"{body['title']} delta {n}" for n in range(1, size + 1)],
+            }, ensure_ascii=False)
+        slot = payload_of(request.prompt)
+        instruction = (
+            f"Ação: {slot['intent']}\nCorpo: {slot['anatomy']}\n"
+            f"Expressão: {slot['expression']}\n"
+            f"Mudança em relação ao anterior: {slot['delta']}\n"
+        )
+        return json.dumps({
+            "id": slot["id"], "title": slot["title"], "expression": slot["expression"],
+            "anatomy": slot["anatomy"], "delta": slot["delta"],
+            "camera_focus": slot["camera_focus"], "dialogue": slot["dialogue"],
+            "instruction": instruction,
+        }, ensure_ascii=False)
 
     async def complete(self, request, **kwargs):
         self.calls.append(request)
@@ -143,24 +184,22 @@ async def test_candidate_separate_exact_count_seed_and_late_revision(tmp_path):
     assert candidate["name"] == "Proposta"
     assert all(block["seed"] == 42 and block["duration_seconds"] == 8
                for block in candidate["blocks"])
-    assert [b["action"] for b in candidate["blocks"]] == ["Sala · Dança de preto",
-                                                          "Sala · Muda para vermelho"]
-    assert candidate["vision"]["camera"] and candidate["scenes"] and candidate["draft_scenes"]
-    assert len(candidate["raw_texts"]) == 3 and candidate["raw_text"] == fake.text
+    assert [b["action"] for b in candidate["blocks"]] == [
+        "Sala · do — parte 1/2", "Sala · do — parte 2/2"]
+    assert candidate["scenes"] and candidate["draft_scenes"] and candidate["vision"] is None
+    assert len(candidate["raw_texts"]) == 3 and candidate["raw_text"] == candidate["raw_texts"][0]
     assert not {b["id"] for b in candidate["blocks"]} & {b.id for b in doc.blocks}
     assert op.get(doc.id).blocks == doc.blocks
     assert op.get(doc.id).name == edited["name"]
     assert len(fake.calls) == 3
     assert [s["schema_name"] for s in fake.schemas] == [
-        "h3_roteiro_timeline", "h3_roteiro_critic", "h3_roteiro_prompts"]
-    timeline = json.loads(fake.calls[0].prompt)
-    assert timeline["count"] == 2 and timeline["block_seconds"] == 8
-    assert timeline["total_seconds"] == 16 and "task" in timeline
-    schema = fake.schemas[2]["output_schema"]
-    assert schema["properties"]["blocks"]["minItems"] == 2
-    assert schema["properties"]["blocks"]["maxItems"] == 2
+        "h3_roteiro_script", "h3_roteiro_card", "h3_roteiro_card"]
+    script = payload_of(fake.calls[0].prompt)
+    assert script["block_count"] == 2 and script["block_seconds"] == 8
+    assert "Future frames are unknown" in fake.calls[0].prompt
     assert all(call.reference == doc.reference for call in fake.calls)
-    assert all(call.system_prompt == op.script_config()["system_prompt"] for call in fake.calls)
+    from h3_backend.roteiro.narrator import NARRATOR_SYSTEM
+    assert all(call.system_prompt == NARRATOR_SYSTEM for call in fake.calls)
     assert all(call.model == FIXED_EDITOR_MODEL for call in fake.calls)
     assert not service.comfy.submitted
     await service.shutdown()

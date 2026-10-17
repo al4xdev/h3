@@ -52,16 +52,8 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
     original_blocks = list(doc.blocks)
     identity = (tmp_path / "assets/dance_reference.png").read_bytes()
     idea = "Walk to the window, then wave goodbye"
-    planned = [
-        {"action": "Walk to the window", "prompt": "Walk toward the window", "duration_seconds": 2.3},
-        {"action": "Wave goodbye", "prompt": "Wave beside the window", "duration_seconds": 2.3},
-    ]
     wires = []
 
-    scenes = [{"title": "Janela", "beats": [
-        {"kind": "action", "action": block["action"], "seconds": 2.3, "dialogue": None}
-        for block in planned]}]
-    vision = {"style": "s", "camera": "c", "light_and_color": "l", "rhythm": "r", "notes": "n"}
     enhanced = []
 
     def provider(request):
@@ -75,16 +67,39 @@ async def test_tail_planning_adoption_and_batch_refresh_actual_parent_frames(tmp
             assert wire["text"]["format"]["strict"] is True
             assert idea in wire["input"][-1]["content"][-1]["text"]
             step = wire["text"]["format"]["name"]
-            text = json.dumps({"name": "Tail intentions", "scenes": scenes}
-                              if step == "h3_roteiro_timeline" else
-                              {"vision": vision, "scenes": scenes}
-                              if step == "h3_roteiro_critic" else
-                              {"blocks": [{"prompt": block["prompt"]} for block in planned]})
+            prompt = wire["input"][-1]["content"][-1]["text"]
+            marker = "Payload:\n"
+            body = json.loads(prompt[prompt.index(marker) + len(marker):])
+            if step == "h3_roteiro_script":
+                text = json.dumps({
+                    "name": "Tail intentions", "summary": "Continua da cauda.",
+                    "events": [{
+                        "title": "Janela", "kind": "action", "intent": "anda até a janela",
+                        "dialogue": None,
+                        "anatomy": ["corpo 1", "corpo 2"],
+                        "expressions": ["expressão 1", "expressão 2"],
+                        "deltas": ["delta 1", "delta 2"],
+                        "camera_focus": None, "keeps": ["janela"],
+                    }],
+                })
+            elif step == "h3_roteiro_card":
+                text = json.dumps({
+                    "id": body["id"], "title": body["title"],
+                    "expression": body["expression"], "anatomy": body["anatomy"],
+                    "delta": body["delta"], "camera_focus": body["camera_focus"],
+                    "dialogue": body["dialogue"],
+                    "instruction": (
+                        f"Ação: {body['intent']}\nCorpo: {body['anatomy']}\n"
+                        f"Expressão: {body['expression']}\n"
+                        f"Mudança em relação ao anterior: {body['delta']}\n"
+                    ),
+                })
+            else:
+                raise AssertionError(step)
         else:
             assert wire["max_output_tokens"] == 12000
             context = wire["input"][-1]["content"][-1]["text"]
-            intent = planned[len(enhanced)]
-            assert intent["action"] in context and intent["prompt"] in context
+            assert "Janela" in context and "Corpo:" in context
             enhanced.append(wire)
             text = f"Actual enhanced instruction {len(enhanced)}"
         return httpx.Response(200, json=finished(text))

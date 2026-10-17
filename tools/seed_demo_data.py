@@ -163,17 +163,34 @@ class DemoPlanner:
     """Offline canned answers for the director, critic and prompt-writer steps."""
 
     async def complete(self, request, *, output_schema=None, schema_name=None):
-        if schema_name == "h3_roteiro_timeline":
-            value = {"name": "Dança neon (proposta)", "scenes": DEMO_SCENES}
-        elif schema_name == "h3_roteiro_critic":
-            value = {"vision": {"style": "Videoclipe intimista", "camera": "Plano médio, travelling lento",
-                                "light_and_color": "Azul-petróleo com contraluz turquesa",
-                                "rhythm": "Ações longas com respiros", "notes": "Demo offline"},
-                     "scenes": DEMO_SCENES}
+        marker = "Payload:\n"
+        body = json.loads(request.prompt[request.prompt.index(marker) + len(marker):])
+        if schema_name == "h3_roteiro_script":
+            count = body["block_count"]
+            value = {"name": "Dança neon (proposta)", "summary": "Demo offline, sem ato extra.",
+                     "events": [{
+                         "title": "Estúdio", "kind": "action", "intent": "dança lenta",
+                         "dialogue": None,
+                         "anatomy": [f"corpo {n}" for n in range(1, count + 1)],
+                         "expressions": [f"expressão {n}" for n in range(1, count + 1)],
+                         "deltas": [f"delta {n}" for n in range(1, count + 1)],
+                         "camera_focus": None, "keeps": ["estúdio"],
+                     }]}
+        elif schema_name == "h3_roteiro_palette":
+            size = body["count"]
+            value = {"title": body["title"],
+                     "anatomy": [f"corpo {n}" for n in range(1, size + 1)],
+                     "expressions": [f"expressão {n}" for n in range(1, size + 1)],
+                     "deltas": [f"delta {n}" for n in range(1, size + 1)]}
         else:
-            blocks = json.loads(request.prompt)["blocks"]
-            value = {"blocks": [{"prompt": f"Demo prompt for block {b['index']}: {b['beat_action']}, "
-                                           f"slice {b['slice']}."} for b in blocks]}
+            value = {"id": body["id"], "title": body["title"],
+                     "expression": body["expression"], "anatomy": body["anatomy"],
+                     "delta": body["delta"], "camera_focus": body.get("camera_focus"),
+                     "dialogue": body.get("dialogue"),
+                     "instruction": (
+                         f"Ação: {body['intent']}\nCorpo: {body['anatomy']}\n"
+                         f"Expressão: {body['expression']}\n"
+                         f"Mudança em relação ao anterior: {body['delta']}\n")}
         return {"text": json.dumps(value, ensure_ascii=False), "model": FIXED_EDITOR_MODEL}
 
 

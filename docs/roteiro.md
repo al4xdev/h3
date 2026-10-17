@@ -92,25 +92,26 @@ gera vídeo. A validação usa clientes falsos e mídia CPU, sem inferência rea
 
 ### Planejamento (proposta, Tail e segmento)
 
-Cadeia de chamadas estreitas, com o mesmo modelo fixo e o system prompt salvo do roteirista
-inalterado; tarefa e formato vão na mensagem e no schema estruturado:
+Cadeia de chamadas estreitas, com o mesmo modelo fixo. A tarefa e o formato vão na
+mensagem e no schema. O narrador não reenvia o system prompt antigo que pedia um
+JSON único de todos os blocos:
 
-1. **Diretor** (`h3_roteiro_timeline`): cenas → beats `{kind: action|transition|hold, action,
-   seconds, dialogue|null}` cobrindo `total_seconds = count × block_seconds`; cada fala pedida
-   aparece uma vez.
-2. **Crítico/DoP** (`h3_roteiro_critic`): revisa o rascunho e define `vision`; suas cenas
-   substituem as do diretor.
-3. Fatiamento determinístico: segundos escalados proporcionalmente; o bloco k recebe o beat
-   que contém o ponto médio de `[k·d, (k+1)·d)`; ação `"<cena> · <beat> — parte i/n"`;
-   duração de todo bloco = a pedida.
-4. **Roteiristas** (`h3_roteiro_prompts`): pedaços de até 10 blocos, até 4 em paralelo, com
-   visão, cenas (sem falas), bloco anterior e micro-movimentos; a fala vai só na primeira
-   fatia do beat que a contém.
+1. **Script** (`h3_roteiro_script`): uma chave, um fragmento. Eventos com intenção,
+   fala opcional, e listas distintas de corpo, expressão e delta. Sem segundos e sem
+   prompt de vídeo.
+2. **Paleta** (`h3_roteiro_palette`), só se alguma lista for mais curta que os slots
+   daquele evento: uma chave por evento curto. Não copia item por módulo.
+3. Relógio no código: piso e teto por evento; o que sobra vira approach/hold do mesmo
+   evento. Duração de todo bloco = a pedida. Uma fala, um slot, com o placeholder
+   hardcoded do sotaque sulista; os outros recebem `Sem fala.`
+4. **Cartões** (`h3_roteiro_card`): uma chave por slot, um fragmento string. Até 4 em
+   paralelo, uma tentativa. `run_pos_prompt` não entra. A instrução resultante é o
+   que o melhorador já expande; o melhorador não muda.
 
-O resultado guarda `draft_scenes`, `scenes`, `vision`, `slices` e todos os `raw_texts`
-(`[diretor, crítico, pedaço 1, …]`; `""` marca um pedaço sem texto). Falha do diretor por
-rede/cancelamento deixa o pedido incerto, como antes; qualquer falha posterior deixa
-`invalid`. Sem retry automático.
+O resultado guarda `draft_scenes`, `scenes`, `slices` e os `raw_texts` das chamadas
+feitas. `vision` fica vazio: o melhorador não recebe ensaio de câmera nesta etapa.
+Falha da primeira chamada por rede ou cancelamento deixa o pedido incerto; falha
+posterior deixa `invalid`. Sem retry automático.
 
 ## Converter Freestyle para roteiro
 

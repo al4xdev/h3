@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from test_grok_continuation import command
-from test_roteiro import FakeGrok, fields, setup, update
+from test_roteiro import FakeGrok, fields, payload_of, setup, update
 from test_roteiro_admission import request
 
 from h3_backend.generation.dispatcher import Conflict
@@ -53,13 +53,13 @@ async def test_plan_actual_parent_and_explicit_atomic_adoption_preserve_prefix(t
     assert fake.calls[0].continuation_parent_id == parent_id
     assert fake.calls[0].reference == doc.reference
     assert "Future frames are unknown" in fake.calls[0].prompt
-    prefix = json.loads(fake.calls[0].prompt)["accepted_prefix"]
+    prefix = payload_of(fake.calls[0].prompt)["context"]["accepted_prefix"]
     assert prefix[0]["prompt"] == doc.attempts[0].snapshot.prompt
     assert prefix[0]["run_id"] == parent_id
     assert prefix[0]["editorial_intention"] == doc.blocks[0].action
-    assert fake.schemas[0]["schema_name"] == "h3_roteiro_timeline"
+    assert fake.schemas[0]["schema_name"] == "h3_roteiro_script"
     assert op.get(doc.id) == doc
-    assert op.get_tail(doc.id, ident)["raw_text"] == fake.text
+    assert op.get_tail(doc.id, ident)["raw_text"] == candidate["raw_texts"][0]
     result = await op.adopt_tail(doc.id, ident, adoption(doc, candidate))
     assert result["revision"] == doc.revision + 1
     updated = op.get(doc.id)

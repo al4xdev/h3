@@ -4,7 +4,6 @@ CPU fixtures only: fake ComfyUI/media/builders and fake Grok clients, never a re
 """
 
 import asyncio
-import json
 import sys
 from types import SimpleNamespace
 from uuid import uuid4
@@ -13,7 +12,7 @@ import httpx
 import pytest
 from test_bridge import BridgeBuilder
 from test_grok_continuation import command
-from test_roteiro import VISION, FakeGrok, fields, setup, update
+from test_roteiro import FakeGrok, fields, setup, update
 from test_roteiro_batch import FakeEnhancer, consent
 
 from h3_backend.api import create_app
@@ -173,9 +172,10 @@ class SegmentGrok(FakeGrok):
         self.peak = max(self.peak, self.active)
         try:
             await asyncio.sleep(0.01)
-            if kwargs.get("schema_name") == "h3_roteiro_prompts":
-                first = json.loads(request.prompt)["blocks"][0]["index"]
-                if first == self.fail_chunk:
+            if kwargs.get("schema_name") == "h3_roteiro_card" and self.fail_chunk is not None:
+                from test_roteiro import payload_of
+                slot = payload_of(request.prompt)
+                if slot["index"] == self.fail_chunk:
                     self.calls.append(request)
                     self.schemas.append(kwargs)
                     return {"text": '{"blocks":[]}'}
@@ -201,20 +201,21 @@ async def test_segment_single_plan_uses_neighbours_and_never_writes_plan(tmp_pat
         record = result.json()
         assert record["state"] == "proposed" and record["stale"] is False
         assert record["after_block_id"] == a.id and record["before_block_id"] == b.id
-        assert len(record["blocks"]) == 3 and len(record["raw_texts"]) == 3
+        assert len(record["blocks"]) == 3 and len(record["raw_texts"]) == 4
         assert all(x["duration_seconds"] == 8 and x["seed"] == 5 for x in record["blocks"])
-        assert record["vision"] == VISION and record["scenes"] and record["draft_scenes"]
+        assert record["vision"] is None and record["scenes"] and record["draft_scenes"]
         assert (await client.get(url)).json() == record
         again = await client.post(url, json={
             "expected_revision": doc.revision, "after_block_id": a.id, "idea": "x",
             "count": 1, "duration_seconds": 8, "seed": 5})
         assert again.status_code == 409
-    context = json.loads(fake.calls[0].prompt)
+    from test_roteiro import payload_of
+    context = payload_of(fake.calls[0].prompt)["context"]
     assert context["idea"] == "Gira devagar" and context["original_idea"] == doc.idea
     assert context["previous_block"]["historical_prompt_actually_submitted"] == a.prompt
     assert context["following_block"]["editorial_intention"] == b.action
     assert all(call.continuation_parent_id == run_a for call in fake.calls)
-    assert op.get(doc.id) == doc and len(fake.calls) == 3
+    assert op.get(doc.id) == doc and len(fake.calls) == 4
     # Adoption is an explicit PUT inserting the planned blocks between the two accepted ones.
     planned = [Block(**x) for x in record["blocks"]]
     adopted = await op.update(doc.id, update(doc, blocks=[a, *planned, b]))
@@ -234,17 +235,16 @@ async def test_segment_chunks_run_in_parallel_and_invalid_chunk_keeps_raw_texts(
         expected_revision=doc.revision, after_block_id=doc.blocks[0].id, idea="Muito tempo",
         count=45, duration_seconds=8, seed=3), fake)
     assert record["state"] == "proposed" and len(record["blocks"]) == 45
-    prompt_calls = [s for s in fake.schemas if s["schema_name"] == "h3_roteiro_prompts"]
-    assert len(prompt_calls) == 5 and 1 < fake.peak <= 4
-    assert len(record["raw_texts"]) == 2 + 5
+    card_calls = [s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]
+    assert len(card_calls) == 45 and 1 < fake.peak <= 4
+    assert len(record["raw_texts"]) == 1 + 45
     failing = SegmentGrok(fail_chunk=11)
     ident = str(uuid4())
     invalid = await op.propose_segment(doc.id, ident, SegmentRequest(
         expected_revision=doc.revision, after_block_id=None, idea="Muito tempo",
         count=25, duration_seconds=8, seed=3), failing)
-    assert invalid["state"] == "invalid" and invalid["error"] == "invalid_proposal"
-    assert invalid["blocks"] == [] and len(invalid["raw_texts"]) == 2 + 3
-    assert invalid["raw_texts"][3] == '{"blocks":[]}'
+    assert invalid["state"] == "invalid" and invalid["error"] == "prompt_failed"
+    assert invalid["blocks"] == [] and '{"blocks":[]}' in invalid["raw_texts"]
     assert op.get_segment(doc.id, ident)["state"] == "invalid"
     assert op.get(doc.id) == doc and not service.comfy.submitted
     await service.shutdown()
@@ -267,10 +267,9 @@ async def test_ten_blocks_one_eighty_second_beat_yield_parts_and_fixed_duration(
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=10, duration_seconds=8, seed=4), fake)
     assert [b["action"] for b in candidate["blocks"]] == [
-        f"Palco · Dança contínua — parte {i}/10" for i in range(1, 11)]
+        f"Palco · do — parte {i}/10" for i in range(1, 11)]
     assert all(b["duration_seconds"] == 8.0 for b in candidate["blocks"])
-    assert candidate["scenes"][0]["beats"][0]["end_seconds"] == 80
-    assert len([s for s in fake.schemas if s["schema_name"] == "h3_roteiro_prompts"]) == 1
+    assert len([s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]) == 10
     await service.shutdown()
 
 
@@ -278,27 +277,19 @@ async def test_ten_blocks_one_eighty_second_beat_yield_parts_and_fixed_duration(
 async def test_critic_replaces_draft_kinds_and_single_dialogue_reach_writers(tmp_path):
     service, op = setup(tmp_path)
     doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
-    draft = [{"title": "Rascunho", "beats": [
-        {"kind": "action", "action": "Tudo igual", "seconds": 10, "dialogue": None}]}]
     critic = [{"title": "Quarto", "beats": [
         {"kind": "action", "action": "Salta", "seconds": 16, "dialogue": "Olá, mundo!"},
         {"kind": "hold", "action": "Respira", "seconds": 16, "dialogue": None},
         {"kind": "transition", "action": "Vira de costas", "seconds": 16, "dialogue": None}]}]
-    fake = FakeGrok(scenes=draft, critic=critic)
+    fake = FakeGrok(scenes=critic, dialogue="Olá, mundo!")
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=6, duration_seconds=8, seed=4), fake)
-    assert candidate["draft_scenes"][0]["title"] == "Rascunho"
-    assert candidate["scenes"][0]["title"] == "Quarto" and candidate["vision"] == VISION
-    assert [b["action"].split(" — ")[0] for b in candidate["blocks"]] == [
-        "Quarto · Salta"] * 2 + ["Quarto · Respira"] * 2 + ["Quarto · Vira de costas"] * 2
-    writer = json.loads(fake.calls[2].prompt)
-    assert [b["beat_kind"] for b in writer["blocks"]] == ["action"] * 2 + ["hold"] * 2 + ["transition"] * 2
-    assert [b["dialogue"] for b in writer["blocks"]] == ["Olá, mundo!"] + [None] * 5
-    assert sum("Olá, mundo!" in b["spoken_lines"] for b in writer["blocks"]) == 1
-    assert "Olá, mundo!" not in json.dumps(writer["scenes"], ensure_ascii=False)
-    assert writer["vision"] == VISION and writer["previous_block"] is None
-    critic_request = json.loads(fake.calls[1].prompt)
-    assert critic_request["draft_scenes"][0]["title"] == "Rascunho"
+    assert [event["title"] for event in candidate["scenes"]] == ["Quarto"]
+    spoken = [b["prompt"] for b in candidate["blocks"] if "Olá, mundo!" in b["prompt"]]
+    assert len(spoken) == 1
+    assert "fala em português do Brasil com sotaque do sul: 'Olá, mundo!'" in spoken[0]
+    silent = [b["prompt"] for b in candidate["blocks"] if "Olá, mundo!" not in b["prompt"]]
+    assert silent and all("Sem fala." in prompt for prompt in silent)
     await service.shutdown()
 
 
@@ -315,14 +306,10 @@ async def test_long_plan_of_450_blocks_slices_and_bounds_parallel_writers(tmp_pa
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=450, duration_seconds=8, seed=4), fake)
     assert len(candidate["blocks"]) == 450 and MAX_BLOCKS == 1000
-    assert len(candidate["raw_texts"]) == 2 + 45 and 1 < fake.peak <= 4
+    assert 1 < fake.peak <= 4
     assert all(b["duration_seconds"] == 8 for b in candidate["blocks"])
-    first = [b["action"] for b in candidate["blocks"] if b["action"].startswith("Cena 0 · Ação longa 0")]
-    assert first and first[0].endswith(f"parte 1/{len(first)}")
-    second = json.loads(next(c.prompt for c, s in zip(fake.calls, fake.schemas, strict=True)
-                             if s["schema_name"] == "h3_roteiro_prompts"
-                             and json.loads(c.prompt)["blocks"][0]["index"] == 11))
-    assert second["previous_block"]["index"] == 10
+    cards = [s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]
+    assert len(cards) == 450
     await service.shutdown()
 
 
