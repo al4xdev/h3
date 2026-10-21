@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -18,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -44,7 +46,7 @@ import com.al4xdev.h3.ui.theme.H3Palette
  * reaches the last [Sequence.LOOKAHEAD] clips, and windows two behind are dropped (bounded memory).
  */
 @OptIn(UnstableApi::class)
-private class SequenceController(
+class SequenceController(
     private val context: Context,
     val player: ExoPlayer,
     private val items: List<SeqItem>,
@@ -98,8 +100,12 @@ private class SequenceController(
     }
 }
 
+/**
+ * Owns the ExoPlayer for one snapshot of the sequence. Called above the layout that the fullscreen
+ * toggle replaces, so switching players never restarts the film: only the PlayerView is recreated.
+ */
 @Composable
-fun SequencePlayer(items: List<SeqItem>, uriFor: (SeqItem) -> String, onOpenBlock: (SeqItem) -> Unit, modifier: Modifier = Modifier) {
+fun rememberSequencePlayer(items: List<SeqItem>, uriFor: (SeqItem) -> String): SequenceController? {
     val context = LocalContext.current
     var controller by remember(items) { mutableStateOf<SequenceController?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -115,6 +121,18 @@ fun SequencePlayer(items: List<SeqItem>, uriFor: (SeqItem) -> String, onOpenBloc
             c.release()
         }
     }
+    return controller
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+fun SequencePlayer(
+    controller: SequenceController?,
+    onOpenBlock: (SeqItem) -> Unit,
+    fullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Box(modifier) {
         AndroidView(
             factory = { playerView(it) },
@@ -125,10 +143,23 @@ fun SequencePlayer(items: List<SeqItem>, uriFor: (SeqItem) -> String, onOpenBloc
         controller?.current?.let { item ->
             Text(
                 item.label, color = H3Palette.TextPrimary, fontSize = 13.sp, maxLines = 1,
-                modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
+                overflow = TextOverflow.Ellipsis,
+                // End padding keeps the label from running under the fullscreen chip.
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 10.dp, end = 118.dp)
                     .background(H3Palette.Midnight.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
                     .clickable { onOpenBlock(item) }.padding(horizontal = 10.dp, vertical = 6.dp),
             )
         }
+        // PlayerView has no fullscreen control of its own; this chip is the only way in and out.
+        Text(
+            if (fullscreen) "Sair" else "Tela cheia",
+            color = H3Palette.TextPrimary, fontSize = 13.sp, maxLines = 1,
+            modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
+                .heightIn(min = 44.dp)
+                .background(H3Palette.Midnight.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
+                .noSwipeBack()
+                .clickable { onToggleFullscreen() }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        )
     }
 }
