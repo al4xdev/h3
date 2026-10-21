@@ -33,6 +33,7 @@ NO_SPEECH = "Sem fala."
 CAMERA_LOCKED = "Câmera: igual, sem novo enquadramento."
 EVENT_FLOOR = 2
 EVENT_CEILING = 12
+PALETTE_CAPACITY = 200  # One Palette list; a longer event needs more events, not more items.
 NARRATOR_PARALLEL = 4
 MAX_RAW_TEXT_BYTES = 512 * 1024
 PAYLOAD = "Payload:\n"
@@ -102,9 +103,9 @@ class Script(StrictModel):
 
 class Palette(StrictModel):
     title: str = Field(min_length=1, max_length=256)
-    anatomy: list[str] = Field(min_length=1, max_length=200)
-    expressions: list[str] = Field(min_length=1, max_length=200)
-    deltas: list[str] = Field(min_length=1, max_length=200)
+    anatomy: list[str] = Field(min_length=1, max_length=PALETTE_CAPACITY)
+    expressions: list[str] = Field(min_length=1, max_length=PALETTE_CAPACITY)
+    deltas: list[str] = Field(min_length=1, max_length=PALETTE_CAPACITY)
 
 
 class BlockSlot(StrictModel):
@@ -389,6 +390,14 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
         counts = assign_counts(len(script.events), count)
     except ValueError as exc:
         return _invalid(outcome, str(exc))
+    # A palette list caps at PALETTE_CAPACITY; asking beyond it would spend a second call and
+    # still fail, so the proposal stops here with the reason the idea must be split.
+    if max(counts) > PALETTE_CAPACITY:
+        return _invalid(
+            outcome,
+            f"One event needs {max(counts)} blocks; a palette list caps at {PALETTE_CAPACITY}. "
+            "Ask for more events or fewer blocks.",
+            "palette_failed")
 
     short = {f"event-{index}": (_payload({
         "title": event.title, "intent": event.intent, "count": size,

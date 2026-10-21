@@ -1,12 +1,17 @@
-"""Narrator clock, promptnest key shape and first request. No provider and no GPU."""
+"""Narrator clock, palette bound, promptnest key shape and first request. No provider, no GPU."""
 
 import json
+
+import pytest
+from pydantic import ValidationError
 
 from h3_backend.roteiro.narrator import (
     NARRATOR_SYSTEM,
     NO_SPEECH,
+    PALETTE_CAPACITY,
     SOUTHERN_SPEECH,
     BlockSlot,
+    Palette,
     assign_counts,
     finish_instruction,
     script_request,
@@ -33,6 +38,17 @@ def test_clock_caps_an_event_and_keeps_requested_duration_budget():
     assert sum(counts) == 200
     assert all(count >= 2 for count in counts)
     assert max(counts) > 12  # leftover is hold/approach, not a new act
+
+
+def test_one_event_never_asks_the_palette_for_more_than_a_list_holds():
+    # 100-200 blocks stay inside a single palette list; the model rejects more items.
+    assert PALETTE_CAPACITY == 200
+    assert assign_counts(1, 100) == [100]
+    assert assign_counts(1, PALETTE_CAPACITY) == [PALETTE_CAPACITY]
+    assert assign_counts(1, PALETTE_CAPACITY + 1) == [PALETTE_CAPACITY + 1]
+    with pytest.raises(ValidationError):
+        Palette(title="Sala", anatomy=[f"a{n}" for n in range(PALETTE_CAPACITY + 1)],
+                expressions=["olhar"], deltas=["peso"])
 
 
 def test_speech_placeholder_is_code_owned_and_other_slots_stay_silent():

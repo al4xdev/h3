@@ -12,7 +12,7 @@ import httpx
 import pytest
 from test_bridge import BridgeBuilder
 from test_grok_continuation import command
-from test_roteiro import FakeGrok, fields, setup, update
+from test_roteiro import FakeGrok, fields, payload_of, setup, update
 from test_roteiro_batch import FakeEnhancer, consent
 
 from h3_backend.api import create_app
@@ -290,6 +290,39 @@ async def test_long_plan_of_450_blocks_builds_every_card_and_bounds_parallel_cal
     assert all(b["duration_seconds"] == 8 for b in candidate["blocks"])
     cards = [s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]
     assert len(cards) == 450
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_palette_completes_two_hundred_blocks_of_a_single_event(tmp_path):
+    service, op = setup(tmp_path)
+    doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
+    fake = FakeGrok(titles=["Estúdio"], short=2)
+    candidate = await op.propose(doc.id, ProposalRequest(
+        expected_revision=doc.revision, count=200, duration_seconds=8, seed=4), fake)
+    assert candidate.get("error") is None, candidate.get("detail")
+    assert len(candidate["blocks"]) == 200
+    # One event, 200 slots: no two slots may carry the same instruction.
+    assert len({b["prompt"] for b in candidate["blocks"]}) == 200
+    palettes = [call for call, schema in zip(fake.calls, fake.schemas, strict=True)
+                if schema["schema_name"] == "h3_roteiro_palette"]
+    assert len(palettes) == 1 and payload_of(palettes[0].prompt)["count"] == 200
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_one_event_above_the_palette_capacity_stops_before_the_second_call(tmp_path):
+    service, op = setup(tmp_path)
+    doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
+    fake = FakeGrok(titles=["Estúdio"], short=2)
+    candidate = await op.propose(doc.id, ProposalRequest(
+        expected_revision=doc.revision, count=201, duration_seconds=8, seed=4), fake)
+    assert candidate["error"] == "palette_failed"
+    assert "201" in candidate["detail"] and "200" in candidate["detail"]
+    # The palette call would fail anyway; the proposal stops after the script answer.
+    assert [schema["schema_name"] for schema in fake.schemas] == ["h3_roteiro_script"]
+    assert "blocks" not in candidate and op.get(doc.id) == doc
+    assert not service.comfy.submitted
     await service.shutdown()
 
 

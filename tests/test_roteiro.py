@@ -59,9 +59,10 @@ class FakeGrok:
     """Answers script, palette and card steps; `text` fixes every response.
 
     `titles` only names the events the narrator asks for: the clock and the slots are code-owned.
+    `short` caps how many states the script itself offers, forcing the palette step.
     """
 
-    def __init__(self, *, text=None, gate=None, titles=None, dialogue=None):
+    def __init__(self, *, text=None, gate=None, titles=None, dialogue=None, short=None):
         self.calls = []
         self.schemas = []
         self.gate = gate
@@ -69,6 +70,7 @@ class FakeGrok:
         self.fixed = text
         self.titles = titles or ["Sala"]
         self.dialogue = dialogue
+        self.short = short
         self.text = text or ""
 
     def script_text(self, request):
@@ -79,13 +81,14 @@ class FakeGrok:
         events = []
         for index, title in enumerate(titles):
             size = count - width * (len(titles) - 1) if index == len(titles) - 1 else width
+            offered = min(size, self.short) if self.short else size
             line = self.dialogue if index == 0 else None
             events.append({
                 "title": title, "kind": "speech" if line else "action",
                 "intent": f"momento {index + 1}", "dialogue": line,
-                "anatomy": [f"{title} corpo {n}" for n in range(1, size + 1)],
-                "expressions": [f"{title} expressão {n}" for n in range(1, size + 1)],
-                "deltas": [f"{title} delta {n}" for n in range(1, size + 1)],
+                "anatomy": [f"{title} corpo {n}" for n in range(1, offered + 1)],
+                "expressions": [f"{title} expressão {n}" for n in range(1, offered + 1)],
+                "deltas": [f"{title} delta {n}" for n in range(1, offered + 1)],
                 "camera_focus": None, "keeps": [title],
             })
         return json.dumps({"name": "Proposta", "summary": "Dois momentos, sem ato extra.",
