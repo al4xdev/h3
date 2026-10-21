@@ -24,7 +24,7 @@ import com.al4xdev.h3.data.Vision
 import com.al4xdev.h3.ui.theme.H3Palette
 
 /**
- * Honest wait for Grok planning: the PC chains director, critic and writers in one request.
+ * Honest wait for Grok planning: script, optional palette and one card per block on the PC.
  * Shows only the elapsed time (no invented percentage) while `active`.
  */
 @Composable
@@ -34,7 +34,7 @@ fun PlanningWait(active: Boolean) {
     LaunchedEffect(Unit) {
         while (true) { delay(1000); elapsed++ } // local clock for the label, not a request
     }
-    Muted("Grok em etapas no PC (diretor · crítico · roteiristas). Pode levar alguns minutos · ${elapsed}s")
+    Muted("Grok em etapas no PC (script · paleta · cartões). Pode levar alguns minutos · ${elapsed}s")
 }
 
 fun minutesLabel(seconds: Double): String {
@@ -58,17 +58,31 @@ fun VisionCard(vision: Vision?) {
     }
 }
 
-/** Compact outline of the plan: scene title + beats with seconds; blocks stay the editable unit. */
+/**
+ * Compact outline of the plan. Legacy scenes show beats with seconds; narrator events show
+ * their intention and a couple of micro states instead, since the clock lives in the blocks.
+ */
 @Composable
 fun SceneTimeline(scenes: List<Scene>) {
     if (scenes.isEmpty()) return
     val total = scenes.sumOf { it.seconds }
+    val events = scenes.count { it.isEvent }
     Card {
-        Text("${scenes.size} cenas · ${minutesLabel(total)}", color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold)
+        Text(
+            if (events > 0) "${scenes.size} eventos · ${events} com intenção"
+            else "${scenes.size} cenas · ${minutesLabel(total)}",
+            color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold,
+        )
         Expandable("Linha do tempo", initiallyOpen = scenes.size <= 8) {
             scenes.forEachIndexed { i, scene ->
-                Text("${i + 1}. ${scene.title} · ${minutesLabel(scene.seconds)}", color = H3Palette.TealPrimary, fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp))
+                Text(
+                    "${i + 1}. ${scene.title}" + if (scene.isEvent) "" else " · ${minutesLabel(scene.seconds)}",
+                    color = H3Palette.TealPrimary, fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp),
+                )
+                if (scene.isEvent) {
+                    EventOutline(scene)
+                }
                 scene.beats.forEach { beat ->
                     Row(Modifier.padding(start = 10.dp, top = 2.dp)) {
                         Text(
@@ -87,6 +101,24 @@ fun SceneTimeline(scenes: List<Scene>) {
                 }
             }
             Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun EventOutline(scene: Scene) {
+    androidx.compose.foundation.layout.Column(Modifier.padding(start = 10.dp, top = 2.dp)) {
+        scene.intent?.let { Text(it, color = H3Palette.TextPrimary, fontSize = 13.sp) }
+        scene.dialogue?.let {
+            Text("💬 “$it”", color = H3Palette.TextSecondary, fontSize = 13.sp, fontStyle = FontStyle.Italic)
+        }
+        val states = listOfNotNull(
+            scene.anatomy.firstOrNull()?.let { "Corpo: $it" },
+            scene.expressions.firstOrNull()?.let { "Expressão: $it" },
+            scene.deltas.firstOrNull()?.let { "Mudança: $it" },
+        )
+        if (states.isNotEmpty()) {
+            Text(states.joinToString(" · "), color = H3Palette.TextSecondary, fontSize = 12.sp)
         }
     }
 }

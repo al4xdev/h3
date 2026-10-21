@@ -3,6 +3,7 @@ package com.al4xdev.h3.data
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -331,8 +332,18 @@ data class Vision(val style: String, val camera: String, val lightAndColor: Stri
 }
 
 /** Planning outline returned with proposals/segments; blocks remain the editable unit. */
-data class Scene(val title: String, val beats: List<Beat>) {
+data class Scene(
+    val title: String,
+    val beats: List<Beat>,
+    val kind: String? = null,
+    val intent: String? = null,
+    val dialogue: String? = null,
+    val anatomy: List<String> = emptyList(),
+    val expressions: List<String> = emptyList(),
+    val deltas: List<String> = emptyList(),
+) {
     val seconds: Double get() = beats.sumOf { it.seconds }
+    val isEvent: Boolean get() = beats.isEmpty() && intent != null
 
     fun toJson(): JsonObject = buildJsonObject {
         put("title", title)
@@ -344,6 +355,12 @@ data class Scene(val title: String, val beats: List<Beat>) {
                 })
             }
         })
+        kind?.let { put("kind", it) }
+        intent?.let { put("intent", it) }
+        dialogue?.let { put("dialogue", it) }
+        if (anatomy.isNotEmpty()) put("anatomy", stringsJson(anatomy))
+        if (expressions.isNotEmpty()) put("expressions", stringsJson(expressions))
+        if (deltas.isNotEmpty()) put("deltas", stringsJson(deltas))
     }
 
     companion object {
@@ -352,11 +369,19 @@ data class Scene(val title: String, val beats: List<Beat>) {
             beats = o.arrAt("beats").mapNotNull { it.obj() }.map { b ->
                 Beat(b.str("kind") ?: "action", b.text("action"), b.double("seconds") ?: 0.0, b.str("dialogue")?.takeIf { it.isNotBlank() })
             },
+            kind = o.str("kind")?.takeIf { it.isNotBlank() },
+            intent = o.str("intent")?.takeIf { it.isNotBlank() },
+            dialogue = o.str("dialogue")?.takeIf { it.isNotBlank() },
+            anatomy = o.strings("anatomy"),
+            expressions = o.strings("expressions"),
+            deltas = o.strings("deltas"),
         )
 
         fun parseList(o: JsonObject): List<Scene> = o.arrAt("scenes").mapNotNull { it.obj()?.let(::parse) }
     }
 }
+
+internal fun stringsJson(values: List<String>): JsonElement = buildJsonArray { values.forEach { add(it) } }
 
 internal fun scenesJson(scenes: List<Scene>): JsonElement = buildJsonArray { scenes.forEach { add(it.toJson()) } }
 

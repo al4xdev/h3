@@ -123,6 +123,19 @@ class ParsingTest {
     }
 
     @Test
+    fun parsesNarratorEventWithoutBeats() {
+        val scene = Scene.parse(parseJson("""
+            {"title":"Sala","kind":"speech","intent":"ela fala e ri","dialogue":"Oi, guris",
+             "anatomy":["corpo 1","corpo 2"],"expressions":["olhar 1"],"deltas":["peso 1"]}
+        """.trimIndent()).jsonObject)
+        assertTrue(scene.isEvent)
+        assertEquals("ela fala e ri", scene.intent)
+        assertEquals("Oi, guris", scene.dialogue)
+        assertEquals(2, scene.anatomy.size)
+        assertEquals(0.0, scene.seconds, 0.0)
+    }
+
+    @Test
     fun sseParserYieldsChangePaths() {
         val parser = SseParser()
         val lines = listOf(": hi", "event: change", "data: {\"path\":\"roteiros/x/plan.json\",\"invalidation\":true}", "")
