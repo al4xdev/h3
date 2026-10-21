@@ -27,9 +27,6 @@ import com.al4xdev.h3.ui.components.Muted
 import com.al4xdev.h3.ui.components.PendingCard
 import com.al4xdev.h3.ui.components.StateDot
 import com.al4xdev.h3.ui.components.VideoPlayer
-import com.al4xdev.h3.ui.components.RunThumbnail
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.layout.ContentScale
 import com.al4xdev.h3.ui.components.runVideoUri
 import com.al4xdev.h3.ui.theme.H3Palette
 
@@ -46,9 +43,7 @@ fun ReviewScreen(vm: AppViewModel, roteiroId: String, blockId: String, runId: St
     Column(Modifier.statusBarsPadding().verticalScroll(rememberScrollState())) {
         if (run != null && run.playable) {
             val local = remember(run.id) { vm.localVideo(run.id) }
-            VideoPlayer(runVideoUri(vm.api.base(), run.id, local), Modifier.fillMaxWidth().height(560.dp)) {
-                RunThumbnail(run.id, vm.api.url(run.videoPath), local, Modifier.fillMaxSize(), ContentScale.Fit)
-            }
+            VideoPlayer(runVideoUri(vm.api.base(), run.id, local), Modifier.fillMaxWidth().height(560.dp))
         } else {
             Muted("Nenhum vídeo publicado para esta tentativa.", Modifier.padding(16.dp))
         }

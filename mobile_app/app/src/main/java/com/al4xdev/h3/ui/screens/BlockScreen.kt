@@ -55,9 +55,6 @@ import com.al4xdev.h3.ui.components.StateDot
 import com.al4xdev.h3.ui.components.TextArea
 import com.al4xdev.h3.ui.components.TopBar
 import com.al4xdev.h3.ui.components.VideoPlayer
-import com.al4xdev.h3.ui.components.RunThumbnail
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.layout.ContentScale
 import com.al4xdev.h3.ui.components.runVideoUri
 import com.al4xdev.h3.ui.settingsAction
 import com.al4xdev.h3.ui.theme.H3Palette
@@ -100,9 +97,7 @@ fun BlockScreen(vm: AppViewModel, roteiroId: String, blockId: String) {
         val run = attempt?.run
         if (run != null && run.playable) {
             val local = remember(run.id) { vm.localVideo(run.id) }
-            VideoPlayer(runVideoUri(vm.api.base(), run.id, local), Modifier.height(420.dp)) {
-                RunThumbnail(run.id, vm.api.url(run.videoPath), local, Modifier.fillMaxSize(), ContentScale.Fit)
-            }
+            VideoPlayer(runVideoUri(vm.api.base(), run.id, local), Modifier.height(420.dp))
             Spacer(Modifier.height(8.dp))
         }
         StateDot(state, buildString {

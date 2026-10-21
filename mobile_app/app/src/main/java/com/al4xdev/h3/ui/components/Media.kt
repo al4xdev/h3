@@ -6,9 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.annotation.OptIn
-import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -73,16 +71,15 @@ fun RunThumbnail(runId: String, videoUrl: String, localFile: File?, modifier: Mo
 
 /**
  * ExoPlayer over HTTP Range (or the offline copy). Never autoplays; pauses when the app stops;
- * keeps the position across rotation. `poster` (the run's first frame) covers the black surface
- * until playback starts; after the end the last frame stays. Only the control row blocks the
+ * keeps the position across rotation; after the end the last frame stays. The surface shows the
+ * video's own frame, so no still image is ever drawn over it. Only the control row blocks the
  * swipe-back, the picture itself does not.
  */
 @Composable
-fun VideoPlayer(uri: String, modifier: Modifier = Modifier, poster: (@Composable () -> Unit)? = null) {
+fun VideoPlayer(uri: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val position = rememberSaveable(uri) { mutableLongStateOf(0L) }
     var player by remember(uri) { mutableStateOf<ExoPlayer?>(null) }
-    var started by rememberSaveable(uri) { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     // Created in an effect (not during composition) so a discarded composition never leaks it.
     DisposableEffect(uri, lifecycle) {
@@ -92,9 +89,6 @@ fun VideoPlayer(uri: String, modifier: Modifier = Modifier, poster: (@Composable
             prepare()
             if (position.longValue > 0) seekTo(position.longValue)
         }
-        p.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) { if (isPlaying) started = true }
-        })
         player = p
         val observer = LifecycleEventObserver { _, event ->
             // ON_STOP runs before the state is saved, so rotation restores the position.
@@ -114,9 +108,6 @@ fun VideoPlayer(uri: String, modifier: Modifier = Modifier, poster: (@Composable
             update = { it.player = player },
             modifier = Modifier.fillMaxSize(),
         )
-        if (!started && position.longValue == 0L && poster != null) {
-            Box(Modifier.fillMaxSize().padding(bottom = CONTROLS_HEIGHT), contentAlignment = Alignment.Center) { poster() }
-        }
         ControlsExclusion()
     }
 }
