@@ -1,11 +1,15 @@
-"""Narrator clock and promptnest key shape. No provider and no GPU."""
+"""Narrator clock, promptnest key shape and first request. No provider and no GPU."""
+
+import json
 
 from h3_backend.roteiro.narrator import (
+    NARRATOR_SYSTEM,
     NO_SPEECH,
     SOUTHERN_SPEECH,
     BlockSlot,
     assign_counts,
     finish_instruction,
+    script_request,
     worker_chunks,
 )
 
@@ -42,3 +46,12 @@ def test_speech_placeholder_is_code_owned_and_other_slots_stay_silent():
     quiet = finish_instruction(body, silent)
     assert SOUTHERN_SPEECH.format(line="Oi, guris") in said
     assert NO_SPEECH in quiet and "Oi, guris" not in quiet
+
+
+def test_script_request_is_the_prompt_the_chain_really_sends():
+    context = {"idea": "ela sorri", "name": "live"}
+    request = script_request({"system_prompt": "ignored", "model": "pinned"}, context, 16, 8.0)
+    assert request.system_prompt == NARRATOR_SYSTEM
+    assert request.model == "pinned"
+    payload = json.loads(request.prompt.split("Payload:\n", 1)[1])
+    assert payload == {"block_count": 16, "block_seconds": 8.0, "context": context}

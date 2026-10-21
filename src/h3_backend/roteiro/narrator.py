@@ -65,6 +65,19 @@ CARD_TEMPLATE = (
 )
 
 
+def script_body(context: dict, count: int, seconds: float) -> dict:
+    return {"block_count": count, "block_seconds": seconds, "context": context}
+
+
+def script_request(base: dict, context: dict, count: int, seconds: float) -> PromptRequest:
+    """The exact first request of the chain, built from the same template `narrate` sends.
+
+    Callers record it before reserving a durable candidate, so stored evidence matches the wire.
+    """
+    prompt = SCRIPT_TEMPLATE.format(chunk_text=_payload(script_body(context, count, seconds)))
+    return PromptRequest(**{**base, "system_prompt": NARRATOR_SYSTEM}, prompt=prompt)
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -353,11 +366,11 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
     def remember(raws: list[str]) -> None:
         outcome["raw_texts"].extend(raws)
 
-    script_body = {"block_count": count, "block_seconds": seconds, "context": context}
+    body = script_body(context, count, seconds)
     try:
         answers, raws = await _run(
             grok, call_base, "h3_roteiro_script",
-            {"script": (_payload(script_body),)}, SCRIPT_TEMPLATE, Script,
+            {"script": (_payload(body),)}, SCRIPT_TEMPLATE, Script,
             propagate_provider=True)
     except (OSError, OAuthError, TimeoutError):
         raise

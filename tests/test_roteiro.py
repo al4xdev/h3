@@ -50,37 +50,31 @@ def update(doc, **changes):
         expected_revision=doc.revision).model_copy(update=changes)
 
 
-VISION = {"style": "Naturalista", "camera": "Plano médio estável", "light_and_color": "Neon frio",
-          "rhythm": "Calmo", "notes": "Respiros entre ações"}
-SCENES = [{"title": "Sala", "beats": [
-    {"kind": "action", "action": "Dança de preto", "seconds": 8, "dialogue": None},
-    {"kind": "transition", "action": "Muda para vermelho", "seconds": 8, "dialogue": None},
-]}]
-
-
 def payload_of(prompt: str) -> dict:
     marker = "Payload:\n"
     return json.loads(prompt[prompt.index(marker) + len(marker):])
 
 
 class FakeGrok:
-    """Answers script, palette and card steps; `text` fixes every response."""
+    """Answers script, palette and card steps; `text` fixes every response.
 
-    def __init__(self, *, text=None, gate=None, scenes=None, critic=None, dialogue=None):
+    `titles` only names the events the narrator asks for: the clock and the slots are code-owned.
+    """
+
+    def __init__(self, *, text=None, gate=None, titles=None, dialogue=None):
         self.calls = []
         self.schemas = []
         self.gate = gate
         self.entered = asyncio.Event()
         self.fixed = text
-        self.scenes = scenes or SCENES
-        self.critic = critic
+        self.titles = titles or ["Sala"]
         self.dialogue = dialogue
         self.text = text or ""
 
     def script_text(self, request):
         body = payload_of(request.prompt)
         count = body["block_count"]
-        titles = [scene["title"] for scene in (self.critic or self.scenes)] or ["Cena"]
+        titles = self.titles
         width = max(1, count // len(titles))
         events = []
         for index, title in enumerate(titles):

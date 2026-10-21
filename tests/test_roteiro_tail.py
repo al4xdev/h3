@@ -53,6 +53,9 @@ async def test_plan_actual_parent_and_explicit_atomic_adoption_preserve_prefix(t
     assert fake.calls[0].continuation_parent_id == parent_id
     assert fake.calls[0].reference == doc.reference
     assert "Future frames are unknown" in fake.calls[0].prompt
+    # The stored evidence is the prompt actually sent, not the retired director task.
+    assert candidate["planning_prompt"] == fake.calls[0].prompt
+    assert "Step 1 of 3" not in candidate["planning_prompt"]
     prefix = payload_of(fake.calls[0].prompt)["context"]["accepted_prefix"]
     assert prefix[0]["prompt"] == doc.attempts[0].snapshot.prompt
     assert prefix[0]["run_id"] == parent_id

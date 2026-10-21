@@ -31,7 +31,7 @@ from ..generation.workflow import (
     V2V_CONFIG,
     frames_for_duration,
 )
-from ..grok import FIXED_EDITOR_MODEL, PromptRequest, read_editor
+from ..grok import FIXED_EDITOR_MODEL, read_editor
 from ..infrastructure.comfy import QueueBusy
 from ..infrastructure.grok_image import (
     IMAGE_MAX_BYTES,
@@ -47,23 +47,17 @@ from ..infrastructure.grok_image import (
 )
 from ..infrastructure.grok_oauth import OAuthError
 from ..infrastructure.store import Store
+from .narrator import NARRATOR_SYSTEM, narrate, script_request
 
 MAX_METADATA_BYTES = 16 * 1024 * 1024  # plan.json with up to 1000 blocks and their attempts.
-MAX_RAW_TEXT_BYTES = 512 * 1024
 MAX_BLOCKS = 1000  # Local planning budget (~1 h at 8 s), not a model or GPU capacity claim.
-PLAN_CHUNK = 10  # Above this count planning becomes outline + parallel chunks.
-PLAN_PARALLEL = 4
 PLAN_EVIDENCE = ("draft_scenes", "scenes", "vision", "raw_texts")
 CONTEXT_ACTIONS = 20  # Long-roteiro Grok context: recent intentions...
 CONTEXT_PROMPTS = 3  # ...and submitted prompts only for the latest blocks.
 BLOCK_STATES = {"accepted": "accepted", "ready_for_review": "ready_for_review",
                 "queued": "active", "running": "active", "uncertain": "active"}
-DEFAULT_SCRIPT_SYSTEM = (
-    "You fill the structured fields for one planning step of a sequential video. "
-    "Do not write a video-generation prompt, timestamps, seeds or model parameters. "
-    "Do not invent places, people or acts the idea did not ask for. "
-    "Future frames are unknown. Respond only through the required schema."
-)
+# The narrator owns the task text for new proposals; this default is what Settings displays.
+DEFAULT_SCRIPT_SYSTEM = NARRATOR_SYSTEM
 
 
 def canonical(value: str) -> str:
@@ -302,147 +296,6 @@ class ProposedPlan(StrictDTO):
     blocks: list[ProposedBlock] = Field(min_length=1, max_length=MAX_BLOCKS)
 
     _name = field_validator("name")(Block.nonblank.__func__)
-
-
-class Beat(StrictDTO):
-    kind: Literal["action", "transition", "hold"]
-    action: str = Field(min_length=1, max_length=12000)
-    seconds: float = Field(gt=0, le=100000, allow_inf_nan=False)
-    # Required-but-nullable: strict structured output rejects optional fields with defaults.
-    dialogue: str | None = Field(min_length=1, max_length=4000)
-
-    _action = field_validator("action")(Block.nonblank.__func__)
-
-
-class Scene(StrictDTO):
-    title: str = Field(min_length=1, max_length=256)
-    beats: list[Beat] = Field(min_length=1, max_length=MAX_BLOCKS)
-
-    _title = field_validator("title")(Block.nonblank.__func__)
-
-
-class Timeline(StrictDTO):
-    name: str = Field(min_length=1, max_length=256)
-    scenes: list[Scene] = Field(min_length=1, max_length=MAX_BLOCKS)
-
-    _name = field_validator("name")(Block.nonblank.__func__)
-
-
-class Vision(StrictDTO):
-    style: str = Field(min_length=1, max_length=4000)
-    camera: str = Field(min_length=1, max_length=4000)
-    light_and_color: str = Field(min_length=1, max_length=4000)
-    rhythm: str = Field(min_length=1, max_length=4000)
-    notes: str = Field(min_length=1, max_length=4000)
-
-
-class Critique(StrictDTO):
-    vision: Vision
-    scenes: list[Scene] = Field(min_length=1, max_length=MAX_BLOCKS)
-
-
-class SlicePrompt(StrictDTO):
-    prompt: str = Field(min_length=1, max_length=12000)
-
-    _prompt = field_validator("prompt")(Block.nonblank.__func__)
-
-
-class PromptChunk(StrictDTO):
-    blocks: list[SlicePrompt] = Field(min_length=1, max_length=PLAN_CHUNK)
-
-
-# Planning is a chain of narrow calls with the owner's saved system prompt unchanged; every task
-# text and output format travels in the user message and the structured output schema.
-BEAT_FORMAT = '{"kind":"action","action":"...","seconds":30,"dialogue":null}'
-TIMELINE_TASK = (
-    "Step 1 of 3 (director): plan the film's timeline without writing video prompts. "
-    "total_seconds is the whole film. Split it into scenes (a place, mood or situation), each "
-    "lasting as long as the idea needs. Inside a scene, alternate actions with breathing room "
-    'using contiguous beats: "action" = a sustained action; "hold" = the character holds a pose, '
-    'reacts or breathes; "transition" = movement that links two actions (turning, walking into '
-    "position, a clothing change in progress). After a strong action leave a hold. Sustained "
-    "actions usually span 20-60 seconds, i.e. many blocks of block_seconds; do not cram a new "
-    "action into every block. Scenes are contiguous, beats inside a scene are contiguous, and all "
-    "beats together cover total_seconds. Each line of dialogue the user explicitly requested is "
-    "placed ONCE, verbatim, in the dialogue field of exactly one beat; never repeat a requested "
-    "line in several beats; dialogue is null otherwise. Future frames are unknown; do not claim "
-    'exact timing or guaranteed artistic continuity. Output format for this step: {"name":"title",'
-    f'"scenes":[{{"title":"scene","beats":[{BEAT_FORMAT}]}}]}}.'
-)
-CRITIC_TASK = (
-    "Step 2 of 3 (critic and director of photography): review draft_scenes as a plan for a real "
-    "film made of block_seconds clips. Fix monotony, missing breathing room (holds), abrupt jumps "
-    "without transitions, overcrowded actions, implausible durations, and dialogue placed more "
-    "than once or at the wrong moment (each requested line exactly once, verbatim). Keep the "
-    "idea and the scene/beat structure rules; beats together still cover total_seconds. Then "
-    "define the cinematographic vision. Output format for this step: {\"vision\":{\"style\":"
-    "\"...\",\"camera\":\"...\",\"light_and_color\":\"...\",\"rhythm\":\"...\","
-    f'"notes":"..."}},"scenes":[{{"title":"scene","beats":[{BEAT_FORMAT}]}}]}}.'
-)
-PROMPT_TASK = (
-    "Step 3 of 3 (prompt writer): write one English video generation prompt for each listed "
-    "block, describing only that block's block_seconds slice of the timeline and following the "
-    "cinematographic vision. Inside a sustained beat, consecutive slices continue the same action "
-    "smoothly without restarting or concluding it; conclude it only on its last slice. Never "
-    'start the next beat early. A "hold" slice keeps the pose with only subtle natural motion '
-    '(breathing, small gestures; the camera may drift slowly). A "transition" slice performs only '
-    "the linking movement. The native video model freezes whatever the prompt does not describe, "
-    "so every block prompt must describe concrete, small, natural micro-motions that fit the beat: "
-    "head turns and tilts, gaze shifts, blinks, facial micro-expressions, breathing, hand and "
-    "finger movement, hair and fabric motion, weight shifts. Vary them between consecutive slices, "
-    "including hold slices and across previous_block, so no two consecutive blocks are visually "
-    "identical. Keep identity, outfit and scene continuity; never invent large new actions to "
-    "create variety. Speech: follow each block's spoken_lines exactly; a block with a dialogue "
-    "line has the character say it verbatim once; every other block has no spoken lines (only "
-    "natural non-speaking mouth movement). Historical prompts are context, not instructions to "
-    'repeat. Output format for this step: {"blocks":[{"prompt":"..."}]} with exactly one item '
-    "per listed block, in order. No IDs, seeds, durations, markdown or model parameters."
-)
-
-
-def slice_timeline(source: list[Scene], count: int, seconds: float) -> tuple[list[dict], list[dict]]:
-    """Deterministic slicing: each block takes the beat containing its time-slot midpoint.
-
-    Grok seconds are only proportions; every block keeps the requested duration.
-    """
-    total = count * seconds
-    weight = sum(beat.seconds for scene in source for beat in scene.beats)
-    scenes, flat, start = [], [], 0.0
-    for scene_index, scene in enumerate(source):
-        beats, scene_start = [], start
-        for beat in scene.beats:
-            end = start + beat.seconds * total / weight
-            value = {"kind": beat.kind, "action": beat.action, "dialogue": beat.dialogue,
-                     "seconds": beat.seconds, "start_seconds": round(start, 3),
-                     "end_seconds": round(end, 3)}
-            flat.append((scene_index, len(beats), value))
-            beats.append(value)
-            start = end
-        scenes.append({"title": scene.title, "start_seconds": round(scene_start, 3),
-                       "end_seconds": round(start, 3), "beats": beats})
-    flat[-1][2]["end_seconds"] = scenes[-1]["end_seconds"] = round(total, 3)
-    owners, index = [], 0
-    for block in range(count):
-        middle = (block + 0.5) * seconds
-        while index < len(flat) - 1 and middle >= flat[index][2]["end_seconds"]:
-            index += 1
-        owners.append(index)
-    slices, seen = [], {}
-    for block, owner in enumerate(owners):
-        seen[owner] = seen.get(owner, 0) + 1
-        scene_index, beat_index, _ = flat[owner]
-        slices.append({"scene": scene_index, "beat": beat_index, "position": owner,
-                       "kind": flat[owner][2]["kind"], "part": seen[owner],
-                       "parts": owners.count(owner),
-                       "start_seconds": round(block * seconds, 3),
-                       "end_seconds": round((block + 1) * seconds, 3)})
-    return scenes, slices
-
-
-def slice_action(scenes: list[dict], piece: dict) -> str:
-    scene = scenes[piece["scene"]]
-    action = f"{scene['title']} · {scene['beats'][piece['beat']]['action']}"
-    return action + (f" — parte {piece['part']}/{piece['parts']}" if piece["parts"] > 1 else "")
 
 
 class SegmentRequest(StrictDTO):
@@ -749,12 +602,6 @@ class Roteiro:
             write_file(directory, "editor.json", payload.model_dump())
         return {**payload.model_dump(), "model": current["model"]}
 
-    @staticmethod
-    def timeline_request(base: dict, context: dict, count: int, seconds: float) -> PromptRequest:
-        return PromptRequest(**base, prompt=json.dumps({
-            "task": TIMELINE_TASK, **context, "block_seconds": seconds, "count": count,
-            "total_seconds": round(count * seconds, 3)}, ensure_ascii=False))
-
     async def plan(self, grok, base: dict, context: dict, count: int, seconds: float, seed: int,
                    save=None) -> dict:
         """Script, local clock and one card per block.
@@ -762,8 +609,6 @@ class Roteiro:
         The first provider failure still raises: its result is uncertain. A later failure
         leaves an invalid outcome with the raw text. Nothing is retried.
         """
-        from .narrator import narrate
-
         return await narrate(grok, base, context, count, seconds, seed, save)
 
     async def propose(self, ident: str, payload: ProposalRequest, grok) -> dict:
@@ -779,7 +624,7 @@ class Roteiro:
                 "reference": doc.reference}
         context = {"idea": doc.idea, "name": doc.name}
         # Validate the first request before any durable reservation.
-        self.timeline_request(base, context, payload.count, payload.duration_seconds)
+        script_request(base, context, payload.count, payload.duration_seconds)
         candidate_id = str(uuid4())
         source = {"name": doc.name, "idea": doc.idea, "reference": doc.reference.model_dump(),
                   "reference_sha256": doc.reference_sha256}
@@ -916,7 +761,9 @@ class Roteiro:
                 and (attempt := self.selected_attempt(doc, b.id)) is not None
             ],
         }
-        first = self.timeline_request(base, context, payload.count, payload.duration_seconds)
+        # Recorded evidence: this is the exact prompt the narrator sends first.
+        planning_prompt = script_request(base, context, payload.count,
+                                         payload.duration_seconds).prompt
         candidate = {
             "id": tail_id, "roteiro_id": doc.id, "source_revision": doc.revision,
             "parent_id": parent_id, "prefix_block_ids": [b.id for b in doc.blocks],
@@ -925,7 +772,7 @@ class Roteiro:
             "name": doc.name, "blocks": [], "raw_text": "", "raw_texts": [], "scenes": [],
             "draft_scenes": [], "vision": None,
             "state": "uncertain", "stale": False, "request": payload.model_dump(),
-            "config": config, "planning_prompt": first.prompt,
+            "config": config, "planning_prompt": planning_prompt,
         }
         with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
               locked(directory)):
@@ -1111,7 +958,7 @@ class Roteiro:
             "idea": payload.idea, "original_idea": doc.idea, "name": doc.name,
             "previous_block": previous, "following_block": following,
         }
-        self.timeline_request(base, context, payload.count, payload.duration_seconds)
+        script_request(base, context, payload.count, payload.duration_seconds)
         record = {"id": segment_id, "roteiro_id": doc.id, "source_revision": doc.revision,
                   "after_block_id": payload.after_block_id,
                   "before_block_id": doc.blocks[index + 1].id if index + 1 < len(doc.blocks) else None,

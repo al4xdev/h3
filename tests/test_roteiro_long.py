@@ -1,4 +1,4 @@
-"""Long roteiros: summary, removal, relaxed PUT, segments, timeline planning and middle batches.
+"""Long roteiros: summary, removal, relaxed PUT, segments, narrator planning and middle batches.
 
 CPU fixtures only: fake ComfyUI/media/builders and fake Grok clients, never a real provider.
 """
@@ -25,8 +25,6 @@ from h3_backend.roteiro import (
     ProposalRequest,
     RemovePlan,
     SegmentRequest,
-    Timeline,
-    slice_timeline,
 )
 from h3_backend.roteiro_batch import RoteiroBatch
 
@@ -250,20 +248,11 @@ async def test_segment_chunks_run_in_parallel_and_invalid_chunk_keeps_raw_texts(
     await service.shutdown()
 
 
-def test_single_sustained_beat_is_sliced_into_parts_with_requested_duration():
-    timeline = Timeline.model_validate({"name": "Um", "scenes": [{"title": "Palco", "beats": [
-        {"kind": "action", "action": "Dança contínua", "seconds": 80, "dialogue": None}]}]})
-    scenes, slices = slice_timeline(timeline.scenes, 10, 8.0)
-    assert [s["part"] for s in slices] == list(range(1, 11))
-    assert {s["parts"] for s in slices} == {10} and scenes[0]["end_seconds"] == 80
-
-
 @pytest.mark.asyncio
-async def test_ten_blocks_one_eighty_second_beat_yield_parts_and_fixed_duration(tmp_path):
+async def test_ten_blocks_from_one_event_keep_parts_and_requested_duration(tmp_path):
     service, op = setup(tmp_path)
     doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
-    fake = FakeGrok(scenes=[{"title": "Palco", "beats": [
-        {"kind": "action", "action": "Dança contínua", "seconds": 13, "dialogue": None}]}])
+    fake = FakeGrok(titles=["Palco"])
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=10, duration_seconds=8, seed=4), fake)
     assert [b["action"] for b in candidate["blocks"]] == [
@@ -274,14 +263,10 @@ async def test_ten_blocks_one_eighty_second_beat_yield_parts_and_fixed_duration(
 
 
 @pytest.mark.asyncio
-async def test_critic_replaces_draft_kinds_and_single_dialogue_reach_writers(tmp_path):
+async def test_one_dialogue_owns_the_placeholder_and_the_other_slots_stay_silent(tmp_path):
     service, op = setup(tmp_path)
     doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
-    critic = [{"title": "Quarto", "beats": [
-        {"kind": "action", "action": "Salta", "seconds": 16, "dialogue": "Olá, mundo!"},
-        {"kind": "hold", "action": "Respira", "seconds": 16, "dialogue": None},
-        {"kind": "transition", "action": "Vira de costas", "seconds": 16, "dialogue": None}]}]
-    fake = FakeGrok(scenes=critic, dialogue="Olá, mundo!")
+    fake = FakeGrok(titles=["Quarto"], dialogue="Olá, mundo!")
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=6, duration_seconds=8, seed=4), fake)
     assert [event["title"] for event in candidate["scenes"]] == ["Quarto"]
@@ -294,15 +279,10 @@ async def test_critic_replaces_draft_kinds_and_single_dialogue_reach_writers(tmp
 
 
 @pytest.mark.asyncio
-async def test_long_plan_of_450_blocks_slices_and_bounds_parallel_writers(tmp_path):
+async def test_long_plan_of_450_blocks_builds_every_card_and_bounds_parallel_calls(tmp_path):
     service, op = setup(tmp_path)
     doc = op.get((await op.create(CreatePlan(**fields(adopted=False))))["id"])
-    scenes = [{"title": f"Cena {i}", "beats": [
-        {"kind": "action", "action": f"Ação longa {i}", "seconds": 40, "dialogue": None},
-        {"kind": "hold", "action": f"Pausa {i}", "seconds": 10, "dialogue": None},
-        {"kind": "transition", "action": f"Transição {i}", "seconds": 10, "dialogue": None}]}
-        for i in range(60)]
-    fake = SegmentGrok(scenes=scenes)
+    fake = SegmentGrok(titles=[f"Cena {i}" for i in range(60)])
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=450, duration_seconds=8, seed=4), fake)
     assert len(candidate["blocks"]) == 450 and MAX_BLOCKS == 1000
