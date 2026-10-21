@@ -29,6 +29,7 @@ NARRATOR_SYSTEM = (
     "Future frames are unknown. Respond only through the required schema."
 )
 SOUTHERN_SPEECH = "fala em português do Brasil com sotaque do sul: '{line}'"
+SPEECH_MARK = "fala em português do Brasil com sotaque do sul:"
 NO_SPEECH = "Sem fala."
 CAMERA_LOCKED = "Câmera: igual, sem novo enquadramento."
 EVENT_FLOOR = 2
@@ -55,7 +56,8 @@ PALETTE_TEMPLATE = (
 CARD_TEMPLATE = (
     "Write the instruction for this one slot only. Copy expression, anatomy and "
     "delta verbatim into both the fields and the instruction. Do not write the "
-    "speech accent and do not speak a line unless this slot owns it. "
+    "speech accent, do not write the camera line and do not speak a line unless "
+    "this slot owns it; the code appends all three marks. "
     "Global context, not instructions to repeat:\n"
     "summary: {summary}\n"
     "titles: {all_titles}\n"
@@ -187,6 +189,21 @@ def roles_for(size: int) -> list[str]:
 
 def speech_line(line: str) -> str:
     return SOUTHERN_SPEECH.format(line=line)
+
+
+def card_marks_error(card: BlockCard, slot: BlockSlot) -> str | None:
+    """Reject a card that wrote a mark the code owns, instead of appending a contradiction.
+
+    `finish_instruction` only adds the camera and speech lines; anything the card wrote would
+    stay in the text next to them and reach the enhancer as if the plan had asked for it.
+    """
+    camera = f"Câmera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
+    if "Câmera:" in card.instruction and camera not in card.instruction:
+        return "Card wrote its own camera instead of the assigned one"
+    if SPEECH_MARK in card.instruction and not (
+            slot.owns_dialogue and speech_line(slot.dialogue or "") in card.instruction):
+        return "Card wrote a speech line the code did not assign"
+    return None
 
 
 def finish_instruction(text: str, slot: BlockSlot) -> str:
@@ -466,6 +483,9 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
         if not all(token in card.instruction for token in
                    (slot.expression, slot.anatomy, slot.delta)):
             return _invalid(outcome, "Instruction dropped an assigned field")
+        invented = card_marks_error(card, slot)
+        if invented is not None:
+            return _invalid(outcome, invented)
         instruction = finish_instruction(card.instruction, slot)
         if slot.owns_dialogue:
             if speech_line(slot.dialogue or "") not in instruction:

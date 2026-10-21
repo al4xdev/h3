@@ -10,13 +10,16 @@ from h3_backend.roteiro.narrator import (
     NO_SPEECH,
     PALETTE_CAPACITY,
     SOUTHERN_SPEECH,
+    BlockCard,
     BlockSlot,
     Palette,
     Script,
     _slots,
     assign_counts,
+    card_marks_error,
     finish_instruction,
     script_request,
+    speech_line,
     worker_chunks,
 )
 
@@ -90,3 +93,24 @@ def test_a_requested_line_is_owned_by_one_slot_even_if_two_events_repeat_it():
     # The repeated line would otherwise be spoken twice, which is the duplication the owner hears.
     assert [slot.title for slot in owners] == ["Sala"] and owners[0].dialogue == "Oi, guris"
     assert all(slot.dialogue is None for slot in slots if not slot.owns_dialogue)
+
+
+def test_a_card_cannot_write_the_camera_or_a_speech_line_of_its_own():
+    slot = BlockSlot(id="slot-1", index=1, event_index=0, title="Sala", intent="anda",
+                     role="do", part=1, parts=2, expression="olhar", anatomy="vestido",
+                     delta="peso", camera_focus=None, owns_dialogue=False, dialogue=None)
+
+    def card(text):
+        return BlockCard(id="slot-1", title="Sala", expression="olhar", anatomy="vestido",
+                         delta="peso", instruction=text)
+
+    body = "Ação: anda\nCorpo: vestido\nExpressão: olhar\nMudança em relação ao anterior: peso"
+    assert card_marks_error(card(body), slot) is None
+    assert card_marks_error(card(body + "\nCâmera: plano fechado"), slot) == (
+        "Card wrote its own camera instead of the assigned one")
+    assert card_marks_error(card(body + "\n" + speech_line("bom dia")), slot) == (
+        "Card wrote a speech line the code did not assign")
+    # The owning slot may reproduce exactly the line the code assigned to it.
+    owner = slot.model_copy(update={"owns_dialogue": True, "dialogue": "Oi, guris"})
+    assert card_marks_error(card(body + "\n" + speech_line("Oi, guris")), owner) is None
+    assert card_marks_error(card(body + "\n" + speech_line("outra fala")), owner) is not None
