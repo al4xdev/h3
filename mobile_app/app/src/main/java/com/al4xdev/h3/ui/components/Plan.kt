@@ -42,6 +42,8 @@ fun minutesLabel(seconds: Double): String {
     return if (total >= 60) "${total / 60} min ${total % 60} s" else "${Durations.label(seconds)} s"
 }
 
+private fun counted(count: Int, one: String, many: String): String = "$count ${if (count == 1) one else many}"
+
 @Composable
 fun VisionCard(vision: Vision?) {
     if (vision == null) return
@@ -69,8 +71,8 @@ fun SceneTimeline(scenes: List<Scene>) {
     val events = scenes.count { it.isEvent }
     Card {
         Text(
-            if (events > 0) "${scenes.size} eventos · ${events} com intenção"
-            else "${scenes.size} cenas · ${minutesLabel(total)}",
+            if (events > 0) "${counted(scenes.size, "evento", "eventos")} · $events com intenção"
+            else "${counted(scenes.size, "cena", "cenas")} · ${minutesLabel(total)}",
             color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold,
         )
         Expandable("Linha do tempo", initiallyOpen = scenes.size <= 8) {

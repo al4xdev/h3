@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.al4xdev.h3.data.ApiClient
 import com.al4xdev.h3.ui.AppViewModel
 import com.al4xdev.h3.ui.components.Card
@@ -66,7 +67,13 @@ fun SettingsScreen(vm: AppViewModel) {
 
         SectionTitle("Grok")
         Muted("Duração e seed não ficam aqui: pertencem a cada bloco.")
-        EditorCard(vm, ApiClient.ROTEIRO_EDITOR, "Roteiro completo")
+        EditorCard(
+            vm, ApiClient.ROTEIRO_EDITOR, "Roteiro completo",
+            note = "A proposta nova usa o narrador: script, paleta e um cartão por bloco. " +
+                "Tarefa e formato viajam no código, então este texto salvo é só registro e " +
+                "não é enviado ao Grok.",
+            editable = false,
+        )
         Spacer(Modifier.height(10.dp))
         EditorCard(vm, ApiClient.GROK_EDITOR, "Melhoria por bloco")
         Spacer(Modifier.height(10.dp))
@@ -76,7 +83,8 @@ fun SettingsScreen(vm: AppViewModel) {
 }
 
 @Composable
-private fun EditorCard(vm: AppViewModel, path: String, title: String) {
+private fun EditorCard(vm: AppViewModel, path: String, title: String, note: String? = null,
+                       editable: Boolean = true) {
     val remote = vm.editors[path]
     val config = remote?.value
     Card {
@@ -88,15 +96,25 @@ private fun EditorCard(vm: AppViewModel, path: String, title: String) {
                 }
                 config == null -> Loading()
                 else -> {
-                    var text by rememberSaveable(path, config.systemPrompt) { mutableStateOf(config.systemPrompt) }
+                    if (note != null) {
+                        Muted(note)
+                        Spacer(Modifier.height(6.dp))
+                    }
                     Muted("Modelo fixo: ${config.model.ifBlank { "—" }}")
                     Spacer(Modifier.height(6.dp))
-                    TextArea(text, { text = it }, "System prompt", minLines = 6, maxChars = 100000)
-                    Spacer(Modifier.height(8.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        PrimaryButton("Salvar", { vm.saveEditor(path, text) }, enabled = text != config.systemPrompt && text.isNotBlank(),
-                            busy = vm.isBusy("editor:$path"))
-                        if (text != config.systemPrompt) Muted("Alterado; ainda não salvo no PC.")
+                    if (editable) {
+                        var text by rememberSaveable(path, config.systemPrompt) { mutableStateOf(config.systemPrompt) }
+                        TextArea(text, { text = it }, "System prompt", minLines = 6, maxChars = 100000)
+                        Spacer(Modifier.height(8.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PrimaryButton("Salvar", { vm.saveEditor(path, text) },
+                                enabled = text != config.systemPrompt && text.isNotBlank(),
+                                busy = vm.isBusy("editor:$path"))
+                            if (text != config.systemPrompt) Muted("Alterado; ainda não salvo no PC.")
+                        }
+                    } else {
+                        // Read-only keeps the stored writer prompt visible without implying an effect.
+                        Text(config.systemPrompt, color = H3Palette.TextSecondary, fontSize = 13.sp)
                     }
                 }
             }
