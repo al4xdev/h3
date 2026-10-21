@@ -319,6 +319,7 @@ def _short(event: Event, size: int) -> bool:
 def _slots(script: Script, counts: list[int]) -> list[BlockSlot]:
     slots: list[BlockSlot] = []
     index = 1
+    spoken: set[str] = set()  # A requested line is spoken by exactly one slot in the whole script.
     for event_index, (event, size) in enumerate(zip(script.events, counts, strict=True)):
         anatomy = distinct(event.anatomy)
         expressions = distinct(event.expressions)
@@ -326,7 +327,10 @@ def _slots(script: Script, counts: list[int]) -> list[BlockSlot]:
         if min(len(anatomy), len(expressions), len(deltas)) < size:
             raise ValueError("Palette is shorter than the slots and was not completed")
         roles = roles_for(size)
-        owner = 0 if event.dialogue else None
+        line = event.dialogue.strip() if event.dialogue else None
+        owner = 0 if line and line not in spoken else None
+        if owner is not None:
+            spoken.add(line)
         for part, role in enumerate(roles, start=1):
             owns = owner is not None and part - 1 == owner
             slots.append(BlockSlot(
@@ -334,7 +338,7 @@ def _slots(script: Script, counts: list[int]) -> list[BlockSlot]:
                 intent=event.intent, role=role, part=part, parts=size,
                 expression=expressions[part - 1], anatomy=anatomy[part - 1],
                 delta=deltas[part - 1], camera_focus=event.camera_focus,
-                owns_dialogue=owns, dialogue=event.dialogue if owns else None,
+                owns_dialogue=owns, dialogue=line if owns else None,
             ))
             index += 1
     return slots

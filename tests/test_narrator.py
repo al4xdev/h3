@@ -12,6 +12,8 @@ from h3_backend.roteiro.narrator import (
     SOUTHERN_SPEECH,
     BlockSlot,
     Palette,
+    Script,
+    _slots,
     assign_counts,
     finish_instruction,
     script_request,
@@ -71,3 +73,20 @@ def test_script_request_is_the_prompt_the_chain_really_sends():
     assert request.model == "pinned"
     payload = json.loads(request.prompt.split("Payload:\n", 1)[1])
     assert payload == {"block_count": 16, "block_seconds": 8.0, "context": context}
+
+
+def test_a_requested_line_is_owned_by_one_slot_even_if_two_events_repeat_it():
+    def event(title, dialogue, prefix):
+        return {"title": title, "kind": "speech", "intent": "fala", "dialogue": dialogue,
+                "anatomy": [f"{prefix} corpo {n}" for n in (1, 2)],
+                "expressions": [f"{prefix} olhar {n}" for n in (1, 2)],
+                "deltas": [f"{prefix} peso {n}" for n in (1, 2)],
+                "camera_focus": None, "keeps": []}
+
+    script = Script.model_validate({"name": "Um", "summary": "eco", "events": [
+        event("Sala", "Oi, guris", "a"), event("Varanda", "  Oi, guris  ", "b")]})
+    slots = _slots(script, [2, 2])
+    owners = [slot for slot in slots if slot.owns_dialogue]
+    # The repeated line would otherwise be spoken twice, which is the duplication the owner hears.
+    assert [slot.title for slot in owners] == ["Sala"] and owners[0].dialogue == "Oi, guris"
+    assert all(slot.dialogue is None for slot in slots if not slot.owns_dialogue)
