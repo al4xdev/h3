@@ -1,31 +1,31 @@
-# Cards progressivos e identidade do estúdio
+# Progressive Cards and Studio Identity
 
-Estado: concluído por pedido do dono.
+Status: completed per owner request.
 
-- Adaptar a referência real do ha_app: cards próximos da rolagem, entrada suave
-  e resposta elástica, preservando os controles nativos de vídeo e o gesto Voltar.
-- Materializar o conteúdo dos blocos progressivamente, mantendo posição, rascunhos,
-  foco e estado na navegação. Abrir, rolar e voltar não iniciam geração.
-- Paleta própria azul-petróleo/turquesa: fundo #0b191e, superfície #132b33,
-  destaque #75ddd0, texto #edf8f8, secundário #a5bbc0, erro #ffb7b0.
-- Manter fontes, hierarquia e componentes atuais. Entrada dos cards é a assinatura
-  de movimento; evitar deslocar mídia ou controles e respeitar reduced-motion.
-- Testar listas longas, atualização de estado, navegação, requests e redução de
-  movimento. Validar no navegador com mocks; produção permanece na versão estável.
+- Adapt the real reference from ha_app: cards close to scroll, smooth entrance,
+  and rubber-band response, preserving native video controls and Back gesture.
+- Materialize block contents progressively, preserving position, drafts,
+  focus, and state across navigation. Opening, scrolling, and navigating back do not trigger generation.
+- Dedicated teal/turquoise palette: background #0b191e, surface #132b33,
+  accent #75ddd0, text #edf8f8, secondary #a5bbc0, error #ffb7b0.
+- Preserve current fonts, hierarchy, and components. Card entrance is the signature
+  motion; avoid displacing media or controls and respect reduced-motion.
+- Test long lists, state updates, navigation, requests, and reduced motion.
+  Validate in browser using mocks; production remains on stable version.
 
-## Evidência
+## Evidence
 
-- 305 testes frontend aprovados, incluindo lista de 200 cards, histórico de 80
-  versões, fallback sem IntersectionObserver, preservação de rascunhos, foco,
-  navegação entre roteiros e bloqueios de movimento.
-- Corrigida restauração de scroll antecipada em ViewTransition: a posição é
-  restaurada depois da pintura do destino, sem esperar o fim da animação.
-- Navegador desktop mockado 1280×900, DPR 1, touch 0: 50 shells leves, 2 cards
-  completos iniciais, nenhum histórico montado antecipadamente; 5 cards completos
-  depois de saltar ao fim. Ajustes/Voltar preservou o mesmo DOM e scroll 18657px.
-  Movimento normal e reduzido passaram, sem erros JS ou requests de mutação.
-- Capturas inspecionadas em `.dumps/tests/lazy-ui/`; não é prova de fluidez em
-  dispositivo físico. Nenhuma chamada real a Grok/GPU para esta validação.
-- Contraste calculado: texto secundário/card 6.54:1; botão principal 8.99:1.
-- Após reset do PC, servidor estável bf7305a reaberto pelo agente na porta 8888;
-  nenhum pedido foi reenviado automaticamente.
+- 305 frontend tests passed, including 200-card list, 80-version
+  history, fallback without IntersectionObserver, draft preservation, focus,
+  cross-script navigation, and motion guards.
+- Fixed premature scroll restoration in ViewTransition: position is
+  restored after destination paint, without waiting for animation end.
+- Mocked desktop browser 1280×900, DPR 1, touch 0: 50 lightweight shells, 2 initial
+  complete cards, no history mounted in advance; 5 complete cards
+  after jumping to bottom. Settings/Back preserved identical DOM and scroll 18657px.
+  Normal and reduced motion passed, without JS errors or mutation requests.
+- Captures inspected in `.dumps/tests/lazy-ui/`; does not constitute proof of fluidity on
+  physical device. No real calls to Grok/GPU for this validation.
+- Calculated contrast: secondary text/card 6.54:1; primary button 8.99:1.
+- Following PC reset, stable server bf7305a restarted by agent on port 8888;
+  no request was automatically resent.
