@@ -64,11 +64,11 @@ import com.al4xdev.h3.ui.theme.H3Palette
 fun AppViewModel.inputImageUrl(item: InputItem): String? =
     (item.imageUrl ?: item.reference.imagePath())?.let { api.url(it) }
 
-/** "≈ 12 min de filme" for N blocks of the given duration (seconds below one minute). */
+/** "≈ 12 min runtime" for N blocks of the given duration (seconds below one minute). */
 fun filmLength(count: Int, durationText: String): String? {
     val seconds = Durations.parse(durationText) ?: return null
     val total = count * Durations.effectiveSeconds(Durations.frames(seconds))
-    return if (total < 60) "≈ ${total.toInt()} s de filme" else "≈ ${Math.round(total / 60)} min de filme"
+    return if (total < 60) "≈ ${total.toInt()}s runtime" else "≈ ${Math.round(total / 60)} min runtime"
 }
 
 @Composable
@@ -80,19 +80,19 @@ fun NewRoteiroScreen(vm: AppViewModel) {
         if (uri != null) vm.upload(uri)
     }
 
-    TopBar("Novo roteiro", vm.settingsAction())
+    TopBar("New script", vm.settingsAction())
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-        SectionTitle("Referência de identidade")
+        SectionTitle("Identity reference")
         Row {
             val ratio = d.reference?.let { r -> if (r.width != null && r.height != null && r.height > 0) r.width.toFloat() / r.height else null } ?: 0.5625f
             RemoteImage(
                 url = d.reference?.let { vm.inputImageUrl(it) }, maxPx = 720,
                 modifier = Modifier.width(140.dp).aspectRatio(ratio).border(1.dp, H3Palette.Outline, RoundedCornerShape(10.dp)),
-                contentScale = ContentScale.Fit, description = "Foto de referência",
+                contentScale = ContentScale.Fit, description = "Reference photo",
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                if (d.reference == null) Muted("Nenhuma foto escolhida.")
+                if (d.reference == null) Muted("No photo selected.")
                 else {
                     Text(d.reference.label, color = H3Palette.TextPrimary, maxLines = 3, overflow = TextOverflow.Ellipsis)
                     if (d.reference.width != null) Muted("${d.reference.width} × ${d.reference.height}")
@@ -101,40 +101,40 @@ fun NewRoteiroScreen(vm: AppViewModel) {
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SecondaryButton("Escolher do PC", { picking = true; vm.loadInputs() }, Modifier.weight(1f), enabled = !creating)
-            SecondaryButton("Enviar foto", {
+            SecondaryButton("Choose from PC", { picking = true; vm.loadInputs() }, Modifier.weight(1f), enabled = !creating)
+            SecondaryButton("Upload photo", {
                 photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }, Modifier.weight(1f), busy = vm.isBusy("upload"), enabled = !creating)
         }
-        Muted("PNG ou JPEG até 20 MiB (o Grok recusa outros formatos).", Modifier.padding(top = 4.dp))
+        Muted("PNG or JPEG up to 20 MiB (Grok rejects other formats).", Modifier.padding(top = 4.dp))
 
-        SectionTitle("Título")
-        SingleField(d.title, { vm.updateNewDraft(d.copy(title = it)) }, "Título (opcional)")
-        SectionTitle("Sua ideia")
-        TextArea(d.idea, { vm.updateNewDraft(d.copy(idea = it)) }, "O que acontece no vídeo", minLines = 4)
+        SectionTitle("Title")
+        SingleField(d.title, { vm.updateNewDraft(d.copy(title = it)) }, "Title (optional)")
+        SectionTitle("Script idea")
+        TextArea(d.idea, { vm.updateNewDraft(d.copy(idea = it)) }, "What happens in the video", minLines = 4)
 
-        SectionTitle("Divisão")
-        CountSlider("Blocos", d.count, 1..MAX_BLOCKS, { vm.updateNewDraft(d.copy(count = it)) }, caption = filmLength(d.count, d.durationText))
+        SectionTitle("Breakdown")
+        CountSlider("Blocks", d.count, 1..MAX_BLOCKS, { vm.updateNewDraft(d.copy(count = it)) }, caption = filmLength(d.count, d.durationText))
         Spacer(Modifier.height(8.dp))
         DurationSeedFields(d.durationText, { vm.updateNewDraft(d.copy(durationText = it)) }, d.seedText, { vm.updateNewDraft(d.copy(seedText = it)) })
 
         Spacer(Modifier.height(16.dp))
         if (d.creationUncertain) {
             Card(border = H3Palette.StateUncertain) {
-                Text("A criação do roteiro ficou sem resposta.", color = H3Palette.StateUncertain)
-                Muted("Antes de criar outro, confira se ele já existe no PC.")
+                Text("Script creation received no response.", color = H3Palette.StateUncertain)
+                Muted("Before creating another, check if it already exists on the PC.")
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Procurar no PC", vm::findCreatedRoteiro, busy = vm.isBusy("new:find"))
+                SecondaryButton("Find on PC", vm::findCreatedRoteiro, busy = vm.isBusy("new:find"))
             }
             Spacer(Modifier.height(12.dp))
         } else if (d.roteiroId != null) {
-            Muted("Roteiro já criado no PC (${d.roteiroId.take(8)}). Propor de novo reaproveita o mesmo.")
+            Muted("Script already created on PC (${d.roteiroId.take(8)}). Proposing again reuses it.")
             Spacer(Modifier.height(8.dp))
         }
-        PrimaryButton("Propor com Grok", vm::proposeNew, enabled = !d.creationUncertain, busy = creating)
+        PrimaryButton("Propose with Grok", vm::proposeNew, enabled = !d.creationUncertain, busy = creating)
         PlanningWait(creating)
         Spacer(Modifier.height(10.dp))
-        SecondaryButton("Escrever blocos à mão", vm::writeNewByHand, enabled = !d.creationUncertain && !creating)
+        SecondaryButton("Write blocks manually", vm::writeNewByHand, enabled = !d.creationUncertain && !creating)
         Spacer(Modifier.height(32.dp))
     }
 
@@ -149,12 +149,12 @@ private fun ReferencePicker(vm: AppViewModel, onPick: (InputItem) -> Unit, onClo
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize().background(H3Palette.SurfaceDark).padding(12.dp)) {
             Row {
-                Text("Imagens no PC", color = H3Palette.TextPrimary, fontSize = 18.sp, modifier = Modifier.weight(1f).padding(top = 12.dp))
-                TextButton(onClick = onClose) { Text("Fechar") }
+                Text("PC Images", color = H3Palette.TextPrimary, fontSize = 18.sp, modifier = Modifier.weight(1f).padding(top = 12.dp))
+                TextButton(onClick = onClose) { Text("Close") }
             }
             val inputs = vm.inputs
             when {
-                inputs.value == null && inputs.error != null -> ErrorCard("PC inacessível", technical(inputs.error)) { vm.loadInputs() }
+                inputs.value == null && inputs.error != null -> ErrorCard("PC unreachable", technical(inputs.error)) { vm.loadInputs() }
                 inputs.value == null -> Loading()
                 else -> LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
@@ -164,7 +164,7 @@ private fun ReferencePicker(vm: AppViewModel, onPick: (InputItem) -> Unit, onClo
                 ) {
                     // Photos (assets + uploads) first, then frames taken from generated videos.
                     val (frames, photos) = inputs.value.partition { it.isRunFrame }
-                    for ((title, group) in listOf("Fotos" to photos, "Frames de vídeos" to frames)) {
+                    for ((title, group) in listOf("Photos" to photos, "Video frames" to frames)) {
                         if (group.isEmpty()) continue
                         item(key = "h:$title", span = { GridItemSpan(maxLineSpan) }) {
                             Text(title, color = H3Palette.TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
@@ -179,7 +179,7 @@ private fun ReferencePicker(vm: AppViewModel, onPick: (InputItem) -> Unit, onClo
                     }
                     if (inputs.value.size < vm.inputsTotal) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
-                            SecondaryButton("Carregar mais", { vm.loadInputs(more = true) }, busy = vm.isBusy("inputs"))
+                            SecondaryButton("Load more", { vm.loadInputs(more = true) }, busy = vm.isBusy("inputs"))
                         }
                     }
                 }

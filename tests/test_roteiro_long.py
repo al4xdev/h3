@@ -134,7 +134,7 @@ async def test_remove_refuses_review_pending_block(tmp_path):
         expected_revision=doc.revision, prompt=block.prompt, seed=block.seed,
         duration_seconds=block.duration_seconds, parent_id=doc.attempts[0].run_id))
     await service.wait_run(run_id)
-    with pytest.raises(Conflict, match="Aceite ou recuse"):
+    with pytest.raises(Conflict, match="Accept or reject"):
         op.remove_block(doc.id, block.id, RemovePlan(expected_revision=doc.revision))
     assert op.get(doc.id).blocks == doc.blocks
     await service.shutdown()
@@ -259,7 +259,7 @@ async def test_ten_blocks_from_one_event_keep_parts_and_requested_duration(tmp_p
 
     roles = roles_for(10)
     assert [b["action"] for b in candidate["blocks"]] == [
-        f"Palco · {role} — parte {i}/10" for i, role in enumerate(roles, start=1)]
+        f"Palco · {role} — part {i}/10" for i, role in enumerate(roles, start=1)]
     assert all(b["duration_seconds"] == 8.0 for b in candidate["blocks"])
     assert len([s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]) == 10
     await service.shutdown()
@@ -275,9 +275,9 @@ async def test_one_dialogue_owns_the_placeholder_and_the_other_slots_stay_silent
     assert [event["title"] for event in candidate["scenes"]] == ["Quarto"]
     spoken = [b["prompt"] for b in candidate["blocks"] if "Olá, mundo!" in b["prompt"]]
     assert len(spoken) == 1
-    assert "fala em português do Brasil com sotaque do sul: 'Olá, mundo!'" in spoken[0]
+    assert "speaks in Brazilian Portuguese with a southern accent: 'Olá, mundo!'" in spoken[0]
     silent = [b["prompt"] for b in candidate["blocks"] if "Olá, mundo!" not in b["prompt"]]
-    assert silent and all("Sem fala." in prompt for prompt in silent)
+    assert silent and all("No speech." in prompt for prompt in silent)
     await service.shutdown()
 
 

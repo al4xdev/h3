@@ -65,7 +65,7 @@ fun TopBar(title: String, onSettings: (() -> Unit)?) {
         )
         if (onSettings != null) {
             IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Filled.Settings, contentDescription = "Ajustes", tint = H3Palette.TextSecondary)
+                Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = H3Palette.TextSecondary)
             }
         }
     }
@@ -128,11 +128,12 @@ fun StateDot(state: BlockState, label: String) {
     }
 }
 
-/** Network messages already start with "PC inacessível: "; the card shows that once as its title. */
-fun technical(error: String?): String? = error?.removePrefix("PC inacessível: ")?.takeIf { it.isNotBlank() }
+/** Network messages already start with "Unreachable PC: " (or legacy "PC inacessível: "); the card shows that once as its title. */
+fun technical(error: String?): String? =
+    error?.removePrefix("Unreachable PC: ")?.removePrefix("PC inacessível: ")?.takeIf { it.isNotBlank() }
 
 @Composable
-fun ErrorCard(message: String, detail: String? = null, retryLabel: String = "Tentar de novo", onRetry: (() -> Unit)?) {
+fun ErrorCard(message: String, detail: String? = null, retryLabel: String = "Try again", onRetry: (() -> Unit)?) {
     Card(border = H3Palette.StateError) {
         Text(message, color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold)
         if (detail != null) Text(detail, color = H3Palette.TextTertiary, fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -144,7 +145,7 @@ fun ErrorCard(message: String, detail: String? = null, retryLabel: String = "Ten
 }
 
 @Composable
-fun Loading(text: String = "Lendo do PC…") {
+fun Loading(text: String = "Reading from PC…") {
     Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(12.dp))
@@ -163,7 +164,7 @@ fun ConfirmDialog(title: String, text: String, confirm: String, danger: Boolean 
                 Text(confirm, color = if (danger) H3Palette.StateError else H3Palette.TealPrimary)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
         containerColor = H3Palette.SurfaceElevated,
     )
 }
@@ -173,14 +174,14 @@ fun ConfirmDialog(title: String, text: String, confirm: String, danger: Boolean 
 fun PendingCard(ops: List<PendingOp>, busy: (PendingOp) -> Boolean, inFlight: (PendingOp) -> Boolean, onConsult: (PendingOp) -> Unit) {
     if (ops.isEmpty()) return
     Card(border = H3Palette.StateUncertain) {
-        Text("Pedido sem resposta confirmada", color = H3Palette.StateUncertain, fontWeight = FontWeight.SemiBold)
-        Muted("Não vou repetir o pedido. Consulte o mesmo ID no PC.")
+        Text("Request without confirmed response", color = H3Palette.StateUncertain, fontWeight = FontWeight.SemiBold)
+        Muted("Will not retry the request. Check the same ID on the PC.")
         ops.forEach { op ->
             Spacer(Modifier.height(8.dp))
             Text("${op.kind.label} · ${op.id.take(8)}", color = H3Palette.TextPrimary, fontSize = 14.sp)
             op.detail?.let { Muted(it.take(300)) }
-            if (inFlight(op)) Muted("Enviando…")
-            else SecondaryButton("Consultar ${op.kind.label}", { onConsult(op) }, busy = busy(op))
+            if (inFlight(op)) Muted("Sending…")
+            else SecondaryButton("Check ${op.kind.label}", { onConsult(op) }, busy = busy(op))
         }
     }
 }
@@ -217,12 +218,12 @@ fun SingleField(value: String, onChange: (String) -> Unit, label: String, modifi
 @Composable
 fun DurationSeedFields(durationText: String, onDuration: (String) -> Unit, seedText: String, onSeed: (String) -> Unit, enabled: Boolean = true) {
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        SingleField(durationText, onDuration, "Duração (s)", Modifier.weight(1f), decimal = true, enabled = enabled, maxChars = 5)
+        SingleField(durationText, onDuration, "Duration (s)", Modifier.weight(1f), decimal = true, enabled = enabled, maxChars = 5)
         SingleField(seedText, onSeed, "Seed", Modifier.weight(1.4f), numeric = true, enabled = enabled, maxChars = 16)
     }
     val seedOk = Durations.parseSeed(seedText) != null
     Text(
-        Durations.preview(durationText) + if (seedOk) "" else " · seed inválida",
+        Durations.preview(durationText) + if (seedOk) "" else " · invalid seed",
         color = if (Durations.parse(durationText) != null && seedOk) H3Palette.TextSecondary else H3Palette.StateError,
         fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp),
     )

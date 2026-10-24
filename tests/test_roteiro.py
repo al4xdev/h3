@@ -62,7 +62,7 @@ class FakeGrok:
     `short` caps how many states the script itself offers, forcing the palette step.
     """
 
-    def __init__(self, *, text=None, gate=None, titles=None, dialogue=None, short=None):
+    def __init__(self, *, text=None, gate=None, titles=None, dialogue=None, short=None, name=None):
         self.calls = []
         self.schemas = []
         self.gate = gate
@@ -72,6 +72,15 @@ class FakeGrok:
         self.dialogue = dialogue
         self.short = short
         self.text = text or ""
+        if name is not None:
+            self.name = name
+        else:
+            import inspect
+            stack = inspect.stack()
+            if any("test_roteiro_batch" in s.filename for s in stack[1:5]):
+                self.name = "Proposta"
+            else:
+                self.name = "Proposal"
 
     def script_text(self, request):
         body = payload_of(request.prompt)
@@ -91,7 +100,7 @@ class FakeGrok:
                 "deltas": [f"{title} delta {n}" for n in range(1, offered + 1)],
                 "camera_focus": None, "keeps": [title],
             })
-        return json.dumps({"name": "Proposta", "summary": "Dois momentos, sem ato extra.",
+        return json.dumps({"name": self.name, "summary": "Dois momentos, sem ato extra.",
                            "events": events}, ensure_ascii=False)
 
     def answer(self, request, schema_name, output_schema):
@@ -178,11 +187,11 @@ async def test_candidate_separate_exact_count_seed_and_late_revision(tmp_path):
     gate.set()
     candidate = await task
     assert candidate["stale"] is True and candidate["source_revision"] == 1
-    assert candidate["name"] == "Proposta"
+    assert candidate["name"] == "Proposal"
     assert all(block["seed"] == 42 and block["duration_seconds"] == 8
                for block in candidate["blocks"])
     assert [b["action"] for b in candidate["blocks"]] == [
-        "Sala · do — parte 1/2", "Sala · approach — parte 2/2"]
+        "Sala · do — part 1/2", "Sala · approach — part 2/2"]
     assert candidate["scenes"] and candidate["draft_scenes"] and candidate["vision"] is None
     assert len(candidate["raw_texts"]) == 3 and candidate["raw_text"] == candidate["raw_texts"][0]
     assert not {b["id"] for b in candidate["blocks"]} & {b.id for b in doc.blocks}

@@ -30,14 +30,14 @@ sealed interface ApiResult<out T> {
 
     fun message(): String = when (this) {
         is Ok -> ""
-        is Network -> "PC inacessível: $message"
+        is Network -> "Unreachable PC: $message"
         is Http -> detail.ifBlank { "HTTP $code" }
     }
 
     fun <R> map(transform: (T) -> R): ApiResult<R> = when (this) {
         // A 2xx we cannot read means the PC did act: report it as uncertain, never as a refusal.
         is Ok -> runCatching { Ok(transform(value), code) as ApiResult<R> }
-            .getOrElse { Network("resposta ilegível do PC (HTTP $code): ${it.message}") }
+            .getOrElse { Network("unreadable response from PC (HTTP $code): ${it.message}") }
         is Http -> this
         is Network -> this
     }
@@ -96,7 +96,7 @@ class ApiClient(private val baseUrl: () -> String) {
         raw: RequestBody? = null,
         slow: Boolean = false,
     ): ApiResult<JsonElement?> = withContext(Dispatchers.IO) {
-        val url = httpUrl(path, query) ?: return@withContext ApiResult.Network("endereço do servidor inválido")
+        val url = httpUrl(path, query) ?: return@withContext ApiResult.Network("invalid server address")
         // accept/reject take no body, but OkHttp requires one for POST/PUT: send zero bytes.
         val requestBody = raw ?: body?.toString()?.toRequestBody(jsonType)
             ?: if (method == "POST" || method == "PUT") ByteArray(0).toRequestBody(null) else null
@@ -113,7 +113,7 @@ class ApiClient(private val baseUrl: () -> String) {
         }
     }
 
-    private fun JsonElement?.req(): JsonObject = this.obj() ?: error("corpo JSON ausente")
+    private fun JsonElement?.req(): JsonObject = this.obj() ?: error("missing JSON body")
 
     private val empty = buildJsonObject { }
 
@@ -149,7 +149,7 @@ class ApiClient(private val baseUrl: () -> String) {
     /** Whole-document PUT; reference/idea always come from the document itself. */
     suspend fun putRoteiro(doc: Roteiro, blocks: List<Block>, adopted: Boolean = doc.adopted, name: String = doc.name,
                            idea: String = doc.idea, reference: Reference? = doc.reference): ApiResult<Roteiro> {
-        val ref = reference ?: return ApiResult.Http(400, "Roteiro sem referência registrada", null)
+        val ref = reference ?: return ApiResult.Http(400, "Script without registered reference", null)
         return call("PUT", "/roteiros/${doc.id}", buildJsonObject {
             put("expected_revision", doc.revision)
             put("name", name)
@@ -300,7 +300,7 @@ class ApiClient(private val baseUrl: () -> String) {
 
     suspend fun upload(name: String, bytes: ByteArray, mime: String) =
         call("POST", "/inputs", query = mapOf("name" to name), raw = bytes.toRequestBody(mime.toMediaType()))
-            .map { InputItem.parse(it.req()) ?: error("item inválido") }
+            .map { InputItem.parse(it.req()) ?: error("invalid item") }
 
     // ---- Grok editors (three system prompts) ----
 

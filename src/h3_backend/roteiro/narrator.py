@@ -28,10 +28,10 @@ NARRATOR_SYSTEM = (
     "Do not invent places, people or acts the idea did not ask for. "
     "Future frames are unknown. Respond only through the required schema."
 )
-SOUTHERN_SPEECH = "fala em português do Brasil com sotaque do sul: '{line}'"
-SPEECH_MARK = "fala em português do Brasil com sotaque do sul:"
-NO_SPEECH = "Sem fala."
-CAMERA_LOCKED = "Câmera: igual, sem novo enquadramento."
+SOUTHERN_SPEECH = "speaks in Brazilian Portuguese with a southern accent: '{line}'"
+SPEECH_MARK = "speaks in Brazilian Portuguese with a southern accent:"
+NO_SPEECH = "No speech."
+CAMERA_LOCKED = "Camera: static, same framing."
 EVENT_FLOOR = 2
 EVENT_CEILING = 12
 PALETTE_CAPACITY = 200  # One Palette list; a longer event needs more events, not more items.
@@ -203,8 +203,8 @@ def card_marks_error(card: BlockCard, slot: BlockSlot) -> str | None:
     `finish_instruction` only adds the camera and speech lines; anything the card wrote would
     stay in the text next to them and reach the enhancer as if the plan had asked for it.
     """
-    camera = f"Câmera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
-    if "Câmera:" in card.instruction and camera not in card.instruction:
+    camera = f"Camera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
+    if "Camera:" in card.instruction and camera not in card.instruction:
         return "Card wrote its own camera instead of the assigned one"
     has_dialogue = bool(slot.owns_dialogue and slot.dialogue and slot.dialogue.strip())
     if SPEECH_MARK in card.instruction and not (
@@ -215,7 +215,7 @@ def card_marks_error(card: BlockCard, slot: BlockSlot) -> str | None:
 
 def finish_instruction(text: str, slot: BlockSlot) -> str:
     body = text.strip()
-    camera = f"Câmera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
+    camera = f"Camera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
     if camera not in body:
         body = f"{body}\n{camera}"
     has_dialogue = bool(slot.owns_dialogue and slot.dialogue and slot.dialogue.strip())
@@ -508,7 +508,7 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
             return _invalid(outcome, "Silent slot is missing the no-speech mark")
         try:
             block = Block(id=str(uuid4()),
-                          action=f"{slot.title} · {slot.role} — parte {slot.part}/{slot.parts}",
+                          action=f"{slot.title} · {slot.role} — part {slot.part}/{slot.parts}",
                           duration_seconds=seconds, seed=seed, prompt=instruction)
         except ValueError:
             return _invalid(outcome, "Assigned cards cannot form strict planned blocks")

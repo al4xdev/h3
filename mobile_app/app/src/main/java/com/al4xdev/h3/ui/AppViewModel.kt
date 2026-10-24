@@ -320,7 +320,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             val known = docs.values.mapNotNull { it.value }.firstOrNull { d -> d.attempts.any { it.runId == runId } }
             val doc = known ?: api.roteiros().valueOrNull()?.firstOrNull { d -> d.attempts.any { it.runId == runId } }
             if (doc == null) {
-                say("O vídeo ${runId.take(8)} não está em nenhum roteiro.")
+                say("Video ${runId.take(8)} is not in any script.")
                 return@launch
             }
             store(doc)
@@ -338,7 +338,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
 
     fun deleteRoteiro(item: SummaryItem) = op("delete:${item.id}") {
         when (val r = api.deleteRoteiro(item.id, item.revision)) {
-            is ApiResult.Ok -> { docs.remove(item.id); drafts.clearCandidate(item.id); say("Roteiro apagado. Mídia movida para a lixeira do PC.") }
+            is ApiResult.Ok -> { docs.remove(item.id); drafts.clearCandidate(item.id); say("Script deleted. Media moved to PC trash.") }
             else -> say(r.message())
         }
         loadLibrary()
@@ -346,7 +346,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
 
     fun stopBatch(b: BatchRecord) = op("stopbatch:${b.id}") {
         when (val r = api.stopBatch(b.roteiroId, b.id)) {
-            is ApiResult.Ok -> { batch = r.value; say("Parada pedida ao lote.") }
+            is ApiResult.Ok -> { batch = r.value; say("Stop requested for batch.") }
             else -> { say(r.message()); loadBatch() }
         }
         reloadRoteiro(b.roteiroId)
@@ -378,10 +378,10 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         val resolver = ctx.contentResolver
         val mime = resolver.getType(uri)
         if (mime != "image/png" && mime != "image/jpeg") {
-            say("Use uma foto PNG ou JPEG (o Grok recusa outros formatos).")
+            say("Please use a PNG or JPEG photo (Grok refuses other formats).")
             return@op
         }
-        var name = "foto do celular"
+        var name = "phone photo"
         var size = -1L
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
             if (c.moveToFirst()) {
@@ -389,21 +389,21 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 size = if (c.isNull(1)) -1 else c.getLong(1)
             }
         }
-        if (size > MAX_UPLOAD) { say("A foto passa de 20 MiB, limite do Grok."); return@op }
+        if (size > MAX_UPLOAD) { say("Photo exceeds 20 MiB, Grok's limit."); return@op }
         val bytes = withContext(Dispatchers.IO) {
             resolver.openInputStream(uri)?.use { input ->
                 val buffer = input.readNBytes(MAX_UPLOAD.toInt() + 1)
                 buffer.takeIf { it.size <= MAX_UPLOAD }
             }
         }
-        if (bytes == null || bytes.isEmpty()) { say("Não foi possível ler a foto (vazia ou acima de 20 MiB)."); return@op }
+        if (bytes == null || bytes.isEmpty()) { say("Could not read photo (empty or above 20 MiB)."); return@op }
         val png = bytes.size > 8 && bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte()
         val jpeg = bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()
-        if (!png && !jpeg) { say("O conteúdo não é PNG nem JPEG."); return@op }
+        if (!png && !jpeg) { say("Content is neither PNG nor JPEG."); return@op }
         when (val r = api.upload(name, bytes, mime)) {
             is ApiResult.Ok -> {
                 updateNewDraft(newDraft.copy(reference = r.value))
-                say("Foto enviada ao PC.")
+                say("Photo uploaded to PC.")
                 loadInputs()
             }
             else -> say(r.message())
@@ -414,11 +414,11 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         val duration = Durations.parse(d.durationText)
         val seed = Durations.parseSeed(d.seedText)
         when {
-            d.reference == null -> say("Escolha a foto de referência.")
-            d.idea.isBlank() -> say("Escreva a ideia.")
-            d.title.length > 256 -> say("Título com mais de 256 caracteres.")
-            duration == null -> say("Duração inválida.")
-            seed == null -> say("Seed inválida.")
+            d.reference == null -> say("Choose the reference photo.")
+            d.idea.isBlank() -> say("Write the idea.")
+            d.title.length > 256 -> say("Title has more than 256 characters.")
+            duration == null -> say("Invalid duration.")
+            seed == null -> say("Invalid seed.")
             else -> return duration.toDouble() to seed
         }
         return null
@@ -428,10 +428,10 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     private suspend fun ensureCreated(d: NewRoteiroDraft): Roteiro? {
         val ref = d.reference?.reference ?: return null
         d.roteiroId?.let { id ->
-            val doc = reloadRoteiro(id) ?: run { say(docs[id]?.error ?: "Não foi possível ler o roteiro."); return null }
+            val doc = reloadRoteiro(id) ?: run { say(docs[id]?.error ?: "Could not read script."); return null }
             if (doc.adopted || doc.attempts.isNotEmpty()) {
                 finishNew(id)
-                say("Este roteiro já foi adotado; abrindo.")
+                say("This script was already adopted; opening.")
                 return null
             }
             if (doc.name != d.title.trim() || doc.idea != d.idea || doc.reference != ref) {
@@ -443,7 +443,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             return doc
         }
         if (d.creationUncertain) {
-            say("A criação anterior ficou sem resposta. Toque em “Procurar no PC” antes de criar outro.")
+            say("Previous creation had no response. Tap “Find on PC” before creating another.")
             return null
         }
         // POST /roteiros has no client ID: mark the draft first so a crash or timeout is visible.
@@ -455,7 +455,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 store(r.value)
                 r.value
             }
-            r.uncertain -> { say("Sem resposta do PC ao criar o roteiro. Toque em “Procurar no PC”."); null }
+            r.uncertain -> { say("No response from PC when creating script. Tap “Find on PC”."); null }
             else -> { updateNewDraft(newDraft.copy(creationUncertain = false)); say(r.message()); null }
         }
     }
@@ -488,10 +488,10 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                     .maxByOrNull { it.updatedAt.orEmpty() }
                 if (match == null) {
                     updateNewDraft(d.copy(creationUncertain = false), durable = true)
-                    say("O PC não registrou esse roteiro. Pode criar.")
+                    say("The PC did not register this script. You can create it.")
                 } else {
                     updateNewDraft(d.copy(roteiroId = match.id, creationUncertain = false), durable = true)
-                    say("Roteiro encontrado no PC; ele será reaproveitado.")
+                    say("Script found on PC; it will be reused.")
                 }
             }
             else -> say(r.message())
@@ -510,9 +510,9 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             r is ApiResult.Http && r.code == 422 && r.body != null && ("raw_text" in r.body || "raw_texts" in r.body) -> {
                 val raw = r.body.strings("raw_texts").filter { it.isNotBlank() }.ifEmpty { listOfNotNull(r.body.str("raw_text")) }
                 invalidAnswer = (listOf(r.detail) + raw).joinToString("\n\n")
-                say("O Grok devolveu uma proposta inválida; sua ideia foi mantida.")
+                say("Grok returned an invalid proposal; your idea was kept.")
             }
-            r.uncertain -> say("Sem resposta do Grok/PC (${r.message()}). Tocar de novo reaproveita o mesmo roteiro.")
+            r.uncertain -> say("No response from Grok/PC (${r.message()}). Tapping again reuses the same script.")
             else -> say(r.message())
         }
         return false
@@ -535,16 +535,16 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     }
 
     fun reproposal(roteiroId: String, count: Int, durationText: String, seedText: String) = op("propose:$roteiroId") {
-        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Duração inválida."); return@op }
-        val seed = Durations.parseSeed(seedText) ?: run { say("Seed inválida."); return@op }
+        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Invalid duration."); return@op }
+        val seed = Durations.parseSeed(seedText) ?: run { say("Invalid seed."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         propose(doc, count, duration, seed)
     }
 
     fun manualCandidate(roteiroId: String, count: Int, durationText: String, seedText: String) {
         val doc = doc(roteiroId) ?: return
-        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Duração inválida."); return }
-        val seed = Durations.parseSeed(seedText) ?: run { say("Seed inválida."); return }
+        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Invalid duration."); return }
+        val seed = Durations.parseSeed(seedText) ?: run { say("Invalid seed."); return }
         saveCandidate(roteiroId, Candidate(doc.name, RoteiroLogic.manualBlocks(count, doc.idea, duration, seed), fromGrok = false))
     }
 
@@ -553,12 +553,12 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         val c = candidate(roteiroId) ?: return@op
         val r = api.putRoteiro(doc, c.blocks, adopted = true, name = doc.name.ifBlank { c.name.take(256) })
         when {
-            r is ApiResult.Ok -> { store(r.value); saveCandidate(roteiroId, null); say("Roteiro adotado. Agora é só gerar.") }
+            r is ApiResult.Ok -> { store(r.value); saveCandidate(roteiroId, null); say("Script adopted. Ready to generate.") }
             r.uncertain -> {
                 val fresh = reloadRoteiro(roteiroId)
                 if (fresh?.adopted == true && fresh.blocks.map { it.id } == c.blocks.map { it.id }) {
-                    saveCandidate(roteiroId, null); say("Roteiro adotado.")
-                } else say("Resposta incerta; relido do PC: ainda não adotado. A proposta continua aqui.")
+                    saveCandidate(roteiroId, null); say("Script adopted.")
+                } else say("Uncertain response; re-read from PC: not yet adopted. The proposal remains here.")
             }
             else -> { say(r.message()); reloadRoteiro(roteiroId) }
         }
@@ -567,14 +567,14 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     // ---------------- batch ----------------
 
     fun startBatch(roteiroId: String) = op("batch:$roteiroId") {
-        if (pendingStore.find(OpKind.BATCH, roteiroId) != null) { say("Há um lote sem resposta; consulte-o primeiro."); return@op }
+        if (pendingStore.find(OpKind.BATCH, roteiroId) != null) { say("There is an unconfirmed batch; check it first."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val p = begin(PendingOp(OpKind.BATCH, newUuid(), roteiroId))
         val r = api.startBatch(roteiroId, p.id, doc.revision)
         settle(p, r)
         when {
-            r is ApiResult.Ok -> { batch = r.value; say("Lote iniciado no PC.") }
-            r.uncertain -> say("Resposta incerta. Consulte o mesmo lote; não toque em Gerar de novo.")
+            r is ApiResult.Ok -> { batch = r.value; say("Batch started on PC.") }
+            r.uncertain -> say("Uncertain response. Check the same batch; do not tap Generate again.")
             else -> say(r.message())
         }
         reloadRoteiro(roteiroId)
@@ -598,8 +598,8 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             OpKind.BATCH -> {
                 val rid = p.roteiroId ?: return@op
                 when (val r = api.batch(rid, p.id)) {
-                    is ApiResult.Ok -> { resolve(p.id); batch = r.value.takeIf { it.active } ?: batch; say("Lote encontrado: ${r.value.describe()}") }
-                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este lote. Pode gerar de novo.") } else say(r.message())
+                    is ApiResult.Ok -> { resolve(p.id); batch = r.value.takeIf { it.active } ?: batch; say("Batch found: ${r.value.describe()}") }
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("The PC did not register this batch. You can generate again.") } else say(r.message())
                     else -> say(r.message())
                 }
             }
@@ -607,18 +607,18 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 val rid = p.roteiroId ?: return@op
                 when (val r = api.segment(rid, p.id)) {
                     // "uncertain" = Grok still planning on the PC: keep the record, only a later GET resolves it.
-                    is ApiResult.Ok -> if (r.value.state == "uncertain") say("Planejamento ainda em andamento no PC.") else {
+                    is ApiResult.Ok -> if (r.value.state == "uncertain") say("Planning still in progress on PC.") else {
                         resolve(p.id); acceptSegment(rid, p.blockId, r.value)
                     }
-                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); clearSegmentId(rid, p.blockId); say("O PC não registrou este planejamento.") } else say(r.message())
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); clearSegmentId(rid, p.blockId); say("The PC did not register this plan.") } else say(r.message())
                     else -> say(r.message())
                 }
             }
             OpKind.ASSEMBLY -> when (val r = api.assembly(p.id)) {
-                is ApiResult.Ok -> if (r.value.state == "running") say("A montagem ainda está em andamento no PC.") else {
-                    resolve(p.id); say("Montagem ${r.value.id.take(8)}: ${r.value.state}"); loadAssemblies()
+                is ApiResult.Ok -> if (r.value.state == "running") say("Assembly still in progress on PC.") else {
+                    resolve(p.id); say("Assembly ${r.value.id.take(8)}: ${r.value.state}"); loadAssemblies()
                 }
-                is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou esta montagem.") } else say(r.message())
+                is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("The PC did not register this assembly.") } else say(r.message())
                 else -> say(r.message())
             }
             OpKind.ATTEMPT -> {
@@ -626,11 +626,11 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 val bid = p.blockId ?: return@op
                 when (val r = api.getAttempt(rid, bid, p.id)) {
                     is ApiResult.Ok -> when (r.value.admission) {
-                        "admitted" -> { resolve(p.id); say("Envio confirmado: ${RunStates.label(r.value.state)}.") }
-                        "rejected" -> { resolve(p.id); say("O PC recusou este envio${r.value.error?.let { ": $it" } ?: ""}. Pode preparar outro.") }
-                        else -> say("Ainda incerto no PC. Consulte mais tarde.")
+                        "admitted" -> { resolve(p.id); say("Submission confirmed: ${RunStates.label(r.value.state)}.") }
+                        "rejected" -> { resolve(p.id); say("The PC rejected this submission${r.value.error?.let { ": $it" } ?: ""}. You can prepare another.") }
+                        else -> say("Still uncertain on PC. Check again later.")
                     }
-                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este envio. Pode preparar de novo.") } else say(r.message())
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("The PC did not register this submission. You can prepare again.") } else say(r.message())
                     else -> say(r.message())
                 }
             }
@@ -639,12 +639,12 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 when (val r = api.edit(rid, p.id)) {
                     is ApiResult.Ok -> {
                         edits[rid + ":" + r.value.blockId] = Remote(r.value)
-                        if (r.value.state == "improving") say("O Grok ainda está propondo esta edição no PC.")
-                        else { resolve(p.id); say("Edição: ${r.value.state}") }
+                        if (r.value.state == "improving") say("Grok is still proposing this edit on PC.")
+                        else { resolve(p.id); say("Edit: ${r.value.state}") }
                     }
                     is ApiResult.Http -> if (r.code == 404) {
                         resolve(p.id); p.blockId?.let { b -> if (drafts.editId(rid, b) == p.id) drafts.clearEditId(rid, b); edits.remove("$rid:$b") }
-                        say("O PC não registrou esta edição.")
+                        say("The PC did not register this edit.")
                     } else say(r.message())
                     else -> say(r.message())
                 }
@@ -652,8 +652,8 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             OpKind.DECISION -> when (val r = api.run(p.id)) {
                 is ApiResult.Ok -> {
                     resolve(p.id)
-                    say(if (r.value.state == RunStates.READY) "A decisão não chegou ao PC; o vídeo continua para revisão."
-                        else "Estado no PC: ${RunStates.label(r.value.state)}.")
+                    say(if (r.value.state == RunStates.READY) "Decision did not reach PC; video is still up for review."
+                        else "State on PC: ${RunStates.label(r.value.state)}.")
                 }
                 else -> say(r.message())
             }
@@ -668,13 +668,13 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         if (!doc.adopted) {
             val c = candidate(roteiroId) ?: return@op
             saveCandidate(roteiroId, c.copy(blocks = c.blocks.map { if (it.id == block.id) block else it }))
-            say("Rascunho salvo neste aparelho.")
+            say("Draft saved on this device.")
             return@op
         }
         val r = api.putRoteiro(doc, doc.blocks.map { if (it.id == block.id) block else it })
         when (r) {
-            is ApiResult.Ok -> { store(r.value); say("Bloco salvo no PC.") }
-            else -> { say(if (r is ApiResult.Http && r.code == 409) "O roteiro mudou no PC e foi relido. Sua edição foi mantida." else r.message()); reloadRoteiro(roteiroId) }
+            is ApiResult.Ok -> { store(r.value); say("Block saved on PC.") }
+            else -> { say(if (r is ApiResult.Http && r.code == 409) "The script changed on PC and was reloaded. Your edit was kept." else r.message()); reloadRoteiro(roteiroId) }
         }
     }
 
@@ -686,9 +686,9 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             leave(Screen.Block(roteiroId, blockId))
             return@op
         }
-        if (doc.blocks.size <= 1) { say("Um roteiro adotado precisa de ao menos um bloco."); return@op }
+        if (doc.blocks.size <= 1) { say("An adopted script needs at least one block."); return@op }
         when (val r = api.putRoteiro(doc, doc.blocks.filter { it.id != blockId })) {
-            is ApiResult.Ok -> { store(r.value); leave(Screen.Block(roteiroId, blockId)); say("Bloco apagado.") }
+            is ApiResult.Ok -> { store(r.value); leave(Screen.Block(roteiroId, blockId)); say("Block deleted.") }
             else -> { say(r.message()); reloadRoteiro(roteiroId) }
         }
     }
@@ -697,7 +697,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     fun removeFromSequence(roteiroId: String, blockId: String) = op("remove:$blockId") {
         val doc = reloadRoteiro(roteiroId) ?: return@op
         when (val r = api.removeBlock(roteiroId, blockId, doc.revision)) {
-            is ApiResult.Ok -> { store(r.value); leave(Screen.Block(roteiroId, blockId)); say("Bloco tirado da sequência. O vídeo continua no PC.") }
+            is ApiResult.Ok -> { store(r.value); leave(Screen.Block(roteiroId, blockId)); say("Block removed from sequence. The video remains on PC.") }
             else -> { say(r.message()); reloadRoteiro(roteiroId) }
         }
     }
@@ -706,42 +706,42 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val index = doc.index(blockId)
         val block = doc.blocks.getOrNull(index) ?: return@op
-        val parent = RoteiroLogic.parentForFirstAttempt(doc, index).getOrElse { say(it.message ?: "Sem pai aceito."); return@op }
+        val parent = RoteiroLogic.parentForFirstAttempt(doc, index).getOrElse { say(it.message ?: "No accepted parent."); return@op }
         attempt(doc, blockId, block.prompt, block.seed, block.durationSeconds, parent)
     }
 
     fun retryBlock(roteiroId: String, blockId: String, prompt: String, durationText: String, seedText: String) = op("attempt:$roteiroId") {
-        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Duração inválida."); return@op }
-        val seed = Durations.parseSeed(seedText) ?: run { say("Seed inválida."); return@op }
-        if (prompt.isBlank()) { say("O prompt não pode ficar vazio."); return@op }
+        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Invalid duration."); return@op }
+        val seed = Durations.parseSeed(seedText) ?: run { say("Invalid seed."); return@op }
+        if (prompt.isBlank()) { say("Prompt cannot be empty."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
-        val plan = RoteiroLogic.retryPlan(doc, blockId) ?: run { say("Este bloco não aceita nova tentativa agora."); return@op }
+        val plan = RoteiroLogic.retryPlan(doc, blockId) ?: run { say("This block cannot be retried right now."); return@op }
         attempt(doc, blockId, prompt, seed, duration, plan.parentId, plan.targetRunId)
     }
 
     private suspend fun attempt(doc: Roteiro, blockId: String, prompt: String, seed: Long, duration: Double, parent: String?,
                                 target: String? = null) {
-        if (pendingStore.find(OpKind.ATTEMPT, doc.id) != null) { say("Há um envio sem resposta neste roteiro; consulte-o antes."); return }
+        if (pendingStore.find(OpKind.ATTEMPT, doc.id) != null) { say("There is an unconfirmed submission in this script; check it first."); return }
         val p = begin(PendingOp(OpKind.ATTEMPT, newUuid(), doc.id, blockId))
         val r = api.postAttempt(doc.id, blockId, p.id, doc.revision, prompt, seed, duration, parent, target)
         if (r is ApiResult.Ok && r.value.admission == "admitted" && r.value.runId == p.id) {
             resolve(p.id)
-            say("Enviado ao PC: ${RunStates.label(r.value.state)}.")
+            say("Submitted to PC: ${RunStates.label(r.value.state)}.")
         } else {
-            settle(p, if (r is ApiResult.Ok) ApiResult.Network("admissão incerta") else r)
-            say("${r.message().ifBlank { "Admissão incerta" }} · Consulte este envio antes de qualquer outro.")
+            settle(p, if (r is ApiResult.Ok) ApiResult.Network("uncertain admission") else r)
+            say("${r.message().ifBlank { "Uncertain admission" }} · Check this submission before any other.")
         }
         reloadRoteiro(doc.id)
     }
 
     fun decide(roteiroId: String, blockId: String?, runId: String, accept: Boolean, after: (() -> Unit)? = null) = op("decide:$runId") {
-        if (pendingStore.get(runId) != null) { say("Decisão anterior sem resposta; releia o vídeo."); return@op }
-        val p = begin(PendingOp(OpKind.DECISION, runId, roteiroId, blockId, if (accept) "aceitar" else "recusar"))
+        if (pendingStore.get(runId) != null) { say("Previous decision has no response; reload the video."); return@op }
+        val p = begin(PendingOp(OpKind.DECISION, runId, roteiroId, blockId, if (accept) "accept" else "reject"))
         val r = api.decide(runId, accept)
         settle(p, r)
         when {
-            r is ApiResult.Ok -> { say(if (accept) "Aceito." else "Recusado. O vídeo e o histórico continuam no PC."); after?.invoke() }
-            r.uncertain -> say("Decisão incerta. Releia o vídeo; não repita a decisão.")
+            r is ApiResult.Ok -> { say(if (accept) "Accepted." else "Rejected. Video and history remain on PC."); after?.invoke() }
+            r.uncertain -> say("Uncertain decision. Reload the video; do not repeat the decision.")
             else -> say(r.message())
         }
         reloadRoteiro(roteiroId)
@@ -751,7 +751,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         val b = batchOn(roteiroId)
         // A run owned by the active batch is stopped through the batch, like the web client.
         val r = if (b != null && b.currentRunId == runId) api.stopBatch(roteiroId, b.id).map { } else api.stopRun(runId).map { }
-        say(if (r is ApiResult.Ok) "Parada pedida." else r.message())
+        say(if (r is ApiResult.Ok) "Stop requested." else r.message())
         loadBatch()
         reloadRoteiro(roteiroId)
     }
@@ -759,7 +759,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     fun selectVersion(roteiroId: String, blockId: String, runId: String) = op("version:$blockId") {
         val doc = reloadRoteiro(roteiroId) ?: return@op
         when (val r = api.selectVersion(roteiroId, blockId, runId, doc.revision)) {
-            is ApiResult.Ok -> { store(r.value); say("Versão ${runId.take(8)} em uso.") }
+            is ApiResult.Ok -> { store(r.value); say("Version ${runId.take(8)} in use.") }
             else -> { say(r.message()); reloadRoteiro(roteiroId) }
         }
     }
@@ -802,13 +802,13 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             "proposed" -> {
                 updateInsert(roteiroId, after, insertDraft(roteiroId, after).copy(segmentId = record.id, blocks = record.blocks,
                     scenes = record.scenes, vision = record.vision))
-                say("${record.blocks.size} blocos planejados. Revise e insira.")
+                say("${record.blocks.size} blocks planned. Review and insert.")
             }
             "invalid" -> {
                 invalidAnswer = (listOfNotNull(record.error, record.detail) + record.rawTexts).joinToString("\n\n")
-                say("O Grok devolveu um planejamento inválido; nada foi inserido.")
+                say("Grok returned an invalid plan; nothing was inserted.")
             }
-            else -> say("Planejamento ainda incerto no PC.")
+            else -> say("Plan still uncertain on PC.")
         }
     }
 
@@ -825,13 +825,13 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
 
     fun planSegment(roteiroId: String, after: String?) = op("segment:$roteiroId") {
         val d = insertDraft(roteiroId, after)
-        val duration = Durations.parse(d.durationText)?.toDouble() ?: run { say("Duração inválida."); return@op }
-        val seed = Durations.parseSeed(d.seedText) ?: run { say("Seed inválida."); return@op }
-        if (d.idea.isBlank()) { say("Escreva o que acontece nesses blocos."); return@op }
-        if (pendingStore.find(OpKind.SEGMENT, roteiroId) != null) { say("Há um planejamento sem resposta; consulte-o antes."); return@op }
+        val duration = Durations.parse(d.durationText)?.toDouble() ?: run { say("Invalid duration."); return@op }
+        val seed = Durations.parseSeed(d.seedText) ?: run { say("Invalid seed."); return@op }
+        if (d.idea.isBlank()) { say("Write what happens in these blocks."); return@op }
+        if (pendingStore.find(OpKind.SEGMENT, roteiroId) != null) { say("There is an unconfirmed plan; check it first."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val count = d.count.coerceAtMost(MAX_BLOCKS - doc.blocks.size)
-        if (count < 1) { say("O roteiro já tem $MAX_BLOCKS blocos."); return@op }
+        if (count < 1) { say("The script already has $MAX_BLOCKS blocks."); return@op }
         val p = begin(PendingOp(OpKind.SEGMENT, newUuid(), roteiroId, after))
         updateInsert(roteiroId, after, insertDraft(roteiroId, after).copy(segmentId = p.id, blocks = emptyList(), scenes = emptyList(), vision = null))
         val r = api.planSegment(roteiroId, p.id, doc.revision, after, d.idea.trim(), count, duration, seed)
@@ -840,18 +840,18 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
             r is ApiResult.Ok -> acceptSegment(roteiroId, after, r.value)
             r is ApiResult.Http && r.body?.get("state") != null && r.code < 500 ->
                 acceptSegment(roteiroId, after, SegmentRecord.parse(r.body))
-            r.uncertain -> say("Sem resposta do Grok/PC. Consulte o mesmo planejamento.")
+            r.uncertain -> say("No response from Grok/PC. Check the same plan.")
             else -> { say(r.message()); clearSegmentId(roteiroId, after) }
         }
     }
 
     fun manualInsert(roteiroId: String, after: String?) {
         val d = insertDraft(roteiroId, after)
-        val duration = Durations.parse(d.durationText)?.toDouble() ?: run { say("Duração inválida."); return }
-        val seed = Durations.parseSeed(d.seedText) ?: run { say("Seed inválida."); return }
-        if (d.idea.isBlank()) { say("Escreva o que acontece nesses blocos."); return }
+        val duration = Durations.parse(d.durationText)?.toDouble() ?: run { say("Invalid duration."); return }
+        val seed = Durations.parseSeed(d.seedText) ?: run { say("Invalid seed."); return }
+        if (d.idea.isBlank()) { say("Write what happens in these blocks."); return }
         val count = d.count.coerceAtMost(MAX_BLOCKS - (doc(roteiroId)?.blocks?.size ?: 0))
-        if (count < 1) { say("O roteiro já tem $MAX_BLOCKS blocos."); return }
+        if (count < 1) { say("The script already has $MAX_BLOCKS blocks."); return }
         updateInsert(roteiroId, after, d.copy(segmentId = null, scenes = emptyList(), vision = null,
             blocks = RoteiroLogic.manualBlocks(count, d.idea, duration, seed)))
     }
@@ -861,15 +861,15 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         if (d.blocks.isEmpty()) return@op
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val blocks = RoteiroLogic.splice(doc.blocks, after, d.blocks)
-            ?: run { say("O bloco de referência não está mais no roteiro."); return@op }
-        if (blocks.size > MAX_BLOCKS) { say("O roteiro passaria de $MAX_BLOCKS blocos."); return@op }
+            ?: run { say("The reference block is no longer in the script."); return@op }
+        if (blocks.size > MAX_BLOCKS) { say("The script would exceed $MAX_BLOCKS blocks."); return@op }
         val r = api.putRoteiro(doc, blocks)
         val done = r is ApiResult.Ok || (r.uncertain && reloadRoteiro(roteiroId)?.blocks?.map { it.id }?.containsAll(d.blocks.map { it.id }) == true)
         if (r is ApiResult.Ok) store(r.value)
         if (done) {
             discardInsert(roteiroId, after)
             leave(Screen.Insert(roteiroId, after))
-            say("${d.blocks.size} blocos inseridos. Use “Gerar pendentes”.")
+            say("${d.blocks.size} blocks inserted. Use “Generate pending”.")
         } else say(r.message())
     }
 
@@ -901,10 +901,10 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     }
 
     fun proposeRedo(roteiroId: String, blockId: String, idea: String, durationText: String, seedText: String) = op("redo:$blockId") {
-        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Duração inválida."); return@op }
-        val seed = Durations.parseSeed(seedText) ?: run { say("Seed inválida."); return@op }
-        if (idea.isBlank()) { say("Descreva a nova versão."); return@op }
-        if (pendingStore.find(OpKind.EDIT, roteiroId) != null) { say("Há uma edição sem resposta; consulte-a antes."); return@op }
+        val duration = Durations.parse(durationText)?.toDouble() ?: run { say("Invalid duration."); return@op }
+        val seed = Durations.parseSeed(seedText) ?: run { say("Invalid seed."); return@op }
+        if (idea.isBlank()) { say("Describe the new version."); return@op }
+        if (pendingStore.find(OpKind.EDIT, roteiroId) != null) { say("There is an unconfirmed edit; check it first."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val p = begin(PendingOp(OpKind.EDIT, newUuid(), roteiroId, blockId))
         drafts.saveEditId(roteiroId, blockId, p.id)
@@ -912,21 +912,21 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
         settle(p, r)
         when {
             r is ApiResult.Ok -> edits[editKey(roteiroId, blockId)] = Remote(r.value)
-            r.uncertain -> say("Sem resposta do Grok/PC. Consulte a mesma edição.")
+            r.uncertain -> say("No response from Grok/PC. Check the same edit.")
             else -> { drafts.clearEditId(roteiroId, blockId); say(r.message()) }
         }
     }
 
     fun generateRedo(roteiroId: String, blockId: String, prompt: String) = op("redo:$blockId") {
         val record = edits[editKey(roteiroId, blockId)]?.value ?: return@op
-        if (prompt.isBlank()) { say("O prompt não pode ficar vazio."); return@op }
-        if (pendingStore.get(record.id) != null) { say("Esta edição está sem resposta; consulte-a antes."); return@op }
+        if (prompt.isBlank()) { say("Prompt cannot be empty."); return@op }
+        if (pendingStore.get(record.id) != null) { say("This edit has no response; check it first."); return@op }
         val p = begin(PendingOp(OpKind.EDIT, record.id, roteiroId, blockId))
         val r = api.generateEdit(roteiroId, record.id, prompt)
         settle(p, r)
         when {
-            r is ApiResult.Ok -> { edits[editKey(roteiroId, blockId)] = Remote(r.value); say("Geração enviada ao PC.") }
-            r.uncertain -> say("Resposta incerta. Consulte a mesma edição; não gere de novo.")
+            r is ApiResult.Ok -> { edits[editKey(roteiroId, blockId)] = Remote(r.value); say("Generation submitted to PC.") }
+            r.uncertain -> say("Uncertain response. Check the same edit; do not generate again.")
             else -> { say(r.message()); loadEdit(roteiroId, blockId, record.id) } // a refusal may have marked it failed
         }
     }
@@ -939,7 +939,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 drafts.clearEditId(roteiroId, blockId)
                 edits.remove(editKey(roteiroId, blockId))
                 leave(Screen.Redo(roteiroId, blockId))
-                say("Nova versão em uso no roteiro.")
+                say("New version in use in script.")
             }
             else -> { say(r.message()); loadEdit(roteiroId, blockId, record.id) }
         }
@@ -948,21 +948,21 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     fun discardRedo(roteiroId: String, blockId: String) = op("redo:$blockId") {
         val record = edits[editKey(roteiroId, blockId)]?.value ?: return@op
         when (val r = api.discardEdit(roteiroId, record.id)) {
-            is ApiResult.Ok -> { drafts.clearEditId(roteiroId, blockId); edits.remove(editKey(roteiroId, blockId)); say("Edição descartada.") }
+            is ApiResult.Ok -> { drafts.clearEditId(roteiroId, blockId); edits.remove(editKey(roteiroId, blockId)); say("Edit discarded.") }
             else -> say(r.message())
         }
     }
 
     fun retryRedo(roteiroId: String, blockId: String) = op("redo:$blockId") {
         val record = edits[editKey(roteiroId, blockId)]?.value ?: return@op
-        if (pendingStore.find(OpKind.EDIT, roteiroId) != null) { say("Há uma edição sem resposta; consulte-a antes."); return@op }
+        if (pendingStore.find(OpKind.EDIT, roteiroId) != null) { say("There is an unconfirmed edit; check it first."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val p = begin(PendingOp(OpKind.EDIT, newUuid(), roteiroId, blockId))
         val r = api.retryEdit(roteiroId, record.id, p.id, doc.revision)
         settle(p, r)
         when {
             r is ApiResult.Ok -> { drafts.saveEditId(roteiroId, blockId, p.id); edits[editKey(roteiroId, blockId)] = Remote(r.value) }
-            r.uncertain -> { drafts.saveEditId(roteiroId, blockId, p.id); say("Resposta incerta. Consulte a mesma edição.") }
+            r.uncertain -> { drafts.saveEditId(roteiroId, blockId, p.id); say("Uncertain response. Check the same edit.") }
             else -> say(r.message())
         }
     }
@@ -978,14 +978,14 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     }
 
     fun assemble(roteiroId: String) = op("assemble:$roteiroId") {
-        if (pendingStore.find(OpKind.ASSEMBLY, roteiroId) != null) { say("Há uma montagem sem resposta; consulte-a antes."); return@op }
+        if (pendingStore.find(OpKind.ASSEMBLY, roteiroId) != null) { say("There is an unconfirmed assembly; check it first."); return@op }
         val doc = reloadRoteiro(roteiroId) ?: return@op
         val p = begin(PendingOp(OpKind.ASSEMBLY, newUuid(), roteiroId))
         val r = api.assemble(roteiroId, p.id, doc.revision)
         settle(p, r)
         when {
-            r is ApiResult.Ok -> say("Montagem pronta: ${r.value.frames ?: "?"} frames.")
-            r.uncertain -> say("Resposta incerta. Releia a mesma montagem.")
+            r is ApiResult.Ok -> say("Assembly ready: ${r.value.frames ?: "?"} frames.")
+            r.uncertain -> say("Uncertain response. Reload the same assembly.")
             else -> say(r.message())
         }
         loadAssemblies()
@@ -993,7 +993,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
 
     fun downloadAssembly(a: Assembly, roteiroId: String) {
         VideoDownloadWorker.enqueueAssembly(ctx, settings.baseUrl, a.id, roteiroId)
-        say("Baixando para Filmes/H3 Studio…")
+        say("Downloading to Movies/H3 Studio…")
     }
 
     fun localVideo(runId: String): File? = VideoDownloadWorker.localRunVideo(ctx, runId)
@@ -1013,24 +1013,24 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     }
 
     fun saveEditor(path: String, systemPrompt: String) = op("editor:$path") {
-        if (systemPrompt.isBlank()) { say("O system prompt não pode ficar vazio."); return@op }
+        if (systemPrompt.isBlank()) { say("System prompt cannot be empty."); return@op }
         // Only /grok/editor carries the model, and it must equal the PC's pin (read-only here).
-        val model = if (path == ApiClient.GROK_EDITOR) editors[path]?.value?.model ?: run { say("Leia a configuração antes."); return@op } else null
+        val model = if (path == ApiClient.GROK_EDITOR) editors[path]?.value?.model ?: run { say("Read configuration first."); return@op } else null
         when (val r = api.saveEditor(path, systemPrompt, model)) {
-            is ApiResult.Ok -> { editors[path] = Remote(r.value); say("Salvo no PC.") }
+            is ApiResult.Ok -> { editors[path] = Remote(r.value); say("Saved to PC.") }
             else -> say(r.message())
         }
     }
 
     fun testServer(url: String) = op("server") {
         val candidate = url.trim().trimEnd('/')
-        if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) { say("Use http://IP:porta"); return@op }
+        if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) { say("Use http://IP:port"); return@op }
         val probe = ApiClient { candidate }
         when (val r = probe.config()) {
             is ApiResult.Ok -> {
                 val changed = candidate != settings.baseUrl
                 settings.baseUrl = candidate
-                say("PC respondeu em $candidate.")
+                say("PC responded at $candidate.")
                 if (changed) {
                     onBackground(); onForeground()
                     settings.fcmToken?.let { H3App.registerToken(ctx, it) }
@@ -1041,7 +1041,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     }
 
     fun registerNotifications() {
-        val token = settings.fcmToken ?: run { say("Ainda sem token de notificação neste aparelho."); return }
+        val token = settings.fcmToken ?: run { say("No notification token on this device yet."); return }
         H3App.registerToken(ctx, token) { text -> viewModelScope.launch { say(text) } }
     }
 
@@ -1053,7 +1053,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     fun clearStorage() {
         VideoDownloadWorker.clearStored(ctx)
         com.al4xdev.h3.data.MediaCache.clear(ctx)
-        say("Vídeos baixados e miniaturas apagados deste aparelho.")
+        say("Downloaded videos and thumbnails cleared from this device.")
     }
 
     override fun onCleared() {

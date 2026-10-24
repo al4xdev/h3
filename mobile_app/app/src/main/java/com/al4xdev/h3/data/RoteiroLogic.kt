@@ -106,9 +106,9 @@ object RoteiroLogic {
     /** Parent for the first attempt of a never-sent block; Result.failure explains the block. */
     fun parentForFirstAttempt(doc: Roteiro, index: Int): Result<String?> {
         if (index == 0) return Result.success(null)
-        val previous = doc.blocks.getOrNull(index - 1) ?: return Result.failure(IllegalStateException("Bloco inexistente"))
+        val previous = doc.blocks.getOrNull(index - 1) ?: return Result.failure(IllegalStateException("Nonexistent block"))
         val run = acceptedRun(doc, previous.id)
-            ?: return Result.failure(IllegalStateException("O bloco $index precisa ter uma versão aceita antes."))
+            ?: return Result.failure(IllegalStateException("Block $index must have an accepted version first."))
         return Result.success(run)
     }
 

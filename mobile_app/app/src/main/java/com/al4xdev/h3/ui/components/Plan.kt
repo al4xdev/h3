@@ -34,7 +34,7 @@ fun PlanningWait(active: Boolean) {
     LaunchedEffect(Unit) {
         while (true) { delay(1000); elapsed++ } // local clock for the label, not a request
     }
-    Muted("Grok em etapas no PC (script · paleta · cartões). Pode levar alguns minutos · ${elapsed}s")
+    Muted("Grok stages on PC (script · palette · cards). May take a few minutes · ${elapsed}s")
 }
 
 fun minutesLabel(seconds: Double): String {
@@ -48,10 +48,10 @@ private fun counted(count: Int, one: String, many: String): String = "$count ${i
 fun VisionCard(vision: Vision?) {
     if (vision == null) return
     Card {
-        Expandable("Visão cinematográfica") {
+        Expandable("Cinematic vision") {
             listOf(
-                "Estilo" to vision.style, "Câmera" to vision.camera, "Luz e cor" to vision.lightAndColor,
-                "Ritmo" to vision.rhythm, "Notas" to vision.notes,
+                "Style" to vision.style, "Camera" to vision.camera, "Light and color" to vision.lightAndColor,
+                "Pacing" to vision.rhythm, "Notes" to vision.notes,
             ).filter { it.second.isNotBlank() }.forEach { (label, text) ->
                 Text(label, color = H3Palette.TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 Text(text, color = H3Palette.TextPrimary, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
@@ -71,11 +71,11 @@ fun SceneTimeline(scenes: List<Scene>) {
     val events = scenes.count { it.isEvent }
     Card {
         Text(
-            if (events > 0) "${counted(scenes.size, "evento", "eventos")} · $events com intenção"
-            else "${counted(scenes.size, "cena", "cenas")} · ${minutesLabel(total)}",
+            if (events > 0) "${counted(scenes.size, "event", "events")} · $events with intent"
+            else "${counted(scenes.size, "scene", "scenes")} · ${minutesLabel(total)}",
             color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold,
         )
-        Expandable("Linha do tempo", initiallyOpen = scenes.size <= 8) {
+        Expandable("Timeline", initiallyOpen = scenes.size <= 8) {
             scenes.forEachIndexed { i, scene ->
                 Text(
                     "${i + 1}. ${scene.title}" + if (scene.isEvent) "" else " · ${minutesLabel(scene.seconds)}",
@@ -115,9 +115,9 @@ private fun EventOutline(scene: Scene) {
             Text("💬 “$it”", color = H3Palette.TextSecondary, fontSize = 13.sp, fontStyle = FontStyle.Italic)
         }
         val states = listOfNotNull(
-            scene.anatomy.firstOrNull()?.let { "Corpo: $it" },
-            scene.expressions.firstOrNull()?.let { "Expressão: $it" },
-            scene.deltas.firstOrNull()?.let { "Mudança: $it" },
+            scene.anatomy.firstOrNull()?.let { "Anatomy: $it" },
+            scene.expressions.firstOrNull()?.let { "Expressions: $it" },
+            scene.deltas.firstOrNull()?.let { "Deltas: $it" },
         )
         if (states.isNotEmpty()) {
             Text(states.joinToString(" · "), color = H3Palette.TextSecondary, fontSize = 12.sp)

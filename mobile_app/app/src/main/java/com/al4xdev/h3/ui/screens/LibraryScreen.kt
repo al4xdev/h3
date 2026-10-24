@@ -74,38 +74,38 @@ fun LibraryScreen(vm: AppViewModel) {
     ) {
         vm.batch?.takeIf { it.active }?.let { b ->
             item(key = "batch") {
-                val name = library.value?.firstOrNull { it.id == b.roteiroId }?.title ?: "roteiro"
+                val name = library.value?.firstOrNull { it.id == b.roteiroId }?.title ?: "script"
                 Card(border = H3Palette.TealSecondary) {
-                    Text("⏵ Lote no PC · $name", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
+                    Text("⏵ Batch on PC · $name", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
                     Muted(b.describe())
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        SecondaryButton("Abrir roteiro", { vm.push(Screen.Roteiro(b.roteiroId)) }, Modifier.weight(1f))
-                        SecondaryButton("Parar…", { confirmStop = b }, Modifier.weight(1f), danger = true,
+                        SecondaryButton("Open script", { vm.push(Screen.Roteiro(b.roteiroId)) }, Modifier.weight(1f))
+                        SecondaryButton("Stop…", { confirmStop = b }, Modifier.weight(1f), danger = true,
                             busy = vm.isBusy("stopbatch:${b.id}"), enabled = !b.stopRequested)
                     }
                 }
             }
         }
-        item(key = "new") { PrimaryButton("+ Novo roteiro", { vm.push(Screen.NewRoteiro) }) }
+        item(key = "new") { PrimaryButton("+ New script", { vm.push(Screen.NewRoteiro) }) }
         item(key = "header") {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Title("Roteiros")
+                Title("Scripts")
                 Spacer(Modifier.weight(1f))
-                FilterChip(selected = onlyFavorites, onClick = { onlyFavorites = !onlyFavorites }, label = { Text("☆ favoritos") })
+                FilterChip(selected = onlyFavorites, onClick = { onlyFavorites = !onlyFavorites }, label = { Text("☆ favorites") })
             }
         }
         when {
             library.value == null && library.error != null -> item(key = "error") {
-                ErrorCard("PC inacessível", technical(library.error)) { vm.loadLibrary() }
+                ErrorCard("PC unreachable", technical(library.error)) { vm.loadLibrary() }
             }
             library.value == null -> item(key = "loading") { Loading() }
             else -> {
                 if (library.error != null) item(key = "stale") {
-                    ErrorCard("PC inacessível agora · mostrando a última leitura", technical(library.error)) { vm.loadLibrary() }
+                    ErrorCard("PC unreachable right now · showing last read", technical(library.error)) { vm.loadLibrary() }
                 }
                 if (items.isEmpty()) item(key = "empty") {
-                    Muted(if (onlyFavorites) "Nenhum favorito." else "Nenhum roteiro no PC ainda.")
+                    Muted(if (onlyFavorites) "No favorites." else "No scripts on PC yet.")
                 }
                 items(items, key = { it.id }) { item ->
                     RoteiroCard(
@@ -128,30 +128,30 @@ fun LibraryScreen(vm: AppViewModel) {
             text = {
                 Column {
                     TextButton(onClick = { menuFor = null; vm.setFavorite(item.id, !favorite) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (favorite) "★ Tirar dos favoritos" else "☆ Favoritar", modifier = Modifier.fillMaxWidth())
+                        Text(if (favorite) "★ Remove from favorites" else "☆ Favorite", modifier = Modifier.fillMaxWidth())
                     }
                     TextButton(onClick = { menuFor = null; confirmDelete = item }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Apagar roteiro…", color = H3Palette.StateError, modifier = Modifier.fillMaxWidth())
+                        Text("Delete script…", color = H3Palette.StateError, modifier = Modifier.fillMaxWidth())
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { menuFor = null }) { Text("Fechar") } },
+            confirmButton = { TextButton(onClick = { menuFor = null }) { Text("Close") } },
             containerColor = H3Palette.SurfaceElevated,
         )
     }
     confirmDelete?.let { item ->
         ConfirmDialog(
-            title = "Apagar “${item.title}”?",
-            text = "Os vídeos e montagens deste roteiro vão para a lixeira do PC (/tmp). Registros de segurança e referências compartilhadas são preservados.",
-            confirm = "Apagar", danger = true,
+            title = "Delete “${item.title}”?",
+            text = "Videos and assemblies for this script will be moved to the PC trash (/tmp). Safety records and shared references are preserved.",
+            confirm = "Delete", danger = true,
             onConfirm = { vm.deleteRoteiro(item) }, onDismiss = { confirmDelete = null },
         )
     }
     confirmStop?.let { b ->
         ConfirmDialog(
-            title = "Parar o lote?",
-            text = "O bloco em geração é interrompido e o lote não continua. Nada do que já foi aceito é perdido.",
-            confirm = "Confirmar parada", danger = true,
+            title = "Stop batch?",
+            text = "The generating block will be interrupted and the batch will stop. Nothing already accepted is lost.",
+            confirm = "Confirm stop", danger = true,
             onConfirm = { vm.stopBatch(b) }, onDismiss = { confirmStop = null },
         )
     }
@@ -164,7 +164,7 @@ private fun RoteiroCard(item: SummaryItem, favorite: Boolean, uncertain: Boolean
     Card(
         Modifier.appearOnce().pressScale(interaction).combinedClickable(
             interactionSource = interaction, indication = LocalIndication.current,
-            onClick = onOpen, onLongClick = onLongPress, onLongClickLabel = "Favoritar ou apagar",
+            onClick = onOpen, onLongClick = onLongPress, onLongClickLabel = "Favorite or delete",
         ),
     ) {
         Text((if (favorite) "★ " else "") + item.title, color = H3Palette.TextPrimary, fontSize = 16.sp,
@@ -175,18 +175,18 @@ private fun RoteiroCard(item: SummaryItem, favorite: Boolean, uncertain: Boolean
         val accepted = item.count("accepted")
         Muted(
             when {
-                !item.adopted -> "Proposta ainda não adotada"
-                item.blockCount > 0 && accepted == item.blockCount -> "$accepted/${item.blockCount} ✓ todos aceitos"
-                else -> "$accepted/${item.blockCount} aceitos"
+                !item.adopted -> "Proposal not yet adopted"
+                item.blockCount > 0 && accepted == item.blockCount -> "$accepted/${item.blockCount} ✓ all accepted"
+                else -> "$accepted/${item.blockCount} accepted"
             },
         )
         val review = item.count("ready_for_review")
         val active = item.count("active")
         val failed = item.count("failed")
-        if (review > 0) Text("● $review para revisar", color = H3Palette.StateReady, fontSize = 14.sp)
-        if (active > 0) Text("⟳ $active gerando", color = H3Palette.StateActive, fontSize = 14.sp)
-        if (failed > 0) Text("✕ $failed recusado/interrompido", color = H3Palette.StateError, fontSize = 14.sp)
-        if (uncertain) Text("⚠ pedido sem resposta confirmada", color = H3Palette.StateUncertain, fontSize = 14.sp)
+        if (review > 0) Text("● $review to review", color = H3Palette.StateReady, fontSize = 14.sp)
+        if (active > 0) Text("⟳ $active generating", color = H3Palette.StateActive, fontSize = 14.sp)
+        if (failed > 0) Text("✕ $failed rejected/interrupted", color = H3Palette.StateError, fontSize = 14.sp)
+        if (uncertain) Text("⚠ pending request without confirmed response", color = H3Palette.StateUncertain, fontSize = 14.sp)
     }
 }
 

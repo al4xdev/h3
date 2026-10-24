@@ -106,7 +106,7 @@ def test_a_card_cannot_write_the_camera_or_a_speech_line_of_its_own():
 
     body = "Ação: anda\nCorpo: vestido\nExpressão: olhar\nMudança em relação ao anterior: peso"
     assert card_marks_error(card(body), slot) is None
-    assert card_marks_error(card(body + "\nCâmera: plano fechado"), slot) == (
+    assert card_marks_error(card(body + "\nCamera: plano fechado"), slot) == (
         "Card wrote its own camera instead of the assigned one")
     assert card_marks_error(card(body + "\n" + speech_line("bom dia")), slot) == (
         "Card wrote a speech line the code did not assign")

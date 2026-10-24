@@ -73,10 +73,10 @@ fun RoteiroScreen(vm: AppViewModel, roteiroId: String) {
     LaunchedEffect(roteiroId) { vm.ensureRoteiro(roteiroId) }
     val remote = vm.docs[roteiroId]
     val doc = remote?.value
-    TopBar(doc?.title ?: "Roteiro", vm.settingsAction())
+    TopBar(doc?.title ?: "Script", vm.settingsAction())
     when {
         doc == null && remote?.error != null -> Column(Modifier.padding(16.dp)) {
-            ErrorCard("PC inacessível", technical(remote.error)) { vm.loadRoteiro(roteiroId) }
+            ErrorCard("PC unreachable", technical(remote.error)) { vm.loadRoteiro(roteiroId) }
         }
         doc == null -> Loading()
         !doc.adopted -> ProposalGrid(vm, doc)
@@ -110,31 +110,31 @@ private fun ProposalGrid(vm: AppViewModel, doc: Roteiro) {
     val proposing = vm.isBusy("propose:${doc.id}")
 
     TileGrid {
-        full("idea") { Expandable("Ideia original") { BodyText(doc.idea) } }
+        full("idea") { Expandable("Original idea") { BodyText(doc.idea) } }
         if (candidate == null) {
             full("none") {
                 Card {
-                    Muted("Nenhuma proposta guardada neste aparelho. Peça ao Grok ou escreva à mão.")
+                    Muted("No proposal saved on this device. Ask Grok or write manually.")
                     Spacer(Modifier.height(8.dp))
-                    CountSlider("Blocos", count, 1..MAX_BLOCKS, { count = it })
+                    CountSlider("Blocks", count, 1..MAX_BLOCKS, { count = it })
                     DurationSeedFields(durationText, { durationText = it }, seedText, { seedText = it })
                     filmLength(count, durationText)?.let { Muted(it) }
                     Spacer(Modifier.height(10.dp))
-                    PrimaryButton("Propor com Grok", { vm.reproposal(doc.id, count, durationText, seedText) }, busy = proposing)
+                    PrimaryButton("Propose with Grok", { vm.reproposal(doc.id, count, durationText, seedText) }, busy = proposing)
                     PlanningWait(proposing)
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("Escrever blocos à mão", { vm.manualCandidate(doc.id, count, durationText, seedText) }, enabled = !proposing)
+                    SecondaryButton("Write blocks manually", { vm.manualCandidate(doc.id, count, durationText, seedText) }, enabled = !proposing)
                 }
             }
             return@TileGrid
         }
         full("head") {
             Column {
-                Text(if (candidate.fromGrok) "Proposta do Grok · nada gerado" else "Rascunho manual · nada gerado",
+                Text(if (candidate.fromGrok) "Grok proposal · nothing generated" else "Manual draft · nothing generated",
                     color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
                 val total = candidate.blocks.sumOf { Durations.effectiveSeconds(Durations.frames(it.durationSeconds)) }
-                Muted("${candidate.blocks.size} blocos · ${com.al4xdev.h3.ui.components.minutesLabel(total)}")
-                if (candidate.stale) BlockedReason("O roteiro mudou no PC depois desta proposta.")
+                Muted("${candidate.blocks.size} blocks · ${com.al4xdev.h3.ui.components.minutesLabel(total)}")
+                if (candidate.stale) BlockedReason("The script changed on PC after this proposal.")
             }
         }
         full("vision") { VisionCard(candidate.vision) }
@@ -144,24 +144,24 @@ private fun ProposalGrid(vm: AppViewModel, doc: Roteiro) {
             BlockTile(i + 1, BlockState.PLANNED, null, { "" }, { null }, block.action, false,
                 onClick = { vm.push(Screen.Block(doc.id, block.id)) }, onCut = {})
         }
-        full("hint") { Muted("Toque num bloco para ler ou editar.") }
+        full("hint") { Muted("Tap a block to view or edit.") }
         full("actions") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                PrimaryButton("Usar este roteiro", { vm.adoptCandidate(doc.id) }, busy = vm.isBusy("adopt:${doc.id}"), enabled = !proposing)
-                Expandable("Propor outra versão") {
-                    CountSlider("Blocos", count, 1..MAX_BLOCKS, { count = it })
+                PrimaryButton("Use this script", { vm.adoptCandidate(doc.id) }, busy = vm.isBusy("adopt:${doc.id}"), enabled = !proposing)
+                Expandable("Propose another version") {
+                    CountSlider("Blocks", count, 1..MAX_BLOCKS, { count = it })
                     DurationSeedFields(durationText, { durationText = it }, seedText, { seedText = it })
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("Propor outra versão", { vm.reproposal(doc.id, count, durationText, seedText) }, busy = proposing)
+                    SecondaryButton("Propose another version", { vm.reproposal(doc.id, count, durationText, seedText) }, busy = proposing)
                     PlanningWait(proposing)
                 }
-                SecondaryButton("Descartar proposta", { confirmDiscard = true }, danger = true, enabled = !proposing)
+                SecondaryButton("Discard proposal", { confirmDiscard = true }, danger = true, enabled = !proposing)
             }
         }
     }
     if (confirmDiscard) {
-        ConfirmDialog("Descartar a proposta?", "Os blocos propostos saem deste aparelho. O roteiro continua no PC sem blocos.",
-            "Descartar", danger = true, onConfirm = { vm.saveCandidate(doc.id, null) }, onDismiss = { confirmDiscard = false })
+        ConfirmDialog("Discard proposal?", "Proposed blocks will be removed from this device. The script remains on PC without blocks.",
+            "Discard", danger = true, onConfirm = { vm.saveCandidate(doc.id, null) }, onDismiss = { confirmDiscard = false })
     }
 }
 
@@ -184,8 +184,8 @@ private fun PlanGrid(vm: AppViewModel, doc: Roteiro) {
     var menuAt by remember { mutableStateOf<Int?>(null) }
     val firstPlayable = remember(doc) { Sequence.firstPlayable(doc) }
     val fence = when {
-        batchHere != null -> "Lote em andamento neste roteiro: geração, decisões e edições ficam bloqueadas."
-        pending.isNotEmpty() -> "Há pedido sem resposta confirmada; consulte-o antes de gerar."
+        batchHere != null -> "Batch in progress for this script: generation, decisions, and edits are blocked."
+        pending.isNotEmpty() -> "Pending request without confirmed response; check it before generating."
         else -> null
     }
     val base = vm.api.base()
@@ -201,10 +201,10 @@ private fun PlanGrid(vm: AppViewModel, doc: Roteiro) {
                 Column {
                     val accepted = states.count { it == BlockState.ACCEPTED }
                     val review = states.count { it == BlockState.REVIEW }
-                    Text("${doc.blocks.size} blocos · $accepted aceitos" + if (review > 0) " · $review revisar" else "",
+                    Text("${doc.blocks.size} blocks · $accepted accepted" + if (review > 0) " · $review to review" else "",
                         color = H3Palette.TextPrimary, fontWeight = FontWeight.SemiBold)
-                    if (doc.removedBlockCount > 0) Muted("${doc.removedBlockCount} fora da sequência (preservados no PC)")
-                    if (!vm.live) Muted("Sem atualização ao vivo do PC no momento.")
+                    if (doc.removedBlockCount > 0) Muted("${doc.removedBlockCount} out of sequence (preserved on PC)")
+                    if (!vm.live) Muted("No live updates from PC right now.")
                 }
             }
             // Actions live above the grid: with hundreds of blocks the end of the list is far away.
@@ -214,25 +214,25 @@ private fun PlanGrid(vm: AppViewModel, doc: Roteiro) {
                     NextActionButton(vm, doc, next, fenced = fence != null, onBatch = { confirmBatch = true })
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (firstPlayable != null) {
-                            CompactButton("▶ Assistir") { vm.push(Screen.Watch(doc.id, doc.blocks[firstPlayable].id)) }
+                            CompactButton("▶ Watch") { vm.push(Screen.Watch(doc.id, doc.blocks[firstPlayable].id)) }
                         }
                         if (pendingCount > 0 && next !is NextAction.GeneratePending) {
-                            CompactButton("Gerar pendentes ($pendingCount)", enabled = fence == null && !vm.isBusy("batch:${doc.id}")) { confirmBatch = true }
+                            CompactButton("Generate pending ($pendingCount)", enabled = fence == null && !vm.isBusy("batch:${doc.id}")) { confirmBatch = true }
                         }
-                        CompactButton("+ No fim", enabled = batchHere == null && doc.blocks.size < MAX_BLOCKS) {
+                        CompactButton("+ At end", enabled = batchHere == null && doc.blocks.size < MAX_BLOCKS) {
                             vm.push(Screen.Insert(doc.id, doc.blocks.lastOrNull()?.id))
                         }
-                        if (next !is NextAction.Assemble) CompactButton("Montagem") { vm.push(Screen.Assembly(doc.id)) }
-                        CompactButton(if (vm.docs[doc.id]?.loading == true) "Relendo…" else "Reler") { vm.loadRoteiro(doc.id) }
+                        if (next !is NextAction.Assemble) CompactButton("Assembly") { vm.push(Screen.Assembly(doc.id)) }
+                        CompactButton(if (vm.docs[doc.id]?.loading == true) "Reloading…" else "Reload") { vm.loadRoteiro(doc.id) }
                     }
                 }
             }
             if (batchHere != null) full("batch") {
                 Card(border = H3Palette.TealSecondary) {
-                    Text("⏵ Lote no PC", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
+                    Text("⏵ Batch on PC", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
                     Muted(batchHere.describe())
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("Parar…", { confirmStop = true }, danger = true, busy = vm.isBusy("stopbatch:${batchHere.id}"),
+                    SecondaryButton("Stop…", { confirmStop = true }, danger = true, busy = vm.isBusy("stopbatch:${batchHere.id}"),
                         enabled = !batchHere.stopRequested)
                 }
             }
@@ -240,12 +240,12 @@ private fun PlanGrid(vm: AppViewModel, doc: Roteiro) {
                 PendingCard(pending, { vm.isBusy("consult:${it.id}") }, vm::inFlight, vm::consult)
             }
             if (cuts.isNotEmpty()) full("cuts") {
-                Expandable("⚡ ${cuts.size} ${if (cuts.size == 1) "corte" else "cortes"} de continuidade") {
+                Expandable("⚡ ${cuts.size} continuity ${if (cuts.size == 1) "cut" else "cuts"}") {
                     cuts.sorted().take(50).forEach { i ->
-                        Text("⚡ entre ${i + 1} e ${i + 2} · toque para inserir blocos", color = H3Palette.Cut, fontSize = 14.sp,
+                        Text("⚡ between ${i + 1} and ${i + 2} · tap to insert blocks", color = H3Palette.Cut, fontSize = 14.sp,
                             modifier = Modifier.fillMaxWidth().clickable { cutAt = i }.padding(vertical = 12.dp))
                     }
-                    if (cuts.size > 50) Muted("… e mais ${cuts.size - 50}")
+                    if (cuts.size > 50) Muted("… and ${cuts.size - 50} more")
                 }
             }
             items(doc.blocks.size, key = { doc.blocks[it].id }) { i ->
@@ -263,44 +263,44 @@ private fun PlanGrid(vm: AppViewModel, doc: Roteiro) {
         }
         if (doc.blocks.size > 40) {
             FastScroller(gridState, headerKeys.size, doc.blocks.size) { i ->
-                "Bloco ${i + 1} · " + doc.blocks[i].action.substringBefore(" — ").take(40)
+                "Block ${i + 1} · " + doc.blocks[i].action.substringBefore(" — ").take(40)
             }
         }
     }
 
     if (confirmBatch) {
         ConfirmDialog(
-            "Gerar $pendingCount blocos pendentes?",
-            "O Grok melhora o prompt de cada bloco antes de gerar (custo do Grok por bloco). Os intermediários são aceitos " +
-                "tecnicamente para continuar; o último fica para sua revisão. Blocos inseridos no meio ligam no bloco seguinte.",
-            "Gerar", onConfirm = { vm.startBatch(doc.id) }, onDismiss = { confirmBatch = false },
+            "Generate $pendingCount pending blocks?",
+            "Grok refines each block's prompt before generating (Grok cost per block). Intermediates are technically accepted " +
+                "to continue; the last one awaits your review. Blocks inserted in-between connect to the next block.",
+            "Generate", onConfirm = { vm.startBatch(doc.id) }, onDismiss = { confirmBatch = false },
         )
     }
     if (confirmStop && batchHere != null) {
-        ConfirmDialog("Parar o lote?", "O bloco em geração é interrompido e o lote não continua.", "Confirmar parada", danger = true,
+        ConfirmDialog("Stop batch?", "The generating block will be interrupted and the batch will stop.", "Confirm stop", danger = true,
             onConfirm = { vm.stopBatch(batchHere) }, onDismiss = { confirmStop = false })
     }
     menuAt?.let { i ->
         val canWatch = remember(doc, i) { Sequence.playable(doc, i).isNotEmpty() }
         AlertDialog(
             onDismissRequest = { menuAt = null },
-            title = { Text("Bloco ${i + 1}") },
+            title = { Text("Block ${i + 1}") },
             text = {
                 Column {
-                    TextButton(onClick = { menuAt = null; vm.push(Screen.Block(doc.id, doc.blocks[i].id)) }) { Text("Abrir bloco") }
-                    if (canWatch) TextButton(onClick = { menuAt = null; vm.push(Screen.Watch(doc.id, doc.blocks[i].id)) }) { Text("▶ Assistir daqui") }
-                    else Muted("Sem versão aceita ou pronta para assistir a partir daqui.")
+                    TextButton(onClick = { menuAt = null; vm.push(Screen.Block(doc.id, doc.blocks[i].id)) }) { Text("Open block") }
+                    if (canWatch) TextButton(onClick = { menuAt = null; vm.push(Screen.Watch(doc.id, doc.blocks[i].id)) }) { Text("▶ Watch from here") }
+                    else Muted("No accepted or ready version to watch from here.")
                 }
             },
-            confirmButton = { TextButton(onClick = { menuAt = null }) { Text("Fechar") } },
+            confirmButton = { TextButton(onClick = { menuAt = null }) { Text("Close") } },
             containerColor = H3Palette.SurfaceElevated,
         )
     }
     cutAt?.let { i ->
         ConfirmDialog(
-            "Corte entre ${i + 1} e ${i + 2}",
-            "Esses vídeos não são pai e filho. Você pode inserir blocos aqui; “Gerar pendentes” liga o último deles ao bloco ${i + 2}.",
-            "Inserir blocos aqui", onConfirm = { vm.push(Screen.Insert(doc.id, doc.blocks[i].id)) }, onDismiss = { cutAt = null },
+            "Cut between ${i + 1} and ${i + 2}",
+            "These videos are not parent and child. You can insert blocks here; “Generate pending” connects the last one to block ${i + 2}.",
+            "Insert blocks here", onConfirm = { vm.push(Screen.Insert(doc.id, doc.blocks[i].id)) }, onDismiss = { cutAt = null },
         )
     }
 }
@@ -318,20 +318,20 @@ private fun NextActionButton(vm: AppViewModel, doc: Roteiro, next: NextAction, f
         is NextAction.Review -> {
             val block = doc.blocks[next.index]
             val run = RoteiroLogic.currentAttempt(doc, block.id)?.runId
-            PrimaryButton("Revisar bloco ${next.index + 1}", {
+            PrimaryButton("Review block ${next.index + 1}", {
                 if (run != null) vm.push(Screen.Review(doc.id, block.id, run)) else open(next.index)
             })
         }
         is NextAction.Consult -> {
             val op = vm.pendingFor(doc.id).firstOrNull { it.kind == OpKind.ATTEMPT && it.blockId == doc.blocks[next.index].id }
-            PrimaryButton("Consultar envio do bloco ${next.index + 1}", { if (op != null) vm.consult(op) else open(next.index) },
+            PrimaryButton("Check submission for block ${next.index + 1}", { if (op != null) vm.consult(op) else open(next.index) },
                 busy = op != null && vm.isBusy("consult:${op.id}"))
         }
-        is NextAction.Generating -> PrimaryButton("Bloco ${next.index + 1} gerando · abrir", { open(next.index) })
-        is NextAction.Resolve -> PrimaryButton("Resolver bloco ${next.index + 1}", { open(next.index) })
-        is NextAction.GeneratePending -> PrimaryButton("Gerar pendentes (${next.count})", onBatch, enabled = !fenced,
+        is NextAction.Generating -> PrimaryButton("Block ${next.index + 1} generating · open", { open(next.index) })
+        is NextAction.Resolve -> PrimaryButton("Resolve block ${next.index + 1}", { open(next.index) })
+        is NextAction.GeneratePending -> PrimaryButton("Generate pending (${next.count})", onBatch, enabled = !fenced,
             busy = vm.isBusy("batch:${doc.id}"))
-        NextAction.Assemble -> PrimaryButton("Montar vídeo", { vm.push(Screen.Assembly(doc.id)) })
+        NextAction.Assemble -> PrimaryButton("Assemble video", { vm.push(Screen.Assembly(doc.id)) })
         NextAction.Adopt, NextAction.Empty -> Unit
     }
 }

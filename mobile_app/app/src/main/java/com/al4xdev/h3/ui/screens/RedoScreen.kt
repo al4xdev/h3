@@ -44,7 +44,7 @@ import com.al4xdev.h3.ui.components.runVideoUri
 import com.al4xdev.h3.ui.settingsAction
 
 /**
- * "Refazer este bloco": the backend's anchored edit in `replace` mode. Bridge from the previous
+ * "Redo this block": the backend's anchored edit in `replace` mode. Bridge from the previous
  * accepted block's last frame to the next one's first frame → review → apply as a new version.
  */
 @Composable
@@ -53,13 +53,13 @@ fun RedoScreen(vm: AppViewModel, roteiroId: String, blockId: String) {
     LaunchedEffect(roteiroId, blockId) { vm.ensureRedo(roteiroId, blockId) }
     val doc = vm.doc(roteiroId)
     val index = doc?.index(blockId) ?: -1
-    TopBar(if (index >= 0) "Nova versão do bloco ${index + 1}" else "Nova versão", vm.settingsAction())
+    TopBar(if (index >= 0) "New version of block ${index + 1}" else "New version", vm.settingsAction())
     if (doc == null) {
         val error = vm.docs[roteiroId]?.error
-        if (error != null) Box(Modifier.padding(16.dp)) { ErrorCard("PC inacessível", technical(error)) { vm.loadRoteiro(roteiroId) } } else Loading()
+        if (error != null) Box(Modifier.padding(16.dp)) { ErrorCard("PC unreachable", technical(error)) { vm.loadRoteiro(roteiroId) } } else Loading()
         return
     }
-    if (index < 0) { Muted("Este bloco não está mais no roteiro.", Modifier.padding(16.dp)); return }
+    if (index < 0) { Muted("This block is no longer in the script.", Modifier.padding(16.dp)); return }
     val block = doc.blocks[index]
     val previousRun = RoteiroLogic.acceptedRun(doc, doc.blocks.getOrNull(index - 1)?.id)
     val nextRun = RoteiroLogic.acceptedRun(doc, doc.blocks.getOrNull(index + 1)?.id)
@@ -75,38 +75,38 @@ fun RedoScreen(vm: AppViewModel, roteiroId: String, blockId: String) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
         AnchorRow(vm, doc, previousRun, nextRun)
         Spacer(Modifier.height(8.dp))
-        Expandable("Prompts enviados nos vizinhos") {
-            listOf(index - 1 to "Anterior", index + 1 to "Seguinte").forEach { (i, label) ->
+        Expandable("Prompts sent to neighbors") {
+            listOf(index - 1 to "Previous", index + 1 to "Next").forEach { (i, label) ->
                 doc.blocks.getOrNull(i)?.let { b ->
                     RoteiroLogic.selectedAttempt(doc, b.id)?.let { a ->
-                        SectionTitle("$label (bloco ${i + 1})")
+                        SectionTitle("$label (block ${i + 1})")
                         BodyText(a.effectivePrompt)
                     }
                 }
             }
         }
         if (pending.isNotEmpty()) PendingCard(pending, { vm.isBusy("consult:${it.id}") }, vm::inFlight, vm::consult)
-        BlockedReason(if (batchHere != null) "Lote em andamento neste roteiro." else null)
+        BlockedReason(if (batchHere != null) "Batch in progress for this script." else null)
 
         when {
             record == null && remote?.loading == true -> Loading()
             record == null -> {
                 if (previousRun == null || nextRun == null) {
                     BlockedReason(
-                        if (previousRun == null) "Refazer exige o bloco anterior aceito; o primeiro bloco não tem essa âncora."
-                        else "Refazer exige o bloco seguinte aceito. No último bloco, use “Inserir blocos no fim”.",
+                        if (previousRun == null) "Redoing requires an accepted previous block; the first block has no such anchor."
+                        else "Redoing requires an accepted next block. For the last block, use “Insert blocks after”.",
                     )
                     return@Column
                 }
                 var idea by rememberSaveable { mutableStateOf("") }
                 var durationText by rememberSaveable { mutableStateOf(Durations.text(block.durationSeconds)) }
                 var seedText by rememberSaveable { mutableStateOf(block.seed.toString()) }
-                SectionTitle("O que deve mudar nesta versão?")
-                TextArea(idea, { idea = it }, "Ideia")
+                SectionTitle("What should change in this version?")
+                TextArea(idea, { idea = it }, "Idea")
                 Spacer(Modifier.height(8.dp))
                 DurationSeedFields(durationText, { durationText = it }, seedText, { seedText = it })
                 Spacer(Modifier.height(12.dp))
-                PrimaryButton("Propor com Grok", { vm.proposeRedo(roteiroId, blockId, idea, durationText, seedText) },
+                PrimaryButton("Propose with Grok", { vm.proposeRedo(roteiroId, blockId, idea, durationText, seedText) },
                     enabled = batchHere == null && pending.isEmpty(), busy = busy)
             }
             else -> EditProgress(vm, roteiroId, blockId, record, busy, batchHere == null && pending.isEmpty(), onDiscard = { confirmDiscard = true })
@@ -114,7 +114,7 @@ fun RedoScreen(vm: AppViewModel, roteiroId: String, blockId: String) {
         Spacer(Modifier.height(32.dp))
     }
     if (confirmDiscard) {
-        ConfirmDialog("Descartar esta edição?", "O roteiro não muda. Um vídeo já gerado continua no PC.", "Descartar", danger = true,
+        ConfirmDialog("Discard this edit?", "The script does not change. Any already generated video remains on the PC.", "Discard", danger = true,
             onConfirm = { vm.discardRedo(roteiroId, blockId) }, onDismiss = { confirmDiscard = false })
     }
 }
@@ -124,16 +124,16 @@ private fun EditProgress(vm: AppViewModel, roteiroId: String, blockId: String, r
                          busy: Boolean, enabled: Boolean, onDiscard: () -> Unit) {
     val run = record.run
     val stale = vm.doc(roteiroId)?.revision?.let { it != record.sourceRevision } == true
-    Muted("Edição ${record.id.take(8)} · ${record.state}")
-    if (stale && record.state in setOf("proposed", "generating")) BlockedReason("O roteiro mudou desde esta edição. Descarte-a e prepare outra.")
-    record.error?.let { BlockedReason("Erro: $it") }
+    Muted("Edit ${record.id.take(8)} · ${record.state}")
+    if (stale && record.state in setOf("proposed", "generating")) BlockedReason("The script has changed since this edit. Discard it and prepare another.")
+    record.error?.let { BlockedReason("Error: $it") }
     when (record.state) {
         "proposed" -> {
             var prompt by rememberSaveable(record.id) { mutableStateOf(record.prompt.orEmpty()) }
-            SectionTitle("Prompt proposto (editável)")
+            SectionTitle("Proposed prompt (editable)")
             TextArea(prompt, { prompt = it }, "Prompt")
             Spacer(Modifier.height(12.dp))
-            PrimaryButton("Gerar nova versão", { vm.generateRedo(roteiroId, blockId, prompt) }, enabled = enabled && !stale, busy = busy)
+            PrimaryButton("Generate new version", { vm.generateRedo(roteiroId, blockId, prompt) }, enabled = enabled && !stale, busy = busy)
         }
         // "uncertain" with a run means the generate answer was lost but the run exists: review it normally.
         "generating", "applied", "uncertain" -> if (run != null) {
@@ -146,27 +146,27 @@ private fun EditProgress(vm: AppViewModel, roteiroId: String, blockId: String, r
             when (run.state) {
                 RunStates.READY -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     val deciding = vm.isBusy("decide:${run.id}")
-                    SecondaryButton("Recusar", { vm.decide(roteiroId, blockId, run.id, false) { vm.loadEdit(roteiroId, blockId, record.id) } },
+                    SecondaryButton("Reject", { vm.decide(roteiroId, blockId, run.id, false) { vm.loadEdit(roteiroId, blockId, record.id) } },
                         Modifier.weight(1f), enabled = enabled, busy = deciding, danger = true)
-                    PrimaryButton("Aceitar", { vm.decide(roteiroId, blockId, run.id, true) { vm.loadEdit(roteiroId, blockId, record.id) } },
+                    PrimaryButton("Approve", { vm.decide(roteiroId, blockId, run.id, true) { vm.loadEdit(roteiroId, blockId, record.id) } },
                         Modifier.weight(1f), enabled = enabled, busy = deciding)
                 }
                 RunStates.ACCEPTED -> if (record.state != "applied") {
-                    PrimaryButton("Usar esta versão no roteiro", { vm.applyRedo(roteiroId, blockId) }, enabled = enabled && !stale, busy = busy)
+                    PrimaryButton("Use this version in the script", { vm.applyRedo(roteiroId, blockId) }, enabled = enabled && !stale, busy = busy)
                 }
                 RunStates.REJECTED, RunStates.INTERRUPTED, RunStates.FAILED ->
-                    PrimaryButton("Preparar outra tentativa (mesmo prompt)", { vm.retryRedo(roteiroId, blockId) }, enabled = enabled, busy = busy)
-                else -> Muted("Gerando no PC. O app avisa quando terminar.")
+                    PrimaryButton("Prepare retry (same prompt)", { vm.retryRedo(roteiroId, blockId) }, enabled = enabled, busy = busy)
+                else -> Muted("Generating on PC. The app will notify when done.")
             }
         } else {
-            Muted(if (record.state == "uncertain") "Resposta incerta no PC." else "Aguardando o PC registrar a geração.")
-            SecondaryButton("Reler esta edição", { vm.loadEdit(roteiroId, blockId, record.id) })
+            Muted(if (record.state == "uncertain") "Uncertain response on PC." else "Waiting for PC to register generation.")
+            SecondaryButton("Reload this edit", { vm.loadEdit(roteiroId, blockId, record.id) })
         }
-        "failed" -> PrimaryButton("Preparar outra tentativa (mesmo prompt)", { vm.retryRedo(roteiroId, blockId) }, enabled = enabled, busy = busy)
-        "improving" -> SecondaryButton("Reler esta edição", { vm.loadEdit(roteiroId, blockId, record.id) })
+        "failed" -> PrimaryButton("Prepare retry (same prompt)", { vm.retryRedo(roteiroId, blockId) }, enabled = enabled, busy = busy)
+        "improving" -> SecondaryButton("Reload this edit", { vm.loadEdit(roteiroId, blockId, record.id) })
     }
     if (record.state != "applied") {
         Spacer(Modifier.height(10.dp))
-        SecondaryButton("Descartar edição…", onDiscard, danger = true, enabled = !busy)
+        SecondaryButton("Discard edit…", onDiscard, danger = true, enabled = !busy)
     }
 }

@@ -70,17 +70,17 @@ object RunStates {
     val playable = setOf(READY, ACCEPTED, REJECTED)
 
     fun label(state: String?): String = when (state) {
-        QUEUED -> "Na fila"
-        RUNNING -> "Em geração"
-        READY -> "Pronto para revisão"
-        ACCEPTED -> "Aceito"
-        REJECTED -> "Recusado"
-        FAILED -> "Falhou"
-        INTERRUPTED -> "Interrompido"
-        NOT_ADMITTED -> "Não admitido"
-        UNCERTAIN -> "Incerto"
-        null -> "Sem tentativa"
-        else -> "Estado desconhecido"
+        QUEUED -> "Queued"
+        RUNNING -> "Generating"
+        READY -> "Ready for review"
+        ACCEPTED -> "Accepted"
+        REJECTED -> "Rejected"
+        FAILED -> "Failed"
+        INTERRUPTED -> "Interrupted"
+        NOT_ADMITTED -> "Not admitted"
+        UNCERTAIN -> "Uncertain"
+        null -> "No attempt"
+        else -> "Unknown state"
     }
 }
 
@@ -177,7 +177,7 @@ data class Roteiro(
     private val indexById: Map<String, Int> by lazy { blocks.withIndex().associate { it.value.id to it.index } }
 
     fun index(blockId: String): Int = indexById[blockId] ?: -1
-    val title: String get() = name.ifBlank { idea.lineSequence().firstOrNull()?.take(60) ?: "Roteiro" }
+    val title: String get() = name.ifBlank { idea.lineSequence().firstOrNull()?.take(60) ?: "Script" }
 
     companion object {
         fun parse(o: JsonObject): Roteiro = Roteiro(
@@ -208,7 +208,7 @@ data class SummaryItem(
     val strip: List<String>,
     val updatedAt: String?,
 ) {
-    val title: String get() = name.ifBlank { idea.lineSequence().firstOrNull()?.take(60) ?: "Roteiro" }
+    val title: String get() = name.ifBlank { idea.lineSequence().firstOrNull()?.take(60) ?: "Script" }
     fun count(state: String): Int = states[state] ?: 0
 
     companion object {
@@ -246,17 +246,17 @@ data class BatchRecord(
     fun describe(): String {
         val position = (blockIds.indexOf(currentBlockId).takeIf { it >= 0 } ?: completedBlockIds.size) + 1
         val phaseText = when (phase) {
-            "improving" -> "Grok melhorando o prompt"
-            "generating" -> "gerando vídeo"
-            "accepting" -> "aceitação técnica intermediária"
+            "improving" -> "Grok improving prompt"
+            "generating" -> "generating video"
+            "accepting" -> "intermediate technical acceptance"
             else -> null
         }
         return when (state) {
-            "active" -> "Bloco $position de ${blockIds.size}" + (phaseText?.let { " · $it" } ?: "") +
-                (if (stopRequested) " · parada pedida" else "")
-            "ready_for_review" -> "Último bloco pronto para revisão"
-            "interrupted" -> "Lote interrompido" + (error?.let { ": $it" } ?: "")
-            "stopped" -> "Lote parado"
+            "active" -> "Block $position of ${blockIds.size}" + (phaseText?.let { " · $it" } ?: "") +
+                (if (stopRequested) " · stop requested" else "")
+            "ready_for_review" -> "Last block ready for review"
+            "interrupted" -> "Batch interrupted" + (error?.let { ": $it" } ?: "")
+            "stopped" -> "Batch stopped"
             else -> state
         }
     }
@@ -494,12 +494,12 @@ data class InputItem(
     val reference: Reference get() = Reference(sourceRoot, path)
     val isRunFrame: Boolean get() = sourceRoot == "runs"
 
-    /** Readable name: run frames become "frame inicial · 1a2b3c4d" instead of "initial_frame.png". */
+    /** Readable name: run frames become "initial frame · 1a2b3c4d" instead of "initial_frame.png". */
     val label: String
         get() {
             if (isRunFrame) {
                 Regex("""runs/([0-9a-f-]{36})/(initial_frame|last_frame)\.png$""").find(path)?.let { m ->
-                    val which = if (m.groupValues[2] == "initial_frame") "frame inicial" else "frame final"
+                    val which = if (m.groupValues[2] == "initial_frame") "initial frame" else "last frame"
                     return "$which · ${m.groupValues[1].take(8)}"
                 }
             }

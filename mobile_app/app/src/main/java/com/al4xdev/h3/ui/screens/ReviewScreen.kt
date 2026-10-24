@@ -45,22 +45,22 @@ fun ReviewScreen(vm: AppViewModel, roteiroId: String, blockId: String, runId: St
             val local = remember(run.id) { vm.localVideo(run.id) }
             VideoPlayer(runVideoUri(vm.api.base(), run.id, local), Modifier.fillMaxWidth().height(560.dp))
         } else {
-            Muted("Nenhum vídeo publicado para esta tentativa.", Modifier.padding(16.dp))
+            Muted("No published video for this attempt.", Modifier.padding(16.dp))
         }
         Column(Modifier.padding(16.dp)) {
             if (attempt == null) {
-                Muted("Esta tentativa não está mais no roteiro.")
+                Muted("This attempt is no longer in the script.")
                 return@Column
             }
-            StateDot(RoteiroLogic.stateOf(attempt), "Bloco ${index + 1} · ${RunStates.label(attempt.state)} · ${effectiveLabel(attempt.snapshot.durationSeconds)}")
-            Expandable("Prompt enviado") {
+            StateDot(RoteiroLogic.stateOf(attempt), "Block ${index + 1} · ${RunStates.label(attempt.state)} · ${effectiveLabel(attempt.snapshot.durationSeconds)}")
+            Expandable("Sent prompt") {
                 SelectionContainer { Text(attempt.effectivePrompt, color = H3Palette.TextPrimary, fontSize = 14.sp) }
             }
             Spacer(Modifier.height(8.dp))
             if (pending.isNotEmpty()) {
                 PendingCard(pending, { vm.isBusy("consult:${it.id}") }, vm::inFlight, vm::consult)
             } else if (attempt.state == RunStates.READY) {
-                val fence = if (vm.batchOn(roteiroId) != null) "Lote em andamento neste roteiro: decisões bloqueadas." else null
+                val fence = if (vm.batchOn(roteiroId) != null) "Batch in progress for this script: decisions blocked." else null
                 BlockedReason(fence)
                 ReviewActions(vm, roteiroId, blockId, attempt, enabled = fence == null)
             }

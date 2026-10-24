@@ -61,9 +61,9 @@ fun AnchorRow(vm: AppViewModel, doc: Roteiro, previousRun: String?, nextRun: Str
     val identity = doc.reference?.imagePath()?.let { vm.api.url(it) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf(
-            Triple(identity, "identidade", true),
-            Triple(previousRun?.let { vm.api.url("/roteiro-edits/anchors/$it/last") }, "fim do anterior", previousRun != null),
-            Triple(nextRun?.let { vm.api.url("/roteiro-edits/anchors/$it/first") }, "início do seguinte", nextRun != null),
+            Triple(identity, "identity", true),
+            Triple(previousRun?.let { vm.api.url("/roteiro-edits/anchors/$it/last") }, "end of previous", previousRun != null),
+            Triple(nextRun?.let { vm.api.url("/roteiro-edits/anchors/$it/first") }, "start of next", nextRun != null),
         ).filter { it.third }.forEach { (url, label, _) ->
             Column(Modifier.weight(1f)) {
                 RemoteImage(url, 360, Modifier.aspectRatio(0.5625f), ContentScale.Fit, label)
@@ -81,22 +81,22 @@ fun InsertScreen(vm: AppViewModel, roteiroId: String, afterBlockId: String?) {
     val remote = vm.docs[roteiroId]
     val doc = remote?.value
     if (doc == null) {
-        TopBar("Inserir blocos", vm.settingsAction())
-        if (remote?.error != null) Box(Modifier.padding(16.dp)) { ErrorCard("PC inacessível", technical(remote.error)) { vm.loadRoteiro(roteiroId) } }
+        TopBar("Insert blocks", vm.settingsAction())
+        if (remote?.error != null) Box(Modifier.padding(16.dp)) { ErrorCard("PC unreachable", technical(remote.error)) { vm.loadRoteiro(roteiroId) } }
         else Loading()
         return
     }
     val afterIndex = afterBlockId?.let { doc.index(it) } ?: -1
     if (afterBlockId != null && afterIndex < 0) {
-        TopBar("Inserir blocos", vm.settingsAction())
-        Muted("O bloco de referência não está mais no roteiro.", Modifier.padding(16.dp))
+        TopBar("Insert blocks", vm.settingsAction())
+        Muted("The reference block is no longer in the script.", Modifier.padding(16.dp))
         return
     }
     val atEnd = afterIndex == doc.blocks.size - 1
     val title = when {
-        afterBlockId == null -> "Antes do bloco 1"
-        atEnd -> "Continuar no fim"
-        else -> "Entre ${afterIndex + 1} e ${afterIndex + 2}"
+        afterBlockId == null -> "Before block 1"
+        atEnd -> "Continue at end"
+        else -> "Between ${afterIndex + 1} and ${afterIndex + 2}"
     }
     val d = vm.insertDraft(roteiroId, afterBlockId)
     val pending = vm.pendingFor(roteiroId).filter { it.kind == OpKind.SEGMENT }
@@ -124,37 +124,37 @@ fun InsertScreen(vm: AppViewModel, roteiroId: String, afterBlockId: String?) {
         if (d.blocks.isEmpty()) {
             item("form") {
                 Column {
-                    SectionTitle("O que acontece nesses blocos?")
-                    TextArea(d.idea, { v -> update { it.copy(idea = v) } }, "Ideia")
+                    SectionTitle("What happens in these blocks?")
+                    TextArea(d.idea, { v -> update { it.copy(idea = v) } }, "Idea")
                     Spacer(Modifier.height(8.dp))
-                    if (room > 0) CountSlider("Blocos a inserir", d.count.coerceAtMost(room), 1..room, { v -> update { it.copy(count = v) } })
-                    else BlockedReason("O roteiro já tem $MAX_BLOCKS blocos.")
+                    if (room > 0) CountSlider("Blocks to insert", d.count.coerceAtMost(room), 1..room, { v -> update { it.copy(count = v) } })
+                    else BlockedReason("The script already has $MAX_BLOCKS blocks.")
                     DurationSeedFields(d.durationText, { v -> update { it.copy(durationText = v) } }, d.seedText, { v -> update { it.copy(seedText = v) } })
                     filmLength(d.count, d.durationText)?.let { Muted(it) }
                     Spacer(Modifier.height(12.dp))
                     val reason = when {
-                        batchHere != null -> "Lote em andamento neste roteiro."
-                        pending.isNotEmpty() -> "Consulte o planejamento sem resposta antes."
-                        room <= 0 -> "Sem espaço para novos blocos."
+                        batchHere != null -> "Batch in progress for this script."
+                        pending.isNotEmpty() -> "Check unconfirmed planning first."
+                        room <= 0 -> "No room for new blocks."
                         else -> null
                     }
                     BlockedReason(reason)
-                    PrimaryButton("Planejar com Grok", { vm.planSegment(roteiroId, afterBlockId) }, enabled = reason == null, busy = planning)
+                    PrimaryButton("Plan with Grok", { vm.planSegment(roteiroId, afterBlockId) }, enabled = reason == null, busy = planning)
                     PlanningWait(planning)
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("Escrever à mão", { vm.manualInsert(roteiroId, afterBlockId) }, enabled = reason == null && !planning)
+                    SecondaryButton("Write manually", { vm.manualInsert(roteiroId, afterBlockId) }, enabled = reason == null && !planning)
                     segment?.takeIf { it.state == "invalid" }?.let {
                         Spacer(Modifier.height(8.dp))
-                        BlockedReason("Último planejamento inválido: ${it.error ?: it.detail ?: "resposta fora do formato"}. Nada foi inserido.")
+                        BlockedReason("Last planning invalid: ${it.error ?: it.detail ?: "response out of format"}. Nothing was inserted.")
                     }
                 }
             }
         } else {
             item("head") {
                 Column {
-                    Text("${d.blocks.size} blocos para inserir · nada gerado", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
-                    if (segment?.stale == true) BlockedReason("O roteiro mudou no PC depois deste planejamento; confira antes de inserir.")
-                    Muted("Toque num bloco para editar. Depois de inserir, use “Gerar pendentes” no roteiro.")
+                    Text("${d.blocks.size} blocks to insert · nothing generated", color = H3Palette.TealPrimary, fontWeight = FontWeight.SemiBold)
+                    if (segment?.stale == true) BlockedReason("The script changed on PC after this planning; check before inserting.")
+                    Muted("Tap a block to edit. After inserting, use “Generate pending” on the script.")
                 }
             }
             item("vision") { VisionCard(d.vision) }
@@ -169,16 +169,16 @@ fun InsertScreen(vm: AppViewModel, roteiroId: String, afterBlockId: String?) {
             }
             item("actions") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    BlockedReason(if (batchHere != null) "Lote em andamento neste roteiro." else null)
-                    PrimaryButton("Inserir no roteiro", { vm.applyInsert(roteiroId, afterBlockId) }, enabled = batchHere == null,
+                    BlockedReason(if (batchHere != null) "Batch in progress for this script." else null)
+                    PrimaryButton("Insert into script", { vm.applyInsert(roteiroId, afterBlockId) }, enabled = batchHere == null,
                         busy = vm.isBusy("insert:$roteiroId"))
-                    SecondaryButton("Descartar", { confirmDiscard = true }, danger = true)
+                    SecondaryButton("Discard", { confirmDiscard = true }, danger = true)
                 }
             }
         }
     }
     if (confirmDiscard) {
-        ConfirmDialog("Descartar estes blocos?", "Nada foi inserido no roteiro; o planejamento sai deste aparelho.", "Descartar", danger = true,
+        ConfirmDialog("Discard these blocks?", "Nothing was inserted into the script; the plan will be removed from this device.", "Discard", danger = true,
             onConfirm = { vm.discardInsert(roteiroId, afterBlockId) }, onDismiss = { confirmDiscard = false })
     }
 }
@@ -195,8 +195,8 @@ private fun ProposedBlockCard(number: Int, block: Block, editing: Boolean, onEdi
         }
         if (!editing) {
             Row {
-                TextButton(onClick = onEdit) { Text("Editar") }
-                TextButton(onClick = onDelete) { Text("Remover", color = H3Palette.StateError) }
+                TextButton(onClick = onEdit) { Text("Edit") }
+                TextButton(onClick = onDelete) { Text("Remove", color = H3Palette.StateError) }
             }
             return@Card
         }
@@ -205,17 +205,17 @@ private fun ProposedBlockCard(number: Int, block: Block, editing: Boolean, onEdi
         var durationText by rememberSaveable(block.id) { mutableStateOf(Durations.text(block.durationSeconds)) }
         var seedText by rememberSaveable(block.id) { mutableStateOf(block.seed.toString()) }
         Spacer(Modifier.height(8.dp))
-        TextArea(action, { action = it }, "Ação", minLines = 2)
-        TextArea(prompt, { prompt = it }, "Prompt base", minLines = 3)
+        TextArea(action, { action = it }, "Action", minLines = 2)
+        TextArea(prompt, { prompt = it }, "Base prompt", minLines = 3)
         DurationSeedFields(durationText, { durationText = it }, seedText, { seedText = it })
         val duration = Durations.parse(durationText)?.toDouble()
         val seed = Durations.parseSeed(seedText)
         Row {
-            TextButton(onClick = onEdit) { Text("Cancelar") }
+            TextButton(onClick = onEdit) { Text("Cancel") }
             TextButton(
                 onClick = { onSave(block.copy(action = action, prompt = prompt, durationSeconds = duration!!, seed = seed!!)) },
                 enabled = duration != null && seed != null && action.isNotBlank() && prompt.isNotBlank(),
-            ) { Text("Salvar") }
+            ) { Text("Save") }
         }
     }
 }

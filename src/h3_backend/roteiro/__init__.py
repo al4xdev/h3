@@ -869,14 +869,14 @@ class Roteiro:
                 raise FileNotFoundError("Unknown planned block")
             remaining = [b for b in doc.blocks if b.id != key]
             if doc.adopted and not remaining:
-                raise Conflict("Um roteiro adotado precisa de pelo menos um bloco")
+                raise Conflict("An adopted roteiro requires at least one block")
             owned = [a for a in doc.attempts if a.block_id == key]
             with self.observing():
                 if any(self.observed(a)["state"] in {"uncertain", "queued", "running"}
                        for a in doc.attempts):
-                    raise Conflict("Uma tentativa está ativa ou incerta; consulte-a antes de remover")
+                    raise Conflict("An attempt is active or uncertain; check it before removing")
                 if any(self.observed(a)["state"] == "ready_for_review" for a in owned):
-                    raise Conflict("Aceite ou recuse o vídeo deste bloco antes de removê-lo")
+                    raise Conflict("Accept or reject this block's video before removing it")
                 # Editorial mode: pin every accepted version so Tail and the batch follow the
                 # visible order instead of requiring an exact generation chain across the cut.
                 selected = {k: v for k, v in doc.selected_runs.items() if k != key}

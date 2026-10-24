@@ -44,40 +44,40 @@ fun SettingsScreen(vm: AppViewModel) {
     var storageTick by remember { mutableIntStateOf(0) }
     val (count, bytes, cache) = remember(storageTick) { vm.storageInfo() }
 
-    TopBar("Ajustes", null)
+    TopBar("Settings", null)
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-        SectionTitle("Servidor do PC")
-        SingleField(url, { url = it }, "Endereço (http://IP:porta)")
+        SectionTitle("PC server")
+        SingleField(url, { url = it }, "Address (http://IP:port)")
         Spacer(Modifier.height(8.dp))
-        SecondaryButton("Testar e usar", { vm.testServer(url) }, busy = vm.isBusy("server"))
-        Muted(if (vm.live) "Atualização ao vivo conectada." else "Atualização ao vivo desconectada.")
+        SecondaryButton("Test and connect", { vm.testServer(url) }, busy = vm.isBusy("server"))
+        Muted(if (vm.live) "Live updates connected." else "Live updates disconnected.")
 
-        SectionTitle("Notificações")
-        Muted(vm.settings.fcmToken?.let { "Ativas · token …${it.takeLast(4)}" } ?: "Sem token ainda")
+        SectionTitle("Notifications")
+        Muted(vm.settings.fcmToken?.let { "Active · token …${it.takeLast(4)}" } ?: "No token yet")
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Baixar vídeo pronto para ver offline", color = H3Palette.TextPrimary, modifier = Modifier.weight(1f))
+            Text("Download ready videos for offline viewing", color = H3Palette.TextPrimary, modifier = Modifier.weight(1f))
             Switch(checked = autoDownload, onCheckedChange = { autoDownload = it; vm.settings.autoDownload = it })
         }
-        SecondaryButton("Registrar este aparelho no PC", vm::registerNotifications)
+        SecondaryButton("Register this device on PC", vm::registerNotifications)
 
-        SectionTitle("Armazenamento neste aparelho")
-        Muted("Vídeos baixados: $count · ${bytes / (1024 * 1024)} MB · miniaturas ${cache / (1024 * 1024)} MB")
+        SectionTitle("Storage on this device")
+        Muted("Downloaded videos: $count · ${bytes / (1024 * 1024)} MB · thumbnails ${cache / (1024 * 1024)} MB")
         Spacer(Modifier.height(6.dp))
-        SecondaryButton("Limpar", { vm.clearStorage(); storageTick++ }, danger = true)
+        SecondaryButton("Clear", { vm.clearStorage(); storageTick++ }, danger = true)
 
         SectionTitle("Grok")
-        Muted("Duração e seed não ficam aqui: pertencem a cada bloco.")
+        Muted("Duration and seed are not here: they belong to each block.")
         EditorCard(
-            vm, ApiClient.ROTEIRO_EDITOR, "Roteiro completo",
-            note = "A proposta nova usa o narrador: script, paleta e um cartão por bloco. " +
-                "Tarefa e formato viajam no código, então este texto salvo é só registro e " +
-                "não é enviado ao Grok.",
+            vm, ApiClient.ROTEIRO_EDITOR, "Full script",
+            note = "The new proposal uses the narrator: script, palette, and one card per block. " +
+                "Task and format travel in code, so this saved text is only a reference record and " +
+                "is not sent to Grok.",
             editable = false,
         )
         Spacer(Modifier.height(10.dp))
-        EditorCard(vm, ApiClient.GROK_EDITOR, "Melhoria por bloco")
+        EditorCard(vm, ApiClient.GROK_EDITOR, "Per-block refinement")
         Spacer(Modifier.height(10.dp))
-        EditorCard(vm, ApiClient.EDIT_EDITOR, "Edição entre vídeos")
+        EditorCard(vm, ApiClient.EDIT_EDITOR, "In-between video editing")
         Spacer(Modifier.height(32.dp))
     }
 }
@@ -92,7 +92,7 @@ private fun EditorCard(vm: AppViewModel, path: String, title: String, note: Stri
             when {
                 config == null && remote?.error != null -> {
                     Muted(remote.error)
-                    SecondaryButton("Tentar de novo", { vm.loadEditors() })
+                    SecondaryButton("Try again", { vm.loadEditors() })
                 }
                 config == null -> Loading()
                 else -> {
@@ -100,17 +100,17 @@ private fun EditorCard(vm: AppViewModel, path: String, title: String, note: Stri
                         Muted(note)
                         Spacer(Modifier.height(6.dp))
                     }
-                    Muted("Modelo fixo: ${config.model.ifBlank { "—" }}")
+                    Muted("Fixed model: ${config.model.ifBlank { "—" }}")
                     Spacer(Modifier.height(6.dp))
                     if (editable) {
                         var text by rememberSaveable(path, config.systemPrompt) { mutableStateOf(config.systemPrompt) }
                         TextArea(text, { text = it }, "System prompt", minLines = 6, maxChars = 100000)
                         Spacer(Modifier.height(8.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            PrimaryButton("Salvar", { vm.saveEditor(path, text) },
+                            PrimaryButton("Save", { vm.saveEditor(path, text) },
                                 enabled = text != config.systemPrompt && text.isNotBlank(),
                                 busy = vm.isBusy("editor:$path"))
-                            if (text != config.systemPrompt) Muted("Alterado; ainda não salvo no PC.")
+                            if (text != config.systemPrompt) Muted("Changed; not yet saved on PC.")
                         }
                     } else {
                         // Read-only keeps the stored writer prompt visible without implying an effect.

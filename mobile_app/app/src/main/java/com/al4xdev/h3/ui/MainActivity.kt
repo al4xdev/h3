@@ -131,13 +131,13 @@ fun H3Root(vm: AppViewModel) {
     vm.invalidAnswer?.let { raw ->
         AlertDialog(
             onDismissRequest = vm::dismissInvalid,
-            title = { Text("Resposta inválida do Grok") },
+            title = { Text("Invalid Grok response") },
             text = {
                 SelectionContainer {
                     Text(raw, modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()))
                 }
             },
-            confirmButton = { TextButton(onClick = vm::dismissInvalid) { Text("Fechar") } },
+            confirmButton = { TextButton(onClick = vm::dismissInvalid) { Text("Close") } },
             containerColor = H3Palette.SurfaceElevated,
         )
     }
@@ -159,5 +159,5 @@ private fun ScreenContent(vm: AppViewModel, screen: Screen) {
     }
 }
 
-/** ⚙ from any screen except Ajustes itself. */
+/** ⚙ from any screen except Settings itself. */
 fun AppViewModel.settingsAction(): (() -> Unit)? = if (top == Screen.Settings) null else ({ push(Screen.Settings) })

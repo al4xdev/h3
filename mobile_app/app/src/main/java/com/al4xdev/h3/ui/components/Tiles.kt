@@ -64,12 +64,12 @@ private fun badge(state: BlockState): String = when (state) {
 }
 
 fun stateLabel(state: BlockState): String = when (state) {
-    BlockState.ACCEPTED -> "aceito"
-    BlockState.REVIEW -> "pronto para revisão"
-    BlockState.ACTIVE -> "na fila ou gerando"
-    BlockState.UNCERTAIN -> "envio incerto"
-    BlockState.FAILED -> "recusado, interrompido ou falhou"
-    BlockState.PLANNED -> "planejado"
+    BlockState.ACCEPTED -> "accepted"
+    BlockState.REVIEW -> "ready for review"
+    BlockState.ACTIVE -> "queued or generating"
+    BlockState.UNCERTAIN -> "uncertain submission"
+    BlockState.FAILED -> "rejected, interrupted or failed"
+    BlockState.PLANNED -> "planned"
 }
 
 /**
@@ -104,7 +104,7 @@ fun BlockTile(
                 )
                 .combinedClickable(interactionSource = interaction, indication = LocalIndication.current,
                     onClick = onClick, onLongClick = onLongClick)
-                .semantics { contentDescription = "Bloco $number, ${stateLabel(state)}" },
+                .semantics { contentDescription = "Block $number, ${stateLabel(state)}" },
         ) {
             if (thumbRunId != null) {
                 val local = remember(thumbRunId) { localFile(thumbRunId) }
@@ -133,7 +133,7 @@ fun BlockTile(
             Box(
                 Modifier.align(Alignment.CenterStart).offset(x = (-13).dp).size(22.dp).clip(CircleShape)
                     .background(H3Palette.Cut).clickable(onClick = onCut)
-                    .semantics { contentDescription = "Corte antes do bloco $number" },
+                    .semantics { contentDescription = "Cut before block $number" },
                 contentAlignment = Alignment.Center,
             ) { Text("⚡", fontSize = 12.sp) }
         }

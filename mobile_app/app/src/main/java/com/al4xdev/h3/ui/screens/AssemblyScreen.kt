@@ -36,12 +36,12 @@ import com.al4xdev.h3.ui.components.VideoPlayer
 import com.al4xdev.h3.ui.settingsAction
 import com.al4xdev.h3.ui.theme.H3Palette
 
-/** T8: editorial assembly of the selected versions; "Montar de novo" only after the selection changed. */
+/** T8: editorial assembly of the selected versions; "Assemble again" only after the selection changed. */
 @Composable
 fun AssemblyScreen(vm: AppViewModel, roteiroId: String) {
     LaunchedEffect(roteiroId) { vm.ensureRoteiro(roteiroId); vm.loadAssemblies() }
     val doc = vm.doc(roteiroId)
-    TopBar("Montagem", vm.settingsAction())
+    TopBar("Assembly", vm.settingsAction())
     if (doc == null) { Loading(); return }
     val runs = RoteiroLogic.selectedAcceptedRuns(doc)
     val list = vm.assemblies.value.orEmpty().filter { it.roteiroId == roteiroId }.sortedByDescending { it.createdAt.orEmpty() }
@@ -53,34 +53,34 @@ fun AssemblyScreen(vm: AppViewModel, roteiroId: String) {
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
         if (vm.assemblies.error != null && vm.assemblies.value == null) {
-            ErrorCard("PC inacessível", technical(vm.assemblies.error)) { vm.loadAssemblies() }
+            ErrorCard("PC unreachable", technical(vm.assemblies.error)) { vm.loadAssemblies() }
         }
         if (shown != null && shown.completed) {
             VideoPlayer(vm.api.url("/assemblies/${shown.id}/video"), Modifier.height(460.dp))
             Spacer(Modifier.height(6.dp))
             Muted("${shown.frames ?: "?"} frames · ${shown.fps ?: 24} fps · ID ${shown.id.take(8)}" +
-                if (shown.inputIds == runs) " · seleção atual" else " · seleção anterior")
+                if (shown.inputIds == runs) " · current selection" else " · previous selection")
             Spacer(Modifier.height(8.dp))
-            SecondaryButton("Baixar no celular", { vm.downloadAssembly(shown, roteiroId) })
-        } else if (vm.assemblies.loading) Loading() else Muted("Nenhuma montagem pronta deste roteiro.")
+            SecondaryButton("Download to phone", { vm.downloadAssembly(shown, roteiroId) })
+        } else if (vm.assemblies.loading) Loading() else Muted("No assembly ready for this script.")
 
         Spacer(Modifier.height(12.dp))
         if (pending.isNotEmpty()) PendingCard(pending, { vm.isBusy("consult:${it.id}") }, vm::inFlight, vm::consult)
         val reason = when {
-            runs == null -> "Todos os blocos precisam de uma versão aceita para montar."
-            vm.batchOn(roteiroId) != null -> "Lote em andamento neste roteiro."
-            pending.isNotEmpty() -> "Consulte a montagem sem resposta antes."
+            runs == null -> "All blocks need an accepted version to assemble."
+            vm.batchOn(roteiroId) != null -> "Batch in progress for this script."
+            pending.isNotEmpty() -> "Check the unconfirmed assembly first."
             else -> null
         }
         if (current == null) {
             BlockedReason(reason)
-            PrimaryButton(if (list.isEmpty()) "Montar vídeo" else "Montar de novo (seleção mudou)", { vm.assemble(roteiroId) },
+            PrimaryButton(if (list.isEmpty()) "Assemble video" else "Assemble again (selection changed)", { vm.assemble(roteiroId) },
                 enabled = reason == null, busy = assembling)
-            if (assembling) Muted("Montando no PC (FFmpeg). Com muitos blocos leva alguns minutos.")
+            if (assembling) Muted("Assembling on PC (FFmpeg). With many blocks this may take a few minutes.")
         }
 
         if (list.isNotEmpty()) {
-            SectionTitle("Montagens deste roteiro")
+            SectionTitle("Assemblies for this script")
             list.forEach { a ->
                 Text(
                     "${if (a.id == shown?.id) "▶ " else ""}${a.id.take(8)} · ${a.state} · ${a.frames ?: "?"} frames · ${a.createdAt.orEmpty().take(16)}",

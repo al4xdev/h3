@@ -38,18 +38,18 @@ import com.al4xdev.h3.ui.components.runVideoUri
 import com.al4xdev.h3.ui.settingsAction
 import com.al4xdev.h3.ui.theme.H3Palette
 
-/** "Assistir em sequência": consecutive playable blocks from `fromBlockId`, no server-side file. */
+/** "Watch sequence": consecutive playable blocks from `fromBlockId`, no server-side file. */
 @Composable
 fun WatchScreen(vm: AppViewModel, roteiroId: String, fromBlockId: String) {
     LaunchedEffect(roteiroId) { vm.ensureRoteiro(roteiroId) }
     var fullscreen by rememberSaveable { mutableStateOf(false) }
-    if (!fullscreen) TopBar("Assistir em sequência", vm.settingsAction())
+    if (!fullscreen) TopBar("Watch sequence", vm.settingsAction())
     val doc = vm.doc(roteiroId) ?: return Loading()
     val from = doc.index(fromBlockId)
     // Snapshot at entry: SSE refreshes of the roteiro must not rebuild the player mid-film.
     val items = remember(roteiroId, fromBlockId, doc.id) { if (from < 0) emptyList() else Sequence.playable(doc, from) }
     if (items.isEmpty()) {
-        Muted("O bloco ${from + 1} não tem versão aceita ou pronta para assistir.", Modifier.padding(16.dp))
+        Muted("Block ${from + 1} has no accepted or ready version to watch.", Modifier.padding(16.dp))
         return
     }
     val base = vm.api.base()
@@ -85,8 +85,8 @@ fun WatchScreen(vm: AppViewModel, roteiroId: String, fromBlockId: String) {
         val last = items.last().blockIndex + 1
         val stop = doc.blocks.getOrNull(items.last().blockIndex + 1)
         Muted(
-            "Blocos ${items.first().blockIndex + 1}–$last · ${minutesLabel(items.sumOf { it.placeholderMs } / 1000.0)}" +
-                (if (stop != null) " · para antes do bloco ${last + 1} (sem versão para assistir)" else ""),
+            "Blocks ${items.first().blockIndex + 1}–$last · ${minutesLabel(items.sumOf { it.placeholderMs } / 1000.0)}" +
+                (if (stop != null) " · stops before block ${last + 1} (no version to watch)" else ""),
             Modifier.padding(16.dp),
         )
     }
