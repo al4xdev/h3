@@ -76,3 +76,12 @@ def test_markdown_artifact_is_literal_and_never_overwritten(tmp_path):
         store.artifact_markdown(run.id, "replacement")
     assert path.read_bytes() == text.encode("utf-8")
     assert not list(store.directory(run.id).glob(".prompt-*"))
+
+
+def test_list_inputs_ignores_removed_runs(tmp_path):
+    import json
+    store = Store(tmp_path)
+    run = store.create(make_run())
+    (store.directory(run.id) / "removed.json").write_text(json.dumps({"id": run.id, "removed": True}))
+    items, total = store.list_inputs()
+    assert total == 0 and items == []

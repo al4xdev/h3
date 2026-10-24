@@ -287,7 +287,12 @@ class Store:
             for index, manifest in enumerate(self.runs.glob("*/manifest.json")):
                 if index >= 10000:
                     raise ValueError("Run image catalog exceeds metadata capacity")
-                run = self.get(manifest.parent.name)
+                if self.removed(manifest.parent.name):
+                    continue
+                try:
+                    run = self.get(manifest.parent.name)
+                except FileNotFoundError:
+                    continue
                 for filename in sorted(IMAGE_NAMES):
                     source = self.relative_artifact(run.id, filename)
                     path = self.own_artifact(run.id, source, filename)
