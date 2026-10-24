@@ -164,7 +164,9 @@ class RunService:
         if self._closing or self._active == run_id:
             return
         try:
-            self._candidates.put_nowait((run_id, self._active is not None or self._cpu_active is not None or self._lock.locked()))
+            self._candidates.put_nowait(
+                (run_id, self._active is not None or self._cpu_active is not None)
+            )
         except asyncio.QueueFull:
             self._reject_hint(run_id, "Request hint capacity exceeded; no automatic replay")
 

@@ -309,7 +309,7 @@ class ApiClient(private val baseUrl: () -> String) {
     /** `/grok/editor` takes the (fixed) model too; the roteiro editors take only the prompt. */
     suspend fun saveEditor(path: String, systemPrompt: String, model: String?) = call("PUT", path, buildJsonObject {
         put("system_prompt", systemPrompt)
-        if (model != null) put("model", model)
+        if (model != null && path != ROTEIRO_EDITOR) put("model", model)
     }).map { EditorConfig.parse(it.req()) }
 
     // ---- notifications ----

@@ -255,8 +255,11 @@ async def test_ten_blocks_from_one_event_keep_parts_and_requested_duration(tmp_p
     fake = FakeGrok(titles=["Palco"])
     candidate = await op.propose(doc.id, ProposalRequest(
         expected_revision=doc.revision, count=10, duration_seconds=8, seed=4), fake)
+    from h3_backend.roteiro.narrator import roles_for
+
+    roles = roles_for(10)
     assert [b["action"] for b in candidate["blocks"]] == [
-        f"Palco · do — parte {i}/10" for i in range(1, 11)]
+        f"Palco · {role} — parte {i}/10" for i, role in enumerate(roles, start=1)]
     assert all(b["duration_seconds"] == 8.0 for b in candidate["blocks"])
     assert len([s for s in fake.schemas if s["schema_name"] == "h3_roteiro_card"]) == 10
     await service.shutdown()

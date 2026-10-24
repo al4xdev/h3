@@ -78,7 +78,10 @@ def script_request(base: dict, context: dict, count: int, seconds: float) -> Pro
     Callers record it before reserving a durable candidate, so stored evidence matches the wire.
     """
     prompt = SCRIPT_TEMPLATE.format(chunk_text=_payload(script_body(context, count, seconds)))
-    return PromptRequest(**{**base, "system_prompt": NARRATOR_SYSTEM}, prompt=prompt)
+    system_prompt = base.get("system_prompt")
+    if not system_prompt or system_prompt == "ignored":
+        system_prompt = NARRATOR_SYSTEM
+    return PromptRequest(**{**base, "system_prompt": system_prompt}, prompt=prompt)
 
 
 class StrictModel(BaseModel):
@@ -178,9 +181,9 @@ def assign_counts(event_count: int, count: int) -> list[int]:
 def roles_for(size: int) -> list[str]:
     roles = []
     for index in range(size):
-        if index < EVENT_CEILING:
+        if index == 0:
             roles.append("do")
-        elif (index - EVENT_CEILING) % 2 == 0:
+        elif (index - 1) % 2 == 0:
             roles.append("approach")
         else:
             roles.append("hold")
@@ -188,7 +191,10 @@ def roles_for(size: int) -> list[str]:
 
 
 def speech_line(line: str) -> str:
-    return SOUTHERN_SPEECH.format(line=line)
+    cleaned = line.strip()
+    if not cleaned:
+        return NO_SPEECH
+    return SOUTHERN_SPEECH.format(line=cleaned)
 
 
 def card_marks_error(card: BlockCard, slot: BlockSlot) -> str | None:
@@ -200,8 +206,9 @@ def card_marks_error(card: BlockCard, slot: BlockSlot) -> str | None:
     camera = f"Câmera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
     if "Câmera:" in card.instruction and camera not in card.instruction:
         return "Card wrote its own camera instead of the assigned one"
+    has_dialogue = bool(slot.owns_dialogue and slot.dialogue and slot.dialogue.strip())
     if SPEECH_MARK in card.instruction and not (
-            slot.owns_dialogue and speech_line(slot.dialogue or "") in card.instruction):
+            has_dialogue and speech_line(slot.dialogue or "") in card.instruction):
         return "Card wrote a speech line the code did not assign"
     return None
 
@@ -211,8 +218,9 @@ def finish_instruction(text: str, slot: BlockSlot) -> str:
     camera = f"Câmera: {slot.camera_focus}" if slot.camera_focus else CAMERA_LOCKED
     if camera not in body:
         body = f"{body}\n{camera}"
-    if slot.owns_dialogue and slot.dialogue:
-        line = speech_line(slot.dialogue)
+    has_dialogue = bool(slot.owns_dialogue and slot.dialogue and slot.dialogue.strip())
+    if has_dialogue:
+        line = speech_line(slot.dialogue or "")
         if line not in body:
             body = f"{body}\n{line}"
     elif NO_SPEECH not in body:
@@ -379,7 +387,10 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
     """Script, optional palette, local enrichment, then one card call per slot."""
     from . import Block
 
-    call_base = {**base, "system_prompt": NARRATOR_SYSTEM}
+    system_prompt = base.get("system_prompt")
+    if not system_prompt or system_prompt == "ignored":
+        system_prompt = NARRATOR_SYSTEM
+    call_base = {**base, "system_prompt": system_prompt}
     outcome: dict[str, Any] = {
         "name": None, "blocks": [], "draft_scenes": [], "scenes": [], "vision": None,
         "slices": [], "raw_texts": [], "error": None, "detail": None,
@@ -428,7 +439,8 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
     if short:
         try:
             palettes, raws = await _run(
-                grok, call_base, "h3_roteiro_palette", short, PALETTE_TEMPLATE, Palette)
+                grok, call_base, "h3_roteiro_palette", short, PALETTE_TEMPLATE, Palette,
+                propagate_provider=True)
         except (OSError, OAuthError, TimeoutError):
             raise
         except NarratorInvalid as exc:
@@ -459,7 +471,8 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
         chunks = worker_chunks(slots)
         answers, raws = await _run(
             grok, call_base, "h3_roteiro_card", chunks, CARD_TEMPLATE,
-            card_model([event.title for event in script.events]), _globals(script, context))
+            card_model([event.title for event in script.events]), _globals(script, context),
+            propagate_provider=True)
     except (OSError, OAuthError, TimeoutError):
         raise
     except ValueError as exc:
@@ -487,7 +500,8 @@ async def narrate(grok, base: dict, context: dict, count: int, seconds: float, s
         if invented is not None:
             return _invalid(outcome, invented)
         instruction = finish_instruction(card.instruction, slot)
-        if slot.owns_dialogue:
+        has_dialogue = bool(slot.owns_dialogue and slot.dialogue and slot.dialogue.strip())
+        if has_dialogue:
             if speech_line(slot.dialogue or "") not in instruction:
                 return _invalid(outcome, "Speech placeholder was not applied")
         elif NO_SPEECH not in instruction:

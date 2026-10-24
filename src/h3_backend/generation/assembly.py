@@ -283,7 +283,9 @@ def _verify_output(intent: AssemblyIntent, probe: dict):
         raise ValueError("Assembled output lost frames or changed geometry, rate or audio presence")
     if first.has_audio:
         audio = next(s for s in probe["streams"] if s["codec_type"] == "audio")
-        duration = float(audio.get("duration", "nan"))
+        duration = float(audio.get("duration", probe.get("format", {}).get("duration", "nan")))
+        if not math.isfinite(duration):
+            duration = float(probe.get("format", {}).get("duration", "nan"))
         expected = actual["frames"] / float(Fraction(first.fps))
         if (audio.get("codec_name") != "aac" or int(audio.get("sample_rate", 0)) <= 0
                 or int(audio.get("channels", 0)) <= 0 or not math.isfinite(duration)

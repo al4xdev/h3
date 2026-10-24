@@ -645,7 +645,8 @@ class Roteiro:
         outcome = await self.plan(grok, base, context, payload.count, payload.duration_seconds,
                                   payload.seed, progress)
         candidate = {"id": candidate_id, "roteiro_id": doc.id, "source_revision": doc.revision,
-                     "source": source, "raw_text": outcome["raw_texts"][0],
+                     "source": source,
+                     "raw_text": outcome.get("raw_texts", [""])[0] if outcome.get("raw_texts") else "",
                      **{key: outcome[key] for key in PLAN_EVIDENCE}, "stale": False}
         if outcome["error"]:
             candidate.update(error=outcome["error"], detail=outcome["detail"])
@@ -792,7 +793,7 @@ class Roteiro:
 
         def progress(outcome):
             candidate.update({key: outcome[key] for key in PLAN_EVIDENCE},
-                             raw_text=outcome["raw_texts"][0])
+                             raw_text=outcome.get("raw_texts", [""])[0] if outcome.get("raw_texts") else "")
             with (_directory(self.root, (".data", "roteiros", doc.id)) as directory,
                   locked(directory)):
                 write_file(directory, f"tail-{tail_id}.json", candidate)
@@ -809,7 +810,7 @@ class Roteiro:
                     write_file(directory, f"tail-{tail_id}.json", candidate)
             raise
         candidate.update({key: outcome[key] for key in PLAN_EVIDENCE},
-                         raw_text=outcome["raw_texts"][0])
+                         raw_text=outcome.get("raw_texts", [""])[0] if outcome.get("raw_texts") else "")
         if outcome["error"]:
             candidate.update(state="invalid", error=outcome["error"], detail=outcome["detail"])
         else:

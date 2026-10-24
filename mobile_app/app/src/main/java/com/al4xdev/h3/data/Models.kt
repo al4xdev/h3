@@ -341,6 +341,8 @@ data class Scene(
     val anatomy: List<String> = emptyList(),
     val expressions: List<String> = emptyList(),
     val deltas: List<String> = emptyList(),
+    val camera_focus: String? = null,
+    val keeps: List<String> = emptyList(),
 ) {
     val seconds: Double get() = beats.sumOf { it.seconds }
     val isEvent: Boolean get() = beats.isEmpty() && intent != null
@@ -361,6 +363,8 @@ data class Scene(
         if (anatomy.isNotEmpty()) put("anatomy", stringsJson(anatomy))
         if (expressions.isNotEmpty()) put("expressions", stringsJson(expressions))
         if (deltas.isNotEmpty()) put("deltas", stringsJson(deltas))
+        camera_focus?.let { put("camera_focus", it) }
+        if (keeps.isNotEmpty()) put("keeps", stringsJson(keeps))
     }
 
     companion object {
@@ -375,6 +379,8 @@ data class Scene(
             anatomy = o.strings("anatomy"),
             expressions = o.strings("expressions"),
             deltas = o.strings("deltas"),
+            camera_focus = o.str("camera_focus")?.takeIf { it.isNotBlank() },
+            keeps = o.strings("keeps"),
         )
 
         fun parseList(o: JsonObject): List<Scene> = o.arrAt("scenes").mapNotNull { it.obj()?.let(::parse) }

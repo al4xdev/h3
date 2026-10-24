@@ -449,7 +449,8 @@ async def concatenate(chunks: list[Path], destination: Path) -> dict[str, Any]:
     filters = []
     inputs = []
     for index, stream in enumerate(video_streams):
-        duration = float(stream["duration"])
+        details = probes[index]
+        duration = float(stream.get("duration") or details["format"]["duration"])
         filters.append(f"[{index}:v]setpts=PTS-STARTPTS[v{index}]")
         inputs.append(f"[v{index}]")
         if have_audio[0]:

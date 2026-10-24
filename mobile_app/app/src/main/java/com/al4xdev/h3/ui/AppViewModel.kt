@@ -594,20 +594,25 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
     fun consult(p: PendingOp) = op("consult:${p.id}") {
         // A read racing its own POST could see 404 and drop a record that is about to exist.
         if (inFlight(p)) return@op
-        val rid = p.roteiroId
         when (p.kind) {
-            OpKind.BATCH -> when (val r = api.batch(rid!!, p.id)) {
-                is ApiResult.Ok -> { resolve(p.id); batch = r.value.takeIf { it.active } ?: batch; say("Lote encontrado: ${r.value.describe()}") }
-                is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este lote. Pode gerar de novo.") } else say(r.message())
-                else -> say(r.message())
-            }
-            OpKind.SEGMENT -> when (val r = api.segment(rid!!, p.id)) {
-                // "uncertain" = Grok still planning on the PC: keep the record, only a later GET resolves it.
-                is ApiResult.Ok -> if (r.value.state == "uncertain") say("Planejamento ainda em andamento no PC.") else {
-                    resolve(p.id); acceptSegment(rid, p.blockId, r.value)
+            OpKind.BATCH -> {
+                val rid = p.roteiroId ?: return@op
+                when (val r = api.batch(rid, p.id)) {
+                    is ApiResult.Ok -> { resolve(p.id); batch = r.value.takeIf { it.active } ?: batch; say("Lote encontrado: ${r.value.describe()}") }
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este lote. Pode gerar de novo.") } else say(r.message())
+                    else -> say(r.message())
                 }
-                is ApiResult.Http -> if (r.code == 404) { resolve(p.id); clearSegmentId(rid, p.blockId); say("O PC não registrou este planejamento.") } else say(r.message())
-                else -> say(r.message())
+            }
+            OpKind.SEGMENT -> {
+                val rid = p.roteiroId ?: return@op
+                when (val r = api.segment(rid, p.id)) {
+                    // "uncertain" = Grok still planning on the PC: keep the record, only a later GET resolves it.
+                    is ApiResult.Ok -> if (r.value.state == "uncertain") say("Planejamento ainda em andamento no PC.") else {
+                        resolve(p.id); acceptSegment(rid, p.blockId, r.value)
+                    }
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); clearSegmentId(rid, p.blockId); say("O PC não registrou este planejamento.") } else say(r.message())
+                    else -> say(r.message())
+                }
             }
             OpKind.ASSEMBLY -> when (val r = api.assembly(p.id)) {
                 is ApiResult.Ok -> if (r.value.state == "running") say("A montagem ainda está em andamento no PC.") else {
@@ -616,26 +621,33 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou esta montagem.") } else say(r.message())
                 else -> say(r.message())
             }
-            OpKind.ATTEMPT -> when (val r = api.getAttempt(rid!!, p.blockId!!, p.id)) {
-                is ApiResult.Ok -> when (r.value.admission) {
-                    "admitted" -> { resolve(p.id); say("Envio confirmado: ${RunStates.label(r.value.state)}.") }
-                    "rejected" -> { resolve(p.id); say("O PC recusou este envio${r.value.error?.let { ": $it" } ?: ""}. Pode preparar outro.") }
-                    else -> say("Ainda incerto no PC. Consulte mais tarde.")
+            OpKind.ATTEMPT -> {
+                val rid = p.roteiroId ?: return@op
+                val bid = p.blockId ?: return@op
+                when (val r = api.getAttempt(rid, bid, p.id)) {
+                    is ApiResult.Ok -> when (r.value.admission) {
+                        "admitted" -> { resolve(p.id); say("Envio confirmado: ${RunStates.label(r.value.state)}.") }
+                        "rejected" -> { resolve(p.id); say("O PC recusou este envio${r.value.error?.let { ": $it" } ?: ""}. Pode preparar outro.") }
+                        else -> say("Ainda incerto no PC. Consulte mais tarde.")
+                    }
+                    is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este envio. Pode preparar de novo.") } else say(r.message())
+                    else -> say(r.message())
                 }
-                is ApiResult.Http -> if (r.code == 404) { resolve(p.id); say("O PC não registrou este envio. Pode preparar de novo.") } else say(r.message())
-                else -> say(r.message())
             }
-            OpKind.EDIT -> when (val r = api.edit(rid!!, p.id)) {
-                is ApiResult.Ok -> {
-                    edits[rid + ":" + r.value.blockId] = Remote(r.value)
-                    if (r.value.state == "improving") say("O Grok ainda está propondo esta edição no PC.")
-                    else { resolve(p.id); say("Edição: ${r.value.state}") }
+            OpKind.EDIT -> {
+                val rid = p.roteiroId ?: return@op
+                when (val r = api.edit(rid, p.id)) {
+                    is ApiResult.Ok -> {
+                        edits[rid + ":" + r.value.blockId] = Remote(r.value)
+                        if (r.value.state == "improving") say("O Grok ainda está propondo esta edição no PC.")
+                        else { resolve(p.id); say("Edição: ${r.value.state}") }
+                    }
+                    is ApiResult.Http -> if (r.code == 404) {
+                        resolve(p.id); p.blockId?.let { b -> if (drafts.editId(rid, b) == p.id) drafts.clearEditId(rid, b); edits.remove("$rid:$b") }
+                        say("O PC não registrou esta edição.")
+                    } else say(r.message())
+                    else -> say(r.message())
                 }
-                is ApiResult.Http -> if (r.code == 404) {
-                    resolve(p.id); p.blockId?.let { b -> if (drafts.editId(rid, b) == p.id) drafts.clearEditId(rid, b); edits.remove("$rid:$b") }
-                    say("O PC não registrou esta edição.")
-                } else say(r.message())
-                else -> say(r.message())
             }
             OpKind.DECISION -> when (val r = api.run(p.id)) {
                 is ApiResult.Ok -> {
@@ -646,7 +658,7 @@ class AppViewModel(app: Application, private val handle: SavedStateHandle) : And
                 else -> say(r.message())
             }
         }
-        rid?.let { reloadRoteiro(it) }
+        p.roteiroId?.let { reloadRoteiro(it) }
     }
 
     // ---------------- block actions ----------------

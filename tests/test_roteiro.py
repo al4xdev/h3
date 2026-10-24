@@ -182,7 +182,7 @@ async def test_candidate_separate_exact_count_seed_and_late_revision(tmp_path):
     assert all(block["seed"] == 42 and block["duration_seconds"] == 8
                for block in candidate["blocks"])
     assert [b["action"] for b in candidate["blocks"]] == [
-        "Sala · do — parte 1/2", "Sala · do — parte 2/2"]
+        "Sala · do — parte 1/2", "Sala · approach — parte 2/2"]
     assert candidate["scenes"] and candidate["draft_scenes"] and candidate["vision"] is None
     assert len(candidate["raw_texts"]) == 3 and candidate["raw_text"] == candidate["raw_texts"][0]
     assert not {b["id"] for b in candidate["blocks"]} & {b.id for b in doc.blocks}
